@@ -29,18 +29,13 @@ from .const import (
     CONF_MIN_PRICE_SPREAD,
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_PRICE_SENSOR,
-    CONF_PV_EFFICIENCY_FACTOR,
-    CONF_PV_ORIENTATION,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
+    CONF_PV_EFFICIENCY_FACTOR,
+    CONF_PV_EXTRA_ARRAYS,
+    CONF_PV_ORIENTATION,
     CONF_PV_PEAK_POWER_KWP,
     CONF_PV_TILT,
-    CONF_PV2_ORIENTATION,
-    CONF_PV2_PEAK_POWER_KWP,
-    CONF_PV2_TILT,
-    CONF_PV3_ORIENTATION,
-    CONF_PV3_PEAK_POWER_KWP,
-    CONF_PV3_TILT,
     CONF_TIME_STEP_MINUTES,
     DEFAULT_DEGRADATION_COST_PER_KWH,
     DEFAULT_FIXED_FEED_IN_PRICE,
@@ -52,12 +47,6 @@ from .const import (
     DEFAULT_PV_ORIENTATION,
     DEFAULT_PV_PEAK_POWER_KWP,
     DEFAULT_PV_TILT,
-    DEFAULT_PV2_ORIENTATION,
-    DEFAULT_PV2_PEAK_POWER_KWP,
-    DEFAULT_PV2_TILT,
-    DEFAULT_PV3_ORIENTATION,
-    DEFAULT_PV3_PEAK_POWER_KWP,
-    DEFAULT_PV3_TILT,
     DEFAULT_TIME_STEP_MINUTES,
     MODE_HYBRID,
     MODE_MANUAL,
@@ -189,34 +178,37 @@ class ForecastCoordinator(DataUpdateCoordinator):
             efficiency_factor=efficiency,
         )
 
-        # Additional AC PV arrays (different orientations)
+        # Additional PV arrays from dynamic list (AC and DC-coupled)
         self.pv_extra_models: list[PVForecastModel] = []
-        pv2_kwp = float(config.get(CONF_PV2_PEAK_POWER_KWP, DEFAULT_PV2_PEAK_POWER_KWP))
-        if pv2_kwp > 0:
-            self.pv_extra_models.append(
-                PVForecastModel(
-                    peak_power_kwp=pv2_kwp,
-                    orientation_deg=float(
-                        config.get(CONF_PV2_ORIENTATION, DEFAULT_PV2_ORIENTATION)
-                    ),
-                    tilt_deg=float(config.get(CONF_PV2_TILT, DEFAULT_PV2_TILT)),
-                    efficiency_factor=efficiency,
+        self.pv_extra_dc_models: list[PVForecastModel] = []
+        for arr in config.get(CONF_PV_EXTRA_ARRAYS, []):
+            kwp = float(arr.get("peak_power_kwp", 0))
+            if kwp <= 0:
+                continue
+            orientation = float(arr.get("orientation", 180))
+            tilt = float(arr.get("tilt", 35))
+            dc_coupled = bool(arr.get("dc_coupled", False))
+            if dc_coupled:
+                self.pv_extra_dc_models.append(
+                    PVForecastModel(
+                        peak_power_kwp=kwp,
+                        orientation_deg=orientation,
+                        tilt_deg=tilt,
+                        # DC PV uses raw panel efficiency (no inverter loss)
+                        efficiency_factor=1.0,
+                    )
                 )
-            )
-        pv3_kwp = float(config.get(CONF_PV3_PEAK_POWER_KWP, DEFAULT_PV3_PEAK_POWER_KWP))
-        if pv3_kwp > 0:
-            self.pv_extra_models.append(
-                PVForecastModel(
-                    peak_power_kwp=pv3_kwp,
-                    orientation_deg=float(
-                        config.get(CONF_PV3_ORIENTATION, DEFAULT_PV3_ORIENTATION)
-                    ),
-                    tilt_deg=float(config.get(CONF_PV3_TILT, DEFAULT_PV3_TILT)),
-                    efficiency_factor=efficiency,
+            else:
+                self.pv_extra_models.append(
+                    PVForecastModel(
+                        peak_power_kwp=kwp,
+                        orientation_deg=orientation,
+                        tilt_deg=tilt,
+                        efficiency_factor=efficiency,
+                    )
                 )
-            )
 
-        # DC-coupled PV model (panels on battery inverter)
+        # DC-coupled PV model for primary array (panels on battery inverter)
         # Uses same orientation/tilt as primary but different peak power and efficiency
         self.pv_dc_coupled = bool(config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED))
         self.pv_dc_model = PVForecastModel(
@@ -274,16 +266,23 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 pv_forecast[i] += extra_forecast[i]
                 net_load_forecast[i] -= extra_forecast[i]
 
-        # Generate DC-coupled PV forecast
+        # Generate DC-coupled PV forecast (primary DC + extra DC arrays)
         pv_dc_forecast = [0.0] * len(pv_forecast)
         current_dc_pv = 0.0
-        if self.pv_dc_coupled and self.pv_dc_model.peak_power_kwp > 0:
+        has_dc = self.pv_dc_coupled and self.pv_dc_model.peak_power_kwp > 0
+        if has_dc:
             pv_dc_forecast = self.pv_dc_model.forecast_from_radiation(
                 radiation_forecast
             )
-            # Pad if needed
             while len(pv_dc_forecast) < len(pv_forecast):
                 pv_dc_forecast.append(0.0)
+
+        # Add production from extra DC-coupled arrays
+        for dc_model in self.pv_extra_dc_models:
+            has_dc = True
+            extra_dc = dc_model.forecast_from_radiation(radiation_forecast)
+            for i in range(min(len(pv_dc_forecast), len(extra_dc))):
+                pv_dc_forecast[i] += extra_dc[i]
 
         # Derive current values from forecast (first element = current hour)
         current_pv = pv_forecast[0] if pv_forecast else 0.0
@@ -299,7 +298,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             "current_dc_pv_kw": round(current_dc_pv, 3),
             "current_consumption_kw": round(current_consumption, 3),
             "current_net_load_kw": round(current_consumption - current_pv, 3),
-            "pv_dc_coupled": self.pv_dc_coupled,
+            "pv_dc_coupled": has_dc,
             "timestamp": dt_util.utcnow(),
         }
 

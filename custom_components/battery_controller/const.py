@@ -37,12 +37,16 @@ CONF_PV_ORIENTATION = "pv_orientation"
 CONF_PV_TILT = "pv_tilt"
 CONF_PV_EFFICIENCY_FACTOR = "pv_efficiency_factor"
 
-# Configuration keys - PV array 2 (optional, e.g. east-facing)
+# Configuration keys - Extra PV arrays (dynamic list of dicts)
+# Each dict has: peak_power_kwp, orientation, tilt
+CONF_PV_EXTRA_ARRAYS = "pv_extra_arrays"
+
+# Legacy keys - PV array 2 (kept for migration from VERSION 1)
 CONF_PV2_PEAK_POWER_KWP = "pv2_peak_power_kwp"
 CONF_PV2_ORIENTATION = "pv2_orientation"
 CONF_PV2_TILT = "pv2_tilt"
 
-# Configuration keys - PV array 3 (optional, e.g. west-facing)
+# Legacy keys - PV array 3 (kept for migration from VERSION 1)
 CONF_PV3_PEAK_POWER_KWP = "pv3_peak_power_kwp"
 CONF_PV3_ORIENTATION = "pv3_orientation"
 CONF_PV3_TILT = "pv3_tilt"
