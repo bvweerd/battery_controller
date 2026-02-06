@@ -457,9 +457,7 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
                 self._data = data
                 # Preserve existing extra arrays for editing
                 existing = {**self.config_entry.data, **self.config_entry.options}
-                self._pv_extra_arrays = list(
-                    existing.get(CONF_PV_EXTRA_ARRAYS, [])
-                )
+                self._pv_extra_arrays = list(existing.get(CONF_PV_EXTRA_ARRAYS, []))
                 return await self.async_step_pv_menu()
 
         # Build defaults from existing config

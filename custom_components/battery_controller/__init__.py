@@ -46,7 +46,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # Convert legacy pv2/pv3 keys to pv_extra_arrays list
         extra_arrays: list[dict] = []
 
-        pv2_kwp = float(new_data.pop(CONF_PV2_PEAK_POWER_KWP, DEFAULT_PV2_PEAK_POWER_KWP))
+        pv2_kwp = float(
+            new_data.pop(CONF_PV2_PEAK_POWER_KWP, DEFAULT_PV2_PEAK_POWER_KWP)
+        )
         pv2_orient = float(new_data.pop(CONF_PV2_ORIENTATION, DEFAULT_PV2_ORIENTATION))
         pv2_tilt = float(new_data.pop(CONF_PV2_TILT, DEFAULT_PV2_TILT))
         if pv2_kwp > 0:
@@ -59,7 +61,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
                 }
             )
 
-        pv3_kwp = float(new_data.pop(CONF_PV3_PEAK_POWER_KWP, DEFAULT_PV3_PEAK_POWER_KWP))
+        pv3_kwp = float(
+            new_data.pop(CONF_PV3_PEAK_POWER_KWP, DEFAULT_PV3_PEAK_POWER_KWP)
+        )
         pv3_orient = float(new_data.pop(CONF_PV3_ORIENTATION, DEFAULT_PV3_ORIENTATION))
         pv3_tilt = float(new_data.pop(CONF_PV3_TILT, DEFAULT_PV3_TILT))
         if pv3_kwp > 0:
@@ -74,9 +78,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         new_data[CONF_PV_EXTRA_ARRAYS] = extra_arrays
 
-        hass.config_entries.async_update_entry(
-            config_entry, data=new_data, version=2
-        )
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=2)
         _LOGGER.info(
             "Migration complete: converted %d legacy PV arrays to pv_extra_arrays",
             len(extra_arrays),
