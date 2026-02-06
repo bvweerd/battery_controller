@@ -71,13 +71,14 @@ class BatteryControllerNumber(NumberEntity):
         self._key = key
 
     def _get_runtime_value(self, key: str, default: float) -> float:
-        """Get runtime value or fall back to config."""
-        runtime = self.hass.data.get(DOMAIN, {}).get("runtime", {})
-        return float(runtime.get(key, self._config.get(key, default)))
+        """Get runtime value from config entry options or data."""
+        return float(self._entry.options.get(key, self._entry.data.get(key, default)))
 
-    def _set_runtime_value(self, key: str, value: float) -> None:
-        """Set a runtime value."""
-        self.hass.data.setdefault(DOMAIN, {}).setdefault("runtime", {})[key] = value
+    async def _set_runtime_value(self, key: str, value: float) -> None:
+        """Set a runtime value in the config entry options."""
+        self.hass.config_entries.async_update_entry(
+            self._entry, options={**self._entry.options, key: value}
+        )
 
 
 class BatteryMinSoCNumber(BatteryControllerNumber):
@@ -100,7 +101,7 @@ class BatteryMinSoCNumber(BatteryControllerNumber):
         return self._get_runtime_value(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
 
     async def async_set_native_value(self, value: float) -> None:
-        self._set_runtime_value(CONF_MIN_SOC_PERCENT, value)
+        await self._set_runtime_value(CONF_MIN_SOC_PERCENT, value)
         self.async_write_ha_state()
 
 
@@ -124,7 +125,7 @@ class BatteryMaxSoCNumber(BatteryControllerNumber):
         return self._get_runtime_value(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
 
     async def async_set_native_value(self, value: float) -> None:
-        self._set_runtime_value(CONF_MAX_SOC_PERCENT, value)
+        await self._set_runtime_value(CONF_MAX_SOC_PERCENT, value)
         self.async_write_ha_state()
 
 
@@ -150,7 +151,7 @@ class DegradationCostNumber(BatteryControllerNumber):
         )
 
     async def async_set_native_value(self, value: float) -> None:
-        self._set_runtime_value(CONF_DEGRADATION_COST_PER_KWH, value)
+        await self._set_runtime_value(CONF_DEGRADATION_COST_PER_KWH, value)
         self.async_write_ha_state()
 
 
@@ -174,7 +175,7 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
         return self._get_runtime_value(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD)
 
     async def async_set_native_value(self, value: float) -> None:
-        self._set_runtime_value(CONF_MIN_PRICE_SPREAD, value)
+        await self._set_runtime_value(CONF_MIN_PRICE_SPREAD, value)
         self.async_write_ha_state()
 
 
@@ -200,5 +201,5 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
         )
 
     async def async_set_native_value(self, value: float) -> None:
-        self._set_runtime_value(CONF_ZERO_GRID_DEADBAND_W, value)
+        await self._set_runtime_value(CONF_ZERO_GRID_DEADBAND_W, value)
         self.async_write_ha_state()
