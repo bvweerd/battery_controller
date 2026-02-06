@@ -306,7 +306,9 @@ def create_zero_grid_controller(
             config.get(CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W)
         ),
         response_time_s=float(
-            config.get(CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S)
+            config.get(
+                CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
+            )
         ),
         priority=config.get(CONF_ZERO_GRID_PRIORITY, DEFAULT_ZERO_GRID_PRIORITY),
     )

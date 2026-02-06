@@ -123,17 +123,27 @@ class TestCalculateStepCost:
     def test_degradation_cost_added(self, battery_config):
         """Degradation cost is added to total."""
         cost_idle = calculate_step_cost(
-            time_step_hours=0.25, soc_wh=5000, action_w=0,
-            grid_price=0.10, feed_in_price=0.07,
-            pv_production_w=0, consumption_w=0,
-            rte=0.90, degradation_cost_per_kwh=0.03,
+            time_step_hours=0.25,
+            soc_wh=5000,
+            action_w=0,
+            grid_price=0.10,
+            feed_in_price=0.07,
+            pv_production_w=0,
+            consumption_w=0,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
         cost_charge = calculate_step_cost(
-            time_step_hours=0.25, soc_wh=5000, action_w=2000,
-            grid_price=0.10, feed_in_price=0.07,
-            pv_production_w=0, consumption_w=0,
-            rte=0.90, degradation_cost_per_kwh=0.03,
+            time_step_hours=0.25,
+            soc_wh=5000,
+            action_w=2000,
+            grid_price=0.10,
+            feed_in_price=0.07,
+            pv_production_w=0,
+            consumption_w=0,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
         # Charging adds degradation: 2000 * 0.25 / 1000 * 0.03 = 0.015
@@ -142,18 +152,28 @@ class TestCalculateStepCost:
     def test_dc_pv_charges_at_higher_efficiency(self, dc_battery_config):
         """DC-coupled PV charges more efficiently than AC."""
         cost_ac = calculate_step_cost(
-            time_step_hours=0.25, soc_wh=5000, action_w=2000,
-            grid_price=0.30, feed_in_price=0.07,
-            pv_production_w=3000, consumption_w=1000,
-            rte=0.90, degradation_cost_per_kwh=0.03,
+            time_step_hours=0.25,
+            soc_wh=5000,
+            action_w=2000,
+            grid_price=0.30,
+            feed_in_price=0.07,
+            pv_production_w=3000,
+            consumption_w=1000,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=0,  # No DC PV
         )
         cost_dc = calculate_step_cost(
-            time_step_hours=0.25, soc_wh=5000, action_w=2000,
-            grid_price=0.30, feed_in_price=0.07,
-            pv_production_w=1000, consumption_w=1000,
-            rte=0.90, degradation_cost_per_kwh=0.03,
+            time_step_hours=0.25,
+            soc_wh=5000,
+            action_w=2000,
+            grid_price=0.30,
+            feed_in_price=0.07,
+            pv_production_w=1000,
+            consumption_w=1000,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=2000,  # 2kW DC PV
         )
@@ -163,10 +183,15 @@ class TestCalculateStepCost:
     def test_dc_pv_excess_to_ac(self, dc_battery_config):
         """Excess DC PV goes to AC side through inverter."""
         cost = calculate_step_cost(
-            time_step_hours=0.25, soc_wh=5000, action_w=0,
-            grid_price=0.30, feed_in_price=0.07,
-            pv_production_w=0, consumption_w=1000,
-            rte=0.90, degradation_cost_per_kwh=0.03,
+            time_step_hours=0.25,
+            soc_wh=5000,
+            action_w=0,
+            grid_price=0.30,
+            feed_in_price=0.07,
+            pv_production_w=0,
+            consumption_w=1000,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=3000,  # 3kW DC PV, battery idle
         )
@@ -262,7 +287,9 @@ class TestOptimizeBatterySchedule:
         )
 
         for soc in result.soc_schedule_kwh:
-            assert soc >= battery_config.min_soc_kwh - 0.1  # Small tolerance for discretization
+            assert (
+                soc >= battery_config.min_soc_kwh - 0.1
+            )  # Small tolerance for discretization
             assert soc <= battery_config.max_soc_kwh + 0.1
 
     def test_empty_forecast_returns_empty(self, battery_config):
@@ -401,7 +428,9 @@ class TestHeuristics:
         assert should is True
 
     def test_no_discharge_at_low_soc(self):
-        should, reason = should_discharge_now(0.35, [0.10] * 5, 5.0, min_soc_percent=10.0)
+        should, reason = should_discharge_now(
+            0.35, [0.10] * 5, 5.0, min_soc_percent=10.0
+        )
         assert should is False
         assert "soc_low" in reason
 

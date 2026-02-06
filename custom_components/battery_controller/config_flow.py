@@ -122,9 +122,9 @@ def _build_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
     sensors_schema = vol.Schema(
         {
-            _req_entity(
-                CONF_PRICE_SENSOR, d.get(CONF_PRICE_SENSOR)
-            ): selector({"entity": {"domain": "sensor"}}),
+            _req_entity(CONF_PRICE_SENSOR, d.get(CONF_PRICE_SENSOR)): selector(
+                {"entity": {"domain": "sensor"}}
+            ),
             _req_entity(
                 CONF_BATTERY_SOC_SENSOR, d.get(CONF_BATTERY_SOC_SENSOR)
             ): selector(
@@ -165,9 +165,7 @@ def _build_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ): bool,
             vol.Optional(
                 CONF_PV_DC_PEAK_POWER_KWP,
-                default=d.get(
-                    CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP
-                ),
+                default=d.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP),
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_DC_EFFICIENCY,
@@ -223,9 +221,7 @@ def _build_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ): selector({"entity": {"domain": "sensor"}}),
             _opt_entity(
                 CONF_BATTERY_POWER_SENSOR, d.get(CONF_BATTERY_POWER_SENSOR)
-            ): selector(
-                {"entity": {"domain": "sensor", "device_class": "power"}}
-            ),
+            ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
             _opt_entity(
                 CONF_ELECTRICITY_CONSUMPTION_SENSORS, consumption_sensors or None
             ): energy_selector,
@@ -261,21 +257,15 @@ def _build_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
     if section is not None:
         fields: dict[Any, Any] = {
-            vol.Required("battery"): section(
-                battery_schema, {"collapsed": False}
-            ),
-            vol.Required("sensors"): section(
-                sensors_schema, {"collapsed": False}
-            ),
+            vol.Required("battery"): section(battery_schema, {"collapsed": False}),
+            vol.Required("sensors"): section(sensors_schema, {"collapsed": False}),
             vol.Optional("pv"): section(pv_schema, {"collapsed": True}),
             vol.Optional("pv2"): section(pv2_schema, {"collapsed": True}),
             vol.Optional("pv3"): section(pv3_schema, {"collapsed": True}),
             vol.Optional("optional_sensors"): section(
                 optional_sensors_schema, {"collapsed": True}
             ),
-            vol.Optional("advanced"): section(
-                advanced_schema, {"collapsed": True}
-            ),
+            vol.Optional("advanced"): section(advanced_schema, {"collapsed": True}),
         }
     else:
         # Fallback for older HA: flatten all fields into one form
@@ -310,9 +300,7 @@ def _extract_data(user_input: dict[str, Any]) -> dict[str, Any]:
 
     return {
         # Battery
-        CONF_CAPACITY_KWH: float(
-            _g(battery, CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)
-        ),
+        CONF_CAPACITY_KWH: float(_g(battery, CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
         CONF_MAX_CHARGE_POWER_KW: float(
             _g(battery, CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
         ),
@@ -326,16 +314,12 @@ def _extract_data(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_PV_PEAK_POWER_KWP: float(
             _g(pv, CONF_PV_PEAK_POWER_KWP, DEFAULT_PV_PEAK_POWER_KWP)
         ),
-        CONF_PV_ORIENTATION: float(
-            _g(pv, CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION)
-        ),
+        CONF_PV_ORIENTATION: float(_g(pv, CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION)),
         CONF_PV_TILT: float(_g(pv, CONF_PV_TILT, DEFAULT_PV_TILT)),
         CONF_PV_EFFICIENCY_FACTOR: float(
             _g(pv, CONF_PV_EFFICIENCY_FACTOR, DEFAULT_PV_EFFICIENCY_FACTOR)
         ),
-        CONF_PV_DC_COUPLED: bool(
-            _g(pv, CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)
-        ),
+        CONF_PV_DC_COUPLED: bool(_g(pv, CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)),
         CONF_PV_DC_PEAK_POWER_KWP: float(
             _g(pv, CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
         ),
@@ -406,14 +390,10 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _extract_data(user_input)
-            if not data.get(CONF_PRICE_SENSOR) or not data.get(
-                CONF_BATTERY_SOC_SENSOR
-            ):
+            if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                return self.async_create_entry(
-                    title="Battery Controller", data=data
-                )
+                return self.async_create_entry(title="Battery Controller", data=data)
 
         return self.async_show_form(
             step_id="user",
@@ -440,9 +420,7 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _extract_data(user_input)
-            if not data.get(CONF_PRICE_SENSOR) or not data.get(
-                CONF_BATTERY_SOC_SENSOR
-            ):
+            if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
                 errors["base"] = "missing_required"
             else:
                 return self.async_create_entry(title="", data=data)

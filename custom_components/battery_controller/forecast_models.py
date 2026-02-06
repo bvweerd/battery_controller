@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -49,6 +48,7 @@ class PVForecastModel:
             self.tilt_deg,
             self.efficiency_factor,
         )
+
 
 class ConsumptionForecastModel:
     """Model for household consumption forecasting.
@@ -203,9 +203,7 @@ class ConsumptionForecastModel:
             else:
                 # Fall back to default pattern
                 forecast.append(
-                    calculate_consumption_pattern(
-                        hour, dow, self.base_consumption_kw
-                    )
+                    calculate_consumption_pattern(hour, dow, self.base_consumption_kw)
                 )
 
         return forecast
@@ -268,8 +266,6 @@ class NetLoadForecast:
             consumption_forecast.append(self.consumption_model.base_consumption_kw)
 
         # Net load = consumption - PV (positive = import needed)
-        net_load_forecast = [
-            c - p for c, p in zip(consumption_forecast, pv_forecast)
-        ]
+        net_load_forecast = [c - p for c, p in zip(consumption_forecast, pv_forecast)]
 
         return pv_forecast, consumption_forecast, net_load_forecast

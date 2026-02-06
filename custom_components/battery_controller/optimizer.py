@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
 
 from .battery_model import BatteryConfig
 from .const import SOC_RESOLUTION_WH
@@ -89,7 +88,9 @@ def calculate_step_cost(
     """
     charge_eff = math.sqrt(rte)
     discharge_eff = math.sqrt(rte)
-    dc_eff = battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else charge_eff
+    dc_eff = (
+        battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else charge_eff
+    )
 
     # Handle DC-coupled PV
     # DC PV can charge battery directly at higher efficiency
@@ -193,7 +194,9 @@ def optimize_battery_schedule(
     # Discretize SoC space
     min_soc_wh = int(battery_config.min_soc_kwh * 1000)
     max_soc_wh = int(battery_config.max_soc_kwh * 1000)
-    soc_states = list(range(min_soc_wh, max_soc_wh + SOC_RESOLUTION_WH, SOC_RESOLUTION_WH))
+    soc_states = list(
+        range(min_soc_wh, max_soc_wh + SOC_RESOLUTION_WH, SOC_RESOLUTION_WH)
+    )
     n_soc_states = len(soc_states)
 
     # Initialize value function (cost-to-go)
@@ -215,16 +218,15 @@ def optimize_battery_schedule(
     discharge_actions = list(range(-int(max_discharge_w), 0, power_step_w))
     actions = discharge_actions + charge_actions
 
-    charge_eff = math.sqrt(battery_config.round_trip_efficiency)
-    discharge_eff = math.sqrt(battery_config.round_trip_efficiency)
-
     # Backward induction
     for t in range(n_steps - 1, -1, -1):
         grid_price = price_forecast[t]
         feed_in_price = feed_in_forecast[t] if t < len(feed_in_forecast) else grid_price
         pv_w = pv_forecast[t] * 1000 if t < len(pv_forecast) else 0
         pv_dc_w = pv_dc_forecast[t] * 1000 if t < len(pv_dc_forecast) else 0
-        consumption_w = consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
+        consumption_w = (
+            consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
+        )
 
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
@@ -315,7 +317,9 @@ def optimize_battery_schedule(
         feed_in_price = feed_in_forecast[t] if t < len(feed_in_forecast) else grid_price
         pv_w = pv_forecast[t] * 1000 if t < len(pv_forecast) else 0
         pv_dc_w = pv_dc_forecast[t] * 1000 if t < len(pv_dc_forecast) else 0
-        consumption_w = consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
+        consumption_w = (
+            consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
+        )
 
         # Without battery: DC PV excess goes to AC (through inverter)
         dc_pv_to_ac_w = pv_dc_w * 0.96 if pv_dc_w > 0 else 0

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -78,9 +77,7 @@ async def async_get_config_entry_diagnostics(
             "net_load_forecast_kw": forecast_coord.data.get("net_load_forecast_kw"),
             "current_pv_kw": forecast_coord.data.get("current_pv_kw"),
             "current_dc_pv_kw": forecast_coord.data.get("current_dc_pv_kw"),
-            "current_consumption_kw": forecast_coord.data.get(
-                "current_consumption_kw"
-            ),
+            "current_consumption_kw": forecast_coord.data.get("current_consumption_kw"),
             "current_net_load_kw": forecast_coord.data.get("current_net_load_kw"),
             "pv_dc_coupled": forecast_coord.data.get("pv_dc_coupled"),
             "timestamp": str(forecast_coord.data.get("timestamp")),

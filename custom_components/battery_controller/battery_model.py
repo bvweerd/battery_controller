@@ -52,7 +52,7 @@ class BatteryConfig:
         self.max_soc_kwh = self.capacity_kwh * self.max_soc_percent / 100.0
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "BatteryConfig":
+    def from_config(cls, config: dict[str, Any]) -> BatteryConfig:
         """Create BatteryConfig from Home Assistant config dict."""
         from .const import (
             CONF_CAPACITY_KWH,
@@ -94,9 +94,7 @@ class BatteryConfig:
             max_soc_percent=float(
                 config.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
             ),
-            pv_dc_coupled=bool(
-                config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)
-            ),
+            pv_dc_coupled=bool(config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)),
             pv_dc_peak_power_kwp=float(
                 config.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
             ),
@@ -117,13 +115,13 @@ class BatteryState:
     cycles_today: float = 0.0
 
     @classmethod
-    def from_soc_kwh(cls, soc_kwh: float, capacity_kwh: float) -> "BatteryState":
+    def from_soc_kwh(cls, soc_kwh: float, capacity_kwh: float) -> BatteryState:
         """Create BatteryState from SoC in kWh."""
         soc_percent = (soc_kwh / capacity_kwh) * 100.0 if capacity_kwh > 0 else 0.0
         return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)
 
     @classmethod
-    def from_soc_percent(cls, soc_percent: float, capacity_kwh: float) -> "BatteryState":
+    def from_soc_percent(cls, soc_percent: float, capacity_kwh: float) -> BatteryState:
         """Create BatteryState from SoC in percent."""
         soc_kwh = (soc_percent / 100.0) * capacity_kwh
         return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)

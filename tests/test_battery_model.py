@@ -25,14 +25,18 @@ class TestBatteryConfig:
         assert config.round_trip_efficiency == 0.90
 
     def test_derived_values(self):
-        config = BatteryConfig(capacity_kwh=10.0, min_soc_percent=10.0, max_soc_percent=90.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, min_soc_percent=10.0, max_soc_percent=90.0
+        )
         assert config.min_soc_kwh == pytest.approx(1.0)
         assert config.max_soc_kwh == pytest.approx(9.0)
         assert config.charge_efficiency == pytest.approx(math.sqrt(0.90))
         assert config.discharge_efficiency == pytest.approx(math.sqrt(0.90))
 
     def test_usable_capacity_auto(self):
-        config = BatteryConfig(capacity_kwh=10.0, min_soc_percent=10.0, max_soc_percent=90.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, min_soc_percent=10.0, max_soc_percent=90.0
+        )
         assert config.usable_capacity_kwh == pytest.approx(8.0)
 
     def test_usable_capacity_override(self):
@@ -168,29 +172,39 @@ class TestMaxPower:
     """Tests for max charge/discharge power functions."""
 
     def test_max_charge_at_low_soc(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
+        )
         power = calculate_max_charge_power(2.0, 1.0, config)
         # Lots of headroom -> should be limited by inverter
         assert power == pytest.approx(5.0, abs=0.5)
 
     def test_max_charge_near_full(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
+        )
         power = calculate_max_charge_power(8.8, 1.0, config)
         # Only 0.2 kWh headroom -> low power
         assert power < 1.0
 
     def test_max_charge_at_full(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
+        )
         power = calculate_max_charge_power(9.0, 1.0, config)
         assert power == 0.0
 
     def test_max_discharge_at_high_soc(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0
+        )
         power = calculate_max_discharge_power(8.0, 1.0, config)
         assert power == pytest.approx(5.0, abs=0.5)
 
     def test_max_discharge_at_min(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0)
+        config = BatteryConfig(
+            capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0
+        )
         power = calculate_max_discharge_power(1.0, 1.0, config)
         assert power == 0.0
 

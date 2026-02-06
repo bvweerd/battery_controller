@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -14,10 +13,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     CONTROL_MODES,
     DOMAIN,
-    MODE_FOLLOW_SCHEDULE,
-    MODE_HYBRID,
-    MODE_MANUAL,
-    MODE_ZERO_GRID,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,9 +29,7 @@ async def async_setup_entry(
     optimization_coordinator = data["optimization_coordinator"]
 
     entities = [
-        BatteryControlModeSelect(
-            hass, entry, device, optimization_coordinator
-        ),
+        BatteryControlModeSelect(hass, entry, device, optimization_coordinator),
     ]
 
     async_add_entities(entities)

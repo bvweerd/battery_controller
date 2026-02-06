@@ -30,7 +30,6 @@ from .const import (
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_PRICE_SENSOR,
     CONF_PV_EFFICIENCY_FACTOR,
-    CONF_PV_FORECAST_SENSOR,
     CONF_PV_ORIENTATION,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
@@ -60,8 +59,6 @@ from .const import (
     DEFAULT_PV3_PEAK_POWER_KWP,
     DEFAULT_PV3_TILT,
     DEFAULT_TIME_STEP_MINUTES,
-    DOMAIN,
-    MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_MANUAL,
     MODE_ZERO_GRID,
@@ -75,10 +72,9 @@ from .helpers import (
     extract_price_forecast_with_interval,
     get_sensor_value,
     resample_forecast,
-    safe_float,
 )
 from .optimizer import optimize_battery_schedule, OptimizationResult
-from .zero_grid_controller import ZeroGridController, create_zero_grid_controller
+from .zero_grid_controller import create_zero_grid_controller
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,9 +138,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 break
 
         # Extract next 48 hours
-        radiation_forecast = [
-            float(v) for v in radiation[start_idx : start_idx + 48]
-        ]
+        radiation_forecast = [float(v) for v in radiation[start_idx : start_idx + 48]]
 
         result = {
             "radiation_forecast": [round(v, 1) for v in radiation_forecast],
@@ -197,9 +191,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         # Additional AC PV arrays (different orientations)
         self.pv_extra_models: list[PVForecastModel] = []
-        pv2_kwp = float(
-            config.get(CONF_PV2_PEAK_POWER_KWP, DEFAULT_PV2_PEAK_POWER_KWP)
-        )
+        pv2_kwp = float(config.get(CONF_PV2_PEAK_POWER_KWP, DEFAULT_PV2_PEAK_POWER_KWP))
         if pv2_kwp > 0:
             self.pv_extra_models.append(
                 PVForecastModel(
@@ -211,9 +203,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     efficiency_factor=efficiency,
                 )
             )
-        pv3_kwp = float(
-            config.get(CONF_PV3_PEAK_POWER_KWP, DEFAULT_PV3_PEAK_POWER_KWP)
-        )
+        pv3_kwp = float(config.get(CONF_PV3_PEAK_POWER_KWP, DEFAULT_PV3_PEAK_POWER_KWP))
         if pv3_kwp > 0:
             self.pv_extra_models.append(
                 PVForecastModel(
@@ -228,9 +218,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         # DC-coupled PV model (panels on battery inverter)
         # Uses same orientation/tilt as primary but different peak power and efficiency
-        self.pv_dc_coupled = bool(
-            config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)
-        )
+        self.pv_dc_coupled = bool(config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED))
         self.pv_dc_model = PVForecastModel(
             peak_power_kwp=float(
                 config.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
@@ -490,7 +478,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if feed_in_sensor:
             feed_in_state = self.hass.states.get(feed_in_sensor)
             if feed_in_state and feed_in_state.state not in ("unknown", "unavailable"):
-                feed_in_forecast, _ = extract_price_forecast_with_interval(feed_in_state)
+                feed_in_forecast, _ = extract_price_forecast_with_interval(
+                    feed_in_state
+                )
             else:
                 feed_in_forecast = None
         else:
@@ -514,9 +504,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         # Resample all forecasts to time step resolution
-        resampled_prices = resample_forecast(
-            price_forecast, price_interval, time_step
-        )
+        resampled_prices = resample_forecast(price_forecast, price_interval, time_step)
 
         resampled_feed_in = None
         if feed_in_forecast:
@@ -550,7 +538,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         while len(pv_forecast) < n_steps:
             pv_forecast.append(0.0)
         while len(consumption_forecast) < n_steps:
-            consumption_forecast.append(consumption_forecast[-1] if consumption_forecast else 0.5)
+            consumption_forecast.append(
+                consumption_forecast[-1] if consumption_forecast else 0.5
+            )
         if pv_dc_forecast is not None:
             while len(pv_dc_forecast) < n_steps:
                 pv_dc_forecast.append(0.0)

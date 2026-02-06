@@ -1,7 +1,7 @@
 """Tests for forecast_models.py."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from custom_components.battery_controller.forecast_models import (
     PVForecastModel,
@@ -25,6 +25,7 @@ class TestPVForecastModel:
         model = PVForecastModel(peak_power_kwp=0.0)
         forecast = model.forecast_from_radiation([500, 800])
         assert forecast == [0.0, 0.0]
+
 
 class TestConsumptionForecastModel:
     """Tests for ConsumptionForecastModel."""

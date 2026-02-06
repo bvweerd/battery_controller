@@ -1,6 +1,5 @@
 """Tests for helpers.py."""
 
-import math
 import pytest
 from unittest.mock import MagicMock
 
@@ -163,40 +162,61 @@ class TestExtractPriceForecast:
         return state
 
     def test_forecast_prices_attribute(self):
-        state = self._make_state(attributes={
-            "forecast_prices": [0.10, 0.15, 0.20, 0.25]
-        })
+        state = self._make_state(
+            attributes={"forecast_prices": [0.10, 0.15, 0.20, 0.25]}
+        )
         prices, interval = extract_price_forecast_with_interval(state)
         assert prices == [0.10, 0.15, 0.20, 0.25]
         assert interval == 60
 
     def test_forecast_prices_with_dicts(self):
-        state = self._make_state(attributes={
-            "forecast_prices": [
-                {"value": 0.10},
-                {"value": 0.15},
-                {"price": 0.20},
-            ]
-        })
+        state = self._make_state(
+            attributes={
+                "forecast_prices": [
+                    {"value": 0.10},
+                    {"value": 0.15},
+                    {"price": 0.20},
+                ]
+            }
+        )
         prices, interval = extract_price_forecast_with_interval(state)
         assert prices == [0.10, 0.15, 0.20]
 
     def test_raw_today_tomorrow(self):
-        state = self._make_state(attributes={
-            "raw_today": [
-                {"value": 0.10}, {"value": 0.11}, {"value": 0.12},
-                {"value": 0.13}, {"value": 0.14}, {"value": 0.15},
-                {"value": 0.16}, {"value": 0.17}, {"value": 0.18},
-                {"value": 0.19}, {"value": 0.20}, {"value": 0.21},
-                {"value": 0.22}, {"value": 0.23}, {"value": 0.24},
-                {"value": 0.25}, {"value": 0.26}, {"value": 0.27},
-                {"value": 0.28}, {"value": 0.29}, {"value": 0.30},
-                {"value": 0.31}, {"value": 0.32}, {"value": 0.33},
-            ],
-            "raw_tomorrow": [
-                {"value": 0.05}, {"value": 0.06},
-            ],
-        })
+        state = self._make_state(
+            attributes={
+                "raw_today": [
+                    {"value": 0.10},
+                    {"value": 0.11},
+                    {"value": 0.12},
+                    {"value": 0.13},
+                    {"value": 0.14},
+                    {"value": 0.15},
+                    {"value": 0.16},
+                    {"value": 0.17},
+                    {"value": 0.18},
+                    {"value": 0.19},
+                    {"value": 0.20},
+                    {"value": 0.21},
+                    {"value": 0.22},
+                    {"value": 0.23},
+                    {"value": 0.24},
+                    {"value": 0.25},
+                    {"value": 0.26},
+                    {"value": 0.27},
+                    {"value": 0.28},
+                    {"value": 0.29},
+                    {"value": 0.30},
+                    {"value": 0.31},
+                    {"value": 0.32},
+                    {"value": 0.33},
+                ],
+                "raw_tomorrow": [
+                    {"value": 0.05},
+                    {"value": 0.06},
+                ],
+            }
+        )
         prices, interval = extract_price_forecast_with_interval(state)
         assert len(prices) > 0
         assert interval == 60
