@@ -1,0 +1,184 @@
+{
+  "config": {
+    "step": {
+      "basic": {
+        "data": {
+          "energy_label": "Energielabel",
+          "ventilation_type": "Ventilatietype",
+          "ceiling_height": "Plafondhoogte (m)",
+          "pv_east_wp": "PV-panelen oost (Wp)",
+          "pv_south_wp": "PV-panelen zuid (Wp)",
+          "pv_west_wp": "PV-panelen west (Wp)",
+          "pv_tilt": "PV-panelen hellingshoek (graden)"
+        },
+        "data_description": {
+          "ventilation_type": "Type ventilatiesysteem in de woning voor berekening van ventilatieverliezen",
+          "ceiling_height": "Gemiddelde plafondhoogte voor berekening van gebouwvolume (standaard: 2,5m)",
+          "pv_east_wp": "Totaal piekvermogen van op het oosten gerichte PV-panelen in Wp",
+          "pv_south_wp": "Totaal piekvermogen van op het zuiden gerichte PV-panelen in Wp",
+          "pv_west_wp": "Totaal piekvermogen van op het westen gerichte PV-panelen in Wp",
+          "pv_tilt": "Hellingshoek van PV-panelen (0=horizontaal, 90=verticaal, typisch: 35°)"
+        }
+      },
+      "heating_curve_settings": {
+        "title": "Stooklijn instellingen",
+        "description": "Configureer stooklijn en optimalisatie parameters",
+        "data": {
+          "supply_temperature_sensor": "Aanvoertemperatuur sensor",
+          "k_factor": "K-factor (COP afname per °C aanvoertemp verhoging)",
+          "base_cop": "Basale COP bij 35°C aanvoertemperatuur",
+          "outdoor_temp_coefficient": "Buitentemperatuur-coëfficiënt",
+          "cop_compensation_factor": "COP-compensatiefactor",
+          "planning_window": "Planningsvenster (uren)",
+          "time_base": "Tijdsbasis (minuten per stap)",
+          "max_buffer_debt": "Maximale warmteschuld (kWh)",
+          "target_indoor_temp": "Gewenste kamertemperatuur (°C)",
+          "indoor_temp_hysteresis": "Kamertemperatuur hysterese (°C)",
+          "indoor_temp_hysteresis_lower": "Onderste hysterese - warmtepomp AAN (°C)",
+          "indoor_temp_hysteresis_upper": "Bovenste hysterese - warmtepomp UIT (°C)",
+          "offset_delta_t": "Offset wijzigingssnelheid (min/°C)",
+          "heat_curve_min_outdoor": "Minimum buitentemperatuur (°C)",
+          "heat_curve_max_outdoor": "Maximum buitentemperatuur (°C)",
+          "heating_curve_offset": "Handmatige stooklijn offset (°C)",
+          "heat_curve_min": "Minimum aanvoertemperatuur (°C)",
+          "heat_curve_max": "Maximum aanvoertemperatuur (°C)"
+        },
+        "data_description": {
+          "supply_temperature_sensor": "Sensor die de aanvoertemperatuur van de warmtepomp meet",
+          "k_factor": "Hoeveel de COP afneemt per °C verhoging van de aanvoertemperatuur (typisch: 0,01-0,11)",
+          "base_cop": "COP van de warmtepomp bij 35°C aanvoertemperatuur (typisch: 3,5-5,0)",
+          "outdoor_temp_coefficient": "Hoeveel de COP toeneemt per °C stijging van de buitentemperatuur (typisch: 0,025-0,08)",
+          "cop_compensation_factor": "Factor om theoretische COP aan te passen aan werkelijke systeemprestaties (typisch: 0,8-1,2)",
+          "planning_window": "Optimalisatie planningshorizon in uren (standaard: 6)",
+          "time_base": "Tijdsinterval voor optimalisatie in minuten (standaard: 60)",
+          "max_buffer_debt": "Maximale toegestane warmteschuld voor kostenoptimalisatie. Maakt het mogelijk om verwarming te verlagen tijdens dure uren en later te compenseren (standaard: 5,0 kWh)",
+          "target_indoor_temp": "Gewenste kamertemperatuur setpoint (standaard: 20°C)",
+          "indoor_temp_hysteresis": "Temperatuurband rond setpoint waarin verwarming moduleert (standaard: 0,5°C)",
+          "indoor_temp_hysteresis_lower": "Hoeveel graden onder setpoint voordat warmtepomp AAN gaat (standaard: 0,3°C)",
+          "indoor_temp_hysteresis_upper": "Hoeveel graden boven setpoint voordat warmtepomp UIT gaat (standaard: 0,5°C)",
+          "offset_delta_t": "Minuten nodig per 1°C offset verandering. Lager = snellere respons (standaard: 10, bereik: 5-60)",
+          "heat_curve_min_outdoor": "Minimum buitentemperatuur voor stooklijn (standaard: -20°C)",
+          "heat_curve_max_outdoor": "Maximum buitentemperatuur voor stooklijn (standaard: 15°C)",
+          "heating_curve_offset": "Handmatige offset om toe te voegen aan geoptimaliseerde stooklijn (bereik: -4 tot +4°C, standaard: 0)",
+          "heat_curve_min": "Minimum toegestane aanvoertemperatuur (standaard: 20°C)",
+          "heat_curve_max": "Maximum toegestane aanvoertemperatuur (standaard: 45°C)"
+        }
+      },
+      "user": {
+        "data": {
+          "energy_label": "Energielabel",
+          "pv_east_wp": "PV-panelen oost (Wp)",
+          "pv_south_wp": "PV-panelen zuid (Wp)",
+          "pv_west_wp": "PV-panelen west (Wp)",
+          "pv_tilt": "PV-panelen hellingshoek (graden)"
+        },
+        "data_description": {
+          "pv_east_wp": "Totaal piekvermogen van op het oosten gerichte PV-panelen in Wp",
+          "pv_south_wp": "Totaal piekvermogen van op het zuiden gerichte PV-panelen in Wp",
+          "pv_west_wp": "Totaal piekvermogen van op het westen gerichte PV-panelen in Wp",
+          "pv_tilt": "Hellingshoek van PV-panelen (0=horizontaal, 90=verticaal, typisch: 35°)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "heat_pump_demand": {
+        "name": "Warmtevraag warmtepomp"
+      }
+    },
+    "number": {
+      "heating_curve_offset": {
+        "name": "Stooklijn offset"
+      },
+      "heating_curve_min": {
+        "name": "Stooklijn minimum (aanvoertemperatuur)"
+      },
+      "heating_curve_max": {
+        "name": "Stooklijn maximum (aanvoertemperatuur)"
+      },
+      "heat_curve_min_outdoor": {
+        "name": "Stooklijn buitentemperatuur minimum"
+      },
+      "heat_curve_max_outdoor": {
+        "name": "Stooklijn buitentemperatuur maximum"
+      },
+      "target_indoor_temperature": {
+        "name": "Gewenste kamertemperatuur"
+      },
+      "indoor_temp_hysteresis": {
+        "name": "Kamertemperatuur hysterese"
+      },
+      "indoor_temp_hysteresis_lower": {
+        "name": "Hysterese onder setpoint (warmtepomp AAN)"
+      },
+      "indoor_temp_hysteresis_upper": {
+        "name": "Hysterese boven setpoint (warmtepomp UIT)"
+      }
+    },
+    "sensor": {
+      "heat_pump_cop": {
+        "state": {
+          "formula": "COP = (basale_COP + buitentemperatuur-coëfficiënt × T_buiten − k_factor × (T_aanvoer − 35)) × cop_compensatiefactor"
+        }
+      },
+      "heating_curve_offset": {
+        "name": "Stooklijn offset (geoptimaliseerd)"
+      },
+      "calculated_supply_temperature": {
+        "name": "Berekende aanvoertemperatuur"
+      },
+      "optimized_supply_temperature": {
+        "name": "Geoptimaliseerde aanvoertemperatuur"
+      },
+      "heat_loss": {
+        "name": "Warmteverlies"
+      },
+      "net_heat_loss": {
+        "name": "Netto warmteverlies"
+      },
+      "window_solar_gain": {
+        "name": "Zonnewinst via ramen"
+      },
+      "pv_production_forecast": {
+        "name": "PV productie voorspelling"
+      },
+      "cop_delta": {
+        "name": "COP Verschil"
+      },
+      "heat_generation_delta": {
+        "name": "Warmteproductie Verschil"
+      },
+      "cost_savings_forecast": {
+        "name": "Kostenbesparing Voorspelling"
+      },
+      "total_cost_savings": {
+        "name": "Totale Kostenbesparing"
+      },
+      "heat_buffer": {
+        "name": "Warmtebuffer (energie opslag)"
+      },
+      "net_power_consumption": {
+        "name": "Netto stroomverbruik"
+      },
+      "calibration": {
+        "name": "Parameter Kalibratie"
+      }
+    }
+  },
+  "selector": {
+    "ventilation_type": {
+      "options": {
+        "none": "Geen/minimaal",
+        "natural_low": "Natuurlijke ventilatie (basis)",
+        "natural_standard": "Natuurlijke ventilatie (standaard)",
+        "natural_leaky": "Natuurlijke ventilatie (lekkage)",
+        "mechanical_exhaust": "Mechanische afzuiging",
+        "balanced_no_recovery": "Gebalanceerd (zonder WTW)",
+        "heat_recovery_50": "WTW 50% rendement",
+        "heat_recovery_70": "WTW 70% rendement",
+        "heat_recovery_90": "WTW 90% rendement"
+      }
+    }
+  }
+}

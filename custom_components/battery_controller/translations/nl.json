@@ -1,0 +1,143 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Controller",
+        "description": "Configureer je thuisbatterij voor kostenoptimalisatie.",
+        "data": {
+          "step": "Configuratiestap"
+        }
+      },
+      "battery": {
+        "title": "Batterij Specificaties",
+        "description": "Voer de specificaties van je batterij in.",
+        "data": {
+          "capacity_kwh": "Capaciteit (kWh)",
+          "max_charge_power_kw": "Max laadvermogen (kW)",
+          "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
+          "round_trip_efficiency": "Round-trip efficiency (0-1)",
+          "min_soc_percent": "Minimum SoC (%)",
+          "max_soc_percent": "Maximum SoC (%)"
+        }
+      },
+      "pv": {
+        "title": "PV Systeem",
+        "description": "Configureer je zonnepanelen (optioneel). Als je panelen direct op de batterij-omvormer zijn aangesloten (DC-gekoppeld), vul dan ook de DC PV velden in.",
+        "data": {
+          "pv_peak_power_kwp": "Piekvermogen AC PV (kWp)",
+          "pv_orientation": "Oriëntatie (graden, 180=zuid)",
+          "pv_tilt": "Hellingshoek (graden)",
+          "pv_efficiency_factor": "Systeemrendement (0-1)",
+          "pv_dc_coupled": "PV direct op batterij (DC-gekoppeld)",
+          "pv_dc_peak_power_kwp": "Piekvermogen DC PV op batterij (kWp)",
+          "pv_dc_efficiency": "DC-koppelingsrendement (0-1)"
+        }
+      },
+      "sensors": {
+        "title": "Sensoren",
+        "description": "Selecteer de sensoren voor prijzen, batterij en verbruik.",
+        "data": {
+          "price_sensor": "Elektriciteitsprijs sensor",
+          "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
+          "battery_soc_sensor": "Batterij SoC sensor",
+          "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+
+          "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh, bijv. DSMR tarief 1+2)",
+          "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
+        }
+      },
+      "advanced": {
+        "title": "Geavanceerde Instellingen",
+        "description": "Fijn-afstemming van de optimalisatie.",
+        "data": {
+          "time_step_minutes": "Tijdstap (minuten)",
+          "optimization_interval_minutes": "Optimalisatie-interval (minuten)",
+          "degradation_cost_per_kwh": "Degradatiekosten (EUR/kWh)",
+          "min_price_spread": "Minimale prijsspread (EUR/kWh)",
+          "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
+          "zero_grid_enabled": "Nul-op-de-meter actief",
+          "zero_grid_deadband_w": "Nul-op-de-meter deadband (W)"
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC)."
+    },
+    "abort": {
+      "already_configured": "Battery Controller is al geconfigureerd."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "optimal_power": {
+        "name": "Optimaal Vermogen"
+      },
+      "optimal_mode": {
+        "name": "Optimale Modus"
+      },
+      "schedule": {
+        "name": "Schema"
+      },
+      "soc": {
+        "name": "Laadtoestand"
+      },
+      "battery_power": {
+        "name": "Batterij Vermogen"
+      },
+      "pv_forecast": {
+        "name": "PV Voorspelling"
+      },
+      "consumption_forecast": {
+        "name": "Verbruik Voorspelling"
+      },
+      "net_grid_forecast": {
+        "name": "Netto Grid Voorspelling"
+      },
+      "daily_savings": {
+        "name": "Geschatte Besparing"
+      },
+      "grid_setpoint": {
+        "name": "Grid Setpoint"
+      },
+      "control_mode": {
+        "name": "Regelmodus"
+      },
+      "optimization_status": {
+        "name": "Optimalisatie Status"
+      }
+    },
+    "number": {
+      "min_soc_percent": {
+        "name": "Minimum SoC"
+      },
+      "max_soc_percent": {
+        "name": "Maximum SoC"
+      },
+      "degradation_cost": {
+        "name": "Degradatiekosten"
+      },
+      "min_price_spread": {
+        "name": "Minimale Prijsspread"
+      },
+      "zero_grid_deadband": {
+        "name": "Nul-op-de-meter Deadband"
+      }
+    },
+    "select": {
+      "control_mode": {
+        "name": "Regelmodus",
+        "state": {
+          "zero_grid": "Nul op de meter",
+          "follow_schedule": "Volg schema",
+          "hybrid": "Hybride",
+          "manual": "Handmatig"
+        }
+      }
+    },
+    "switch": {
+      "optimization_enabled": {
+        "name": "Optimalisatie Actief"
+      }
+    }
+  }
+}

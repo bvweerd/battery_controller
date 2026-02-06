@@ -1,0 +1,228 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Controller",
+        "description": "Configure your home battery for cost optimization. Battery and Sensors are required. Expand the other sections as needed.",
+        "sections": {
+          "battery": {
+            "name": "Battery Specifications",
+            "data": {
+              "capacity_kwh": "Capacity (kWh)",
+              "max_charge_power_kw": "Max charge power (kW)",
+              "max_discharge_power_kw": "Max discharge power (kW)",
+              "round_trip_efficiency": "Round-trip efficiency (0-1)"
+            }
+          },
+          "sensors": {
+            "name": "Required Sensors",
+            "data": {
+              "price_sensor": "Electricity price sensor",
+              "battery_soc_sensor": "Battery SoC sensor"
+            }
+          },
+          "pv": {
+            "name": "PV Array 1 (Primary)",
+            "data": {
+              "pv_peak_power_kwp": "Peak power AC PV (kWp)",
+              "pv_orientation": "Orientation (degrees, 180=south)",
+              "pv_tilt": "Tilt angle (degrees)",
+              "pv_efficiency_factor": "System efficiency (0-1)",
+              "pv_dc_coupled": "DC-coupled PV (on battery inverter)",
+              "pv_dc_peak_power_kwp": "Peak power DC PV (kWp)",
+              "pv_dc_efficiency": "DC coupling efficiency (0-1)"
+            }
+          },
+          "pv2": {
+            "name": "PV Array 2 (e.g. East)",
+            "data": {
+              "pv2_peak_power_kwp": "Peak power (kWp)",
+              "pv2_orientation": "Orientation (degrees, 90=east)",
+              "pv2_tilt": "Tilt angle (degrees)"
+            }
+          },
+          "pv3": {
+            "name": "PV Array 3 (e.g. West)",
+            "data": {
+              "pv3_peak_power_kwp": "Peak power (kWp)",
+              "pv3_orientation": "Orientation (degrees, 270=west)",
+              "pv3_tilt": "Tilt angle (degrees)"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optional Sensors",
+            "data": {
+              "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
+              "battery_power_sensor": "Battery power sensor (improves state detection)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "time_step_minutes": "Time step (minutes)",
+              "optimization_interval_minutes": "Optimization interval (minutes)",
+              "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
+              "zero_grid_enabled": "Zero-grid control enabled"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Please configure required sensors (electricity price + battery SoC)."
+    },
+    "abort": {
+      "already_configured": "Battery Controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Battery Controller",
+        "description": "Reconfigure your battery controller settings.",
+        "sections": {
+          "battery": {
+            "name": "Battery Specifications",
+            "data": {
+              "capacity_kwh": "Capacity (kWh)",
+              "max_charge_power_kw": "Max charge power (kW)",
+              "max_discharge_power_kw": "Max discharge power (kW)",
+              "round_trip_efficiency": "Round-trip efficiency (0-1)"
+            }
+          },
+          "sensors": {
+            "name": "Required Sensors",
+            "data": {
+              "price_sensor": "Electricity price sensor",
+              "battery_soc_sensor": "Battery SoC sensor"
+            }
+          },
+          "pv": {
+            "name": "PV Array 1 (Primary)",
+            "data": {
+              "pv_peak_power_kwp": "Peak power AC PV (kWp)",
+              "pv_orientation": "Orientation (degrees, 180=south)",
+              "pv_tilt": "Tilt angle (degrees)",
+              "pv_efficiency_factor": "System efficiency (0-1)",
+              "pv_dc_coupled": "DC-coupled PV (on battery inverter)",
+              "pv_dc_peak_power_kwp": "Peak power DC PV (kWp)",
+              "pv_dc_efficiency": "DC coupling efficiency (0-1)"
+            }
+          },
+          "pv2": {
+            "name": "PV Array 2 (e.g. East)",
+            "data": {
+              "pv2_peak_power_kwp": "Peak power (kWp)",
+              "pv2_orientation": "Orientation (degrees, 90=east)",
+              "pv2_tilt": "Tilt angle (degrees)"
+            }
+          },
+          "pv3": {
+            "name": "PV Array 3 (e.g. West)",
+            "data": {
+              "pv3_peak_power_kwp": "Peak power (kWp)",
+              "pv3_orientation": "Orientation (degrees, 270=west)",
+              "pv3_tilt": "Tilt angle (degrees)"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optional Sensors",
+            "data": {
+              "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
+              "battery_power_sensor": "Battery power sensor (improves state detection)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "time_step_minutes": "Time step (minutes)",
+              "optimization_interval_minutes": "Optimization interval (minutes)",
+              "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
+              "zero_grid_enabled": "Zero-grid control enabled"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Please configure required sensors (electricity price + battery SoC)."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "optimal_power": {
+        "name": "Optimal Power"
+      },
+      "optimal_mode": {
+        "name": "Optimal Mode"
+      },
+      "schedule": {
+        "name": "Schedule"
+      },
+      "soc": {
+        "name": "State of Charge"
+      },
+      "battery_power": {
+        "name": "Battery Power"
+      },
+      "pv_forecast": {
+        "name": "PV Forecast"
+      },
+      "consumption_forecast": {
+        "name": "Consumption Forecast"
+      },
+      "net_grid_forecast": {
+        "name": "Net Grid Forecast"
+      },
+      "daily_savings": {
+        "name": "Estimated Savings"
+      },
+      "grid_setpoint": {
+        "name": "Grid Setpoint"
+      },
+      "control_mode": {
+        "name": "Control Mode"
+      },
+      "optimization_status": {
+        "name": "Optimization Status"
+      }
+    },
+    "number": {
+      "min_soc_percent": {
+        "name": "Minimum SoC"
+      },
+      "max_soc_percent": {
+        "name": "Maximum SoC"
+      },
+      "degradation_cost": {
+        "name": "Degradation Cost"
+      },
+      "min_price_spread": {
+        "name": "Minimum Price Spread"
+      },
+      "zero_grid_deadband": {
+        "name": "Zero Grid Deadband"
+      }
+    },
+    "select": {
+      "control_mode": {
+        "name": "Control Mode",
+        "state": {
+          "zero_grid": "Zero grid",
+          "follow_schedule": "Follow schedule",
+          "hybrid": "Hybrid",
+          "manual": "Manual"
+        }
+      }
+    },
+    "switch": {
+      "optimization_enabled": {
+        "name": "Optimization Enabled"
+      }
+    }
+  }
+}
