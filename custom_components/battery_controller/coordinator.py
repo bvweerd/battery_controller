@@ -597,7 +597,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if result.optimal_mode == "idle":
                 effective_mode = "zero_grid"
                 effective_power = 0.0
-            elif result.optimal_mode == "charging" and total_pv_kw > current_consumption_kw:
+            elif (
+                result.optimal_mode == "charging"
+                and total_pv_kw > current_consumption_kw
+            ):
                 # PV surplus available: use zero_grid to dynamically match
                 # the actual surplus instead of fixed-rate charging.
                 # Fixed charging may import from grid when clouds pass.
