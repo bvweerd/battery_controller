@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
-from homeassistant.core import HomeAssistant, Event
+from homeassistant.core import HomeAssistant, Event, EventStateChangedData
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -354,8 +354,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Price sensor tracking
         self._price_sensor = config.get(CONF_PRICE_SENSOR)
-        self._unsub_price = None
-        self._last_price = None
+        self._unsub_price: Any | None = None
+        self._last_price: float | None = None
 
         # Last optimization result
         self._last_result: OptimizationResult | None = None
@@ -380,7 +380,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
 
-    async def _handle_price_change(self, event: Event) -> None:
+    async def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle significant price changes."""
         new_state = event.data.get("new_state")
         if not new_state:

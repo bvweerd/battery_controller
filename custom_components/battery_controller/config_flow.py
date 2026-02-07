@@ -18,7 +18,7 @@ import voluptuous as vol
 try:
     from homeassistant.data_entry_flow import section
 except ImportError:
-    section = None  # type: ignore[assignment]
+    section = None  # type: ignore[assignment,misc]
 
 from .const import (
     CONF_BATTERY_POWER_SENSOR,

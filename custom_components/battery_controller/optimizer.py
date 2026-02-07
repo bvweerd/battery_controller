@@ -214,8 +214,12 @@ def optimize_battery_schedule(
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
     power_step_w = 500  # 500W resolution
 
-    charge_actions = list(range(0, int(max_charge_w) + power_step_w, power_step_w))
-    discharge_actions = list(range(-int(max_discharge_w), 0, power_step_w))
+    charge_actions = [
+        float(x) for x in range(0, int(max_charge_w) + power_step_w, power_step_w)
+    ]
+    discharge_actions = [
+        float(x) for x in range(-int(max_discharge_w), 0, power_step_w)
+    ]
     actions = discharge_actions + charge_actions
 
     # Backward induction
@@ -286,10 +290,10 @@ def optimize_battery_schedule(
     mode_schedule = []
     soc_schedule_kwh = [current_soc_kwh]
 
-    soc_wh = soc_states[current_soc_idx]
+    current_soc = float(soc_states[current_soc_idx])
 
     for t in range(n_steps):
-        soc_idx = _find_nearest_soc_idx(soc_wh, soc_states)
+        soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
         action_w = policy[t][soc_idx]
 
         power_kw = action_w / 1000
@@ -297,14 +301,18 @@ def optimize_battery_schedule(
 
         if action_w > 0:
             mode_schedule.append("charging")
-            soc_wh = min(soc_wh + action_w * time_step_hours, max_soc_wh)
+            current_soc = min(
+                current_soc + action_w * time_step_hours, float(max_soc_wh)
+            )
         elif action_w < 0:
             mode_schedule.append("discharging")
-            soc_wh = max(soc_wh - abs(action_w) * time_step_hours, min_soc_wh)
+            current_soc = max(
+                current_soc - abs(action_w) * time_step_hours, float(min_soc_wh)
+            )
         else:
             mode_schedule.append("idle")
 
-        soc_schedule_kwh.append(soc_wh / 1000)
+        soc_schedule_kwh.append(current_soc / 1000)
 
     # Calculate costs
     total_cost = V[0][current_soc_idx]
