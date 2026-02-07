@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
 
 import pytest
 from homeassistant import config_entries, setup
@@ -136,9 +135,7 @@ async def test_pv_array_add_only_flow(hass: HomeAssistant, mock_config: dict) ->
     assert result["data"][CONF_PV_EXTRA_ARRAYS][0]["peak_power_kwp"] == 4.0
 
 
-async def test_options_flow_success(
-    hass: HomeAssistant, mock_config: dict
-) -> None:
+async def test_options_flow_success(hass: HomeAssistant, mock_config: dict) -> None:
     """Test successful options flow."""
     # Create initial data with PV arrays
     initial_data = {}
@@ -212,5 +209,3 @@ async def test_options_flow_success(
     assert config_entry.options["price_sensor"] == "sensor.new_price_sensor"
     assert len(config_entry.options[CONF_PV_EXTRA_ARRAYS]) == 2
     assert config_entry.options[CONF_PV_EXTRA_ARRAYS][1]["peak_power_kwp"] == 5.0
-
-
