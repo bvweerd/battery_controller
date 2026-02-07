@@ -171,6 +171,71 @@ class TestHybridMode:
         assert target == pytest.approx(1000)
 
 
+class TestIdleMode:
+    """Tests for idle control mode (preserve battery for peak pricing)."""
+
+    def test_idle_no_discharge_when_importing(self, controller):
+        """When grid is importing, idle mode should NOT discharge battery."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=1000,  # Importing 1 kW from grid
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0  # Preserve battery capacity
+
+    def test_idle_charges_from_pv_surplus(self, controller):
+        """When grid is exporting (PV surplus), idle mode should charge."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=-2000,  # Exporting 2 kW (PV surplus)
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target > 0
+        assert target == pytest.approx(2000, abs=10)
+
+    def test_idle_zero_grid_no_action(self, controller):
+        """When grid is balanced, idle mode does nothing."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0
+
+    def test_idle_respects_max_soc(self, controller):
+        """Idle mode should not charge above max SoC."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=-3000,  # PV surplus
+            current_soc_kwh=9.0,  # At max SoC (90%)
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0  # Can't charge further
+
+    def test_idle_clamps_to_max_charge(self, controller):
+        """Large PV surplus should be clamped to max charge power."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=-8000,  # 8 kW surplus
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == pytest.approx(5000)  # Max charge
+
+    def test_idle_small_import_no_action(self, controller):
+        """Even small grid imports should not trigger discharge in idle."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=100,  # Small import
+            current_soc_kwh=8.0,  # Plenty of battery
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0  # Still preserve battery
+
+
 class TestManualMode:
     """Tests for manual control mode."""
 

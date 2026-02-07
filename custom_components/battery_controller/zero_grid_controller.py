@@ -66,6 +66,8 @@ class ZeroGridController:
         """
         if mode == "zero_grid":
             return self._calculate_zero_grid(current_grid_w, current_soc_kwh)
+        elif mode == "idle":
+            return self._calculate_idle(current_grid_w, current_soc_kwh)
         elif mode == "follow_schedule":
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
         elif mode == "hybrid":
@@ -103,6 +105,41 @@ class ZeroGridController:
         )
 
         # Apply SoC limits
+        target_battery_w = self._apply_soc_limits(target_battery_w, current_soc_kwh)
+
+        return target_battery_w
+
+    def _calculate_idle(
+        self,
+        current_grid_w: float,
+        current_soc_kwh: float,
+    ) -> float:
+        """Idle mode: preserve battery capacity, only charge from PV surplus.
+
+        Used when the optimizer wants to preserve battery for upcoming
+        expensive periods. Allows charging from PV surplus (grid exporting)
+        but does NOT discharge to cover house consumption, so capacity
+        is preserved for peak pricing.
+
+        Args:
+            current_grid_w: Current grid power in W (positive = import)
+            current_soc_kwh: Current battery SoC in kWh
+
+        Returns:
+            Battery power setpoint in W
+        """
+        if current_grid_w >= 0:
+            # Grid importing (house consuming from grid) -> do nothing,
+            # preserve battery for the upcoming expensive period
+            return 0.0
+
+        # Grid exporting (PV surplus) -> charge battery with the surplus
+        target_battery_w = -current_grid_w  # Positive = charge
+
+        # Apply charge limit
+        target_battery_w = min(target_battery_w, self.config.max_charge_w)
+
+        # Apply SoC limits (don't charge above max)
         target_battery_w = self._apply_soc_limits(target_battery_w, current_soc_kwh)
 
         return target_battery_w

@@ -595,7 +595,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
             if result.optimal_mode == "idle":
-                effective_mode = "zero_grid"
+                # Check if the optimizer has planned discharge periods ahead.
+                # If so, it needs the battery capacity preserved for those
+                # expensive periods -> stay idle (only allow PV surplus charging).
+                # If not, zero_grid is fine for self-consumption.
+                has_upcoming_discharge = any(
+                    m == "discharging" for m in result.mode_schedule[1:]
+                )
+                if has_upcoming_discharge:
+                    effective_mode = "idle"
+                else:
+                    effective_mode = "zero_grid"
                 effective_power = 0.0
             elif (
                 result.optimal_mode == "charging"
@@ -618,6 +628,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Map effective mode to zero_grid_controller mode
         if effective_mode == "zero_grid":
             controller_mode = "zero_grid"
+        elif effective_mode == "idle":
+            controller_mode = "idle"
         elif effective_mode == "manual":
             controller_mode = "manual"
         elif effective_mode in ("charging", "discharging"):
