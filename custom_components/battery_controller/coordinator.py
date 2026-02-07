@@ -21,6 +21,7 @@ from .battery_model import BatteryConfig, BatteryState
 from .const import (
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
+    CONF_GRID_POWER_SENSOR,
     CONF_DEGRADATION_COST_PER_KWH,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
@@ -357,8 +358,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_price: Any | None = None
         self._last_price: float | None = None
 
-        # Last optimization result
+        # Real-time grid sensor for zero_grid control
+        self._grid_power_sensor = config.get(CONF_GRID_POWER_SENSOR)
+        self._battery_power_sensor = config.get(CONF_BATTERY_POWER_SENSOR)
+        self._battery_soc_sensor = config.get(CONF_BATTERY_SOC_SENSOR)
+        self._unsub_realtime: Any | None = None
+
+        # Last optimization result and effective mode (persists between real-time updates)
         self._last_result: OptimizationResult | None = None
+        self._effective_mode: str = "idle"
+        self._effective_power: float = 0.0
+        self._dp_schedule_w: float = 0.0
 
     @property
     def control_mode(self) -> str:
@@ -371,7 +381,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._control_mode = mode
 
     async def async_setup(self) -> None:
-        """Set up event tracking for price changes."""
+        """Set up event tracking for price changes and real-time control."""
         if self._price_sensor:
             self._unsub_price = async_track_state_change_event(
                 self.hass,
@@ -379,6 +389,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._handle_price_change,
             )
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
+
+        # Set up real-time zero_grid control via grid power sensor
+        realtime_sensors = []
+        if self._grid_power_sensor:
+            realtime_sensors.append(self._grid_power_sensor)
+        if self._battery_power_sensor:
+            realtime_sensors.append(self._battery_power_sensor)
+
+        if realtime_sensors:
+            self._unsub_realtime = async_track_state_change_event(
+                self.hass,
+                realtime_sensors,
+                self._handle_realtime_update,
+            )
+            _LOGGER.debug(
+                "Real-time zero_grid control enabled, tracking: %s",
+                realtime_sensors,
+            )
 
     async def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle significant price changes."""
@@ -401,11 +429,98 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         except (ValueError, TypeError):
             pass
 
+    async def _handle_realtime_update(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Handle real-time grid/battery sensor changes for zero_grid control.
+
+        This runs on every sensor update (~5s for DSMR) and recalculates
+        only the zero_grid setpoint. No re-optimization is triggered.
+        """
+        if self.data is None or self._last_result is None:
+            return  # No optimization result yet
+
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in ("unknown", "unavailable"):
+            return
+
+        # Read actual grid power from DSMR sensor
+        current_grid_w = self._get_realtime_grid_w()
+        if current_grid_w is None:
+            return
+
+        # Read current battery state
+        battery_state = self.get_current_battery_state()
+
+        # Determine controller mode based on last optimization's effective mode
+        # For idle mode: use zero_grid when PV surplus (grid < 0) since
+        # the real-time feedback loop (~5s) can switch back to idle fast
+        # enough to prevent meaningful battery drain when PV drops.
+        effective_mode = self._effective_mode
+        if effective_mode == "idle" and current_grid_w < 0:
+            controller_mode = "zero_grid"
+        elif effective_mode == "zero_grid":
+            controller_mode = "zero_grid"
+        elif effective_mode == "idle":
+            controller_mode = "idle"
+        elif effective_mode == "manual":
+            controller_mode = "manual"
+        elif effective_mode in ("charging", "discharging"):
+            controller_mode = "follow_schedule"
+        else:
+            controller_mode = self._control_mode
+
+        # Recalculate zero_grid setpoint with actual sensor data
+        control_action = self.zero_grid_controller.get_control_action(
+            current_grid_w=current_grid_w,
+            current_soc_kwh=battery_state.soc_kwh,
+            current_battery_w=battery_state.power_kw * 1000,
+            dp_schedule_w=self._dp_schedule_w,
+            mode=controller_mode,
+        )
+
+        # Update coordinator data with new control action (triggers sensor updates)
+        self.async_set_updated_data(
+            {
+                **self.data,
+                "control_action": control_action,
+                "battery_state": battery_state,
+                "optimal_power_kw": control_action["target_power_kw"],
+                "optimal_mode": control_action["action_mode"],
+            }
+        )
+
+    def _get_realtime_grid_w(self) -> float | None:
+        """Read current grid power from the configured grid sensor.
+
+        Returns:
+            Grid power in W (positive = import), or None if unavailable.
+        """
+        if not self._grid_power_sensor:
+            return None
+
+        state = self.hass.states.get(self._grid_power_sensor)
+        if not state or state.state in ("unknown", "unavailable"):
+            return None
+
+        try:
+            value = float(state.state)
+            # Check unit: if in kW, convert to W
+            unit = state.attributes.get("unit_of_measurement", "W")
+            if unit == "kW":
+                value *= 1000
+            return value
+        except (ValueError, TypeError):
+            return None
+
     async def async_shutdown(self) -> None:
         """Clean up event tracking."""
         if self._unsub_price:
             self._unsub_price()
             self._unsub_price = None
+        if self._unsub_realtime:
+            self._unsub_realtime()
+            self._unsub_realtime = None
 
     def get_current_battery_state(self) -> BatteryState:
         """Get current battery state from sensors."""
@@ -571,18 +686,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         self._last_result = result
 
-        # Calculate zero-grid control action
-        # Estimate current grid power from forecast data and battery state
-        # Net grid = consumption - PV + battery_charge (positive = importing)
-        current_pv_kw = forecast_data.get("current_pv_kw", 0.0)
-        current_dc_pv_kw = forecast_data.get("current_dc_pv_kw", 0.0)
-        current_consumption_kw = forecast_data.get("current_consumption_kw", 0.0)
-        # DC PV excess goes to AC side through inverter (~96% efficiency)
-        dc_pv_to_ac_kw = current_dc_pv_kw * 0.96
-        total_pv_kw = current_pv_kw + dc_pv_to_ac_kw
-        current_grid = (
-            current_consumption_kw - total_pv_kw + battery_state.power_kw
-        ) * 1000  # Convert to W
+        # Get current grid power: prefer real sensor, fall back to estimate
+        realtime_grid_w = self._get_realtime_grid_w()
+        if realtime_grid_w is not None:
+            current_grid = realtime_grid_w
+        else:
+            # Estimate from forecast data and battery state
+            current_pv_kw = forecast_data.get("current_pv_kw", 0.0)
+            current_dc_pv_kw = forecast_data.get("current_dc_pv_kw", 0.0)
+            current_consumption_kw = forecast_data.get("current_consumption_kw", 0.0)
+            dc_pv_to_ac_kw = current_dc_pv_kw * 0.96
+            total_pv_kw = current_pv_kw + dc_pv_to_ac_kw
+            current_grid = (
+                current_consumption_kw - total_pv_kw + battery_state.power_kw
+            ) * 1000  # Convert to W
+
         dp_schedule_w = result.optimal_power_kw * 1000
 
         # Determine effective mode/power based on control mode
@@ -631,13 +749,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     # Feed-in < buy: self-consumption saves more -> zero_grid
                     effective_mode = "zero_grid"
                     effective_power = 0.0
-            elif (
-                result.optimal_mode == "charging"
-                and total_pv_kw > current_consumption_kw
-            ):
-                # PV surplus available: use zero_grid to dynamically match
-                # the actual surplus instead of fixed-rate charging.
-                # Fixed charging may import from grid when clouds pass.
+            elif result.optimal_mode == "charging" and current_grid < 0:
+                # PV surplus available (grid exporting): use zero_grid to
+                # dynamically match the actual surplus instead of fixed-rate
+                # charging. Fixed charging may import from grid when clouds pass.
                 effective_mode = "zero_grid"
                 effective_power = 0.0
             else:
@@ -648,9 +763,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_mode = result.optimal_mode
             effective_power = result.optimal_power_kw
 
+        # Store for real-time control loop
+        self._effective_mode = effective_mode
+        self._effective_power = effective_power
+        self._dp_schedule_w = dp_schedule_w
+
         # Calculate zero-grid control action using the resolved effective mode
         # Map effective mode to zero_grid_controller mode
         if effective_mode == "zero_grid":
+            controller_mode = "zero_grid"
+        elif effective_mode == "idle" and current_grid < 0 and self._grid_power_sensor:
+            # Idle with real-time PV surplus: use zero_grid to charge.
+            # Real-time sensor feedback (~5s) makes this safe: if PV drops,
+            # the next update switches back to idle before meaningful drain.
             controller_mode = "zero_grid"
         elif effective_mode == "idle":
             controller_mode = "idle"
