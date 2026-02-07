@@ -458,6 +458,88 @@ automation:
 - ✅ Triggers on both sensors to catch all updates
 - ✅ Single logic for charge/discharge based on power value
 
+### Alternative: Manual Mode + Power Target
+
+Some inverters (e.g., Growatt, Solis) control charge/discharge via:
+- **Manual mode** + target power in a number entity (for force charge/discharge)
+- **Built-in zero-grid mode** that handles self-consumption automatically
+
+This automation is simpler because zero-grid just switches the inverter mode without needing power control:
+
+```yaml
+automation:
+  - alias: "Battery Controller - Manual mode control"
+    description: "Control battery via manual mode + power target"
+    trigger:
+      - platform: state
+        entity_id: sensor.battery_controller_optimal_mode
+      - platform: state
+        entity_id: sensor.battery_controller_grid_setpoint
+    action:
+      - variables:
+          control_mode: "{{ states('select.battery_controller_control_mode') }}"
+          optimal_mode: "{{ states('sensor.battery_controller_optimal_mode') }}"
+
+          # Use grid_setpoint for hybrid/zero_grid, optimal_power for follow_schedule
+          power_w: >
+            {% if control_mode in ['hybrid', 'zero_grid'] %}
+              {{ states('sensor.battery_controller_grid_setpoint') | float }}
+            {% else %}
+              {{ (states('sensor.battery_controller_optimal_power') | float * 1000) | round(0) }}
+            {% endif %}
+
+      - choose:
+          # Charging (power > 50W)
+          - conditions:
+              - condition: template
+                value_template: "{{ power_w > 50 }}"
+            sequence:
+              - service: select.select_option
+                target:
+                  entity_id: select.YOUR_INVERTER_working_mode
+                data:
+                  option: "Manual"
+              - service: number.set_value
+                target:
+                  entity_id: number.YOUR_INVERTER_target_power
+                data:
+                  value: "{{ power_w | abs | round(0) }}"
+
+          # Discharging (power < -50W)
+          - conditions:
+              - condition: template
+                value_template: "{{ power_w < -50 }}"
+            sequence:
+              - service: select.select_option
+                target:
+                  entity_id: select.YOUR_INVERTER_working_mode
+                data:
+                  option: "Manual"
+              - service: number.set_value
+                target:
+                  entity_id: number.YOUR_INVERTER_target_power
+                data:
+                  value: "{{ power_w | round(0) }}"  # Keep negative for discharge
+
+          # Idle / Zero-grid: Use inverter's built-in self-consumption mode
+        default:
+          - service: select.select_option
+            target:
+              entity_id: select.YOUR_INVERTER_working_mode
+            data:
+              option: "Self Use"  # or "Maximize Self Consumption", "Zero Export"
+```
+
+**How this differs:**
+- ✅ Single `target_power` entity for both charge (positive) and discharge (negative)
+- ✅ Inverter mode "Manual" for force charge/discharge
+- ✅ Inverter mode "Self Use" handles zero-grid automatically (no power values needed)
+- ✅ Simpler: no separate charge_power and discharge_power entities
+
+**Common inverter modes:**
+- Manual mode: `Manual`, `Passive`, `Battery First`
+- Zero-grid mode: `Self Use`, `Maximize Self Consumption`, `Zero Export`, `Load First`
+
 ### Inverter Integration
 
 Replace `YOUR_INVERTER` with your actual inverter entity names. Most battery inverters expose:
