@@ -608,12 +608,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     effective_mode = "zero_grid"
                 effective_power = 0.0
             elif result.optimal_mode == "discharging":
-                # Check if exporting to grid is profitable enough to
-                # justify full-rate discharge (follow_schedule).
-                # If feed-in price is close to buy price, export is
-                # worthwhile -> discharge at full rate.
-                # If feed-in price is much lower, only self-consume
-                # via zero_grid to preserve battery capacity.
+                # Check if exporting to grid is worth it vs self-consumption.
+                # Energy is already stored, so RTE is irrelevant here:
+                # both export and self-consumption have the same discharge
+                # efficiency. The comparison is simply feed-in vs buy price.
                 current_buy = resampled_prices[0] if resampled_prices else 0.0
                 current_feed_in = (
                     resampled_feed_in[0]
@@ -622,12 +620,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
                     ))
                 )
-                if current_buy > 0 and current_feed_in >= current_buy * 0.8:
-                    # Feed-in price is close to buy price: export is profitable
+                if current_buy > 0 and current_feed_in >= current_buy:
+                    # Feed-in >= buy: exporting is as good as self-consuming
+                    # (e.g. net metering / saldering) -> full rate discharge
                     effective_mode = "discharging"
                     effective_power = result.optimal_power_kw
                 else:
-                    # Feed-in much lower than buy: only self-consume
+                    # Feed-in < buy: self-consumption saves more -> zero_grid
                     effective_mode = "zero_grid"
                     effective_power = 0.0
             elif (
