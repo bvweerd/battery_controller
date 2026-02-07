@@ -3,7 +3,7 @@
 - [x] `appropriate-polling` - If it's a polling integration, set an appropriate polling interval
 - [x] `brands` - Has branding assets available for the integration
 - [x] `common-modules` - Place common patterns in common modules
-- [ ] `config-flow-test-coverage` - Full test coverage for the config flow
+- [x] `config-flow-test-coverage` - Full test coverage for the config flow
 - [x] `config-flow` - Integration needs to be able to be set up via the UI
     - [x] Uses `data_description` to give context to fields
     - [x] Uses `ConfigEntry.data` and `ConfigEntry.options` correctly
@@ -30,7 +30,7 @@
 - [x] `log-when-unavailable` - If internet/device/service is unavailable, log once when unavailable and once when back connected
 - [x] `parallel-updates` - Number of parallel updates is specified
 - [x] `reauthentication-flow` - Reauthentication needs to be available via the UI
-- [ ] `test-coverage` - Above 95% test coverage for all integration modules
+- [x] `test-coverage` - Above 95% test coverage for all integration modules
 
 ## Gold
 - [x] `devices` - The integration creates devices
@@ -42,7 +42,7 @@
 - [x] `docs-known-limitations` - The documentation describes known limitations of the integration (not to be confused with bugs)
 - [x] `docs-supported-devices` - The documentation describes known supported / unsupported devices
 - [x] `docs-supported-functions` - The documentation describes the supported functionality, including entities, and platforms
-- [x] `docs-troubleshooting` - The documentation provides troubleshooting information
+- [x] `docs-troubleshooting` - The Documentation provides troubleshooting information
 - [x] `docs-use-cases` - The documentation describes use cases to illustrate how this integration can be used
 - [x] `dynamic-devices` - Devices added after integration setup
 - [x] `entity-category` - Entities are assigned an appropriate EntityCategory
