@@ -603,10 +603,14 @@ class TestOscillationPrevention:
         )
 
         # Should charge during PV surplus (steps 4-7)
-        charge_count = sum(1 for mode in result.mode_schedule[4:8] if mode == "charging")
+        charge_count = sum(
+            1 for mode in result.mode_schedule[4:8] if mode == "charging"
+        )
 
         # Should discharge during evening high prices (steps 8-15)
-        discharge_count = sum(1 for mode in result.mode_schedule[8:] if mode == "discharging")
+        discharge_count = sum(
+            1 for mode in result.mode_schedule[8:] if mode == "discharging"
+        )
 
         assert charge_count > 0, "Should charge during PV surplus to use later"
         assert discharge_count > 0, "Should discharge during expensive evening"

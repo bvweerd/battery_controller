@@ -612,7 +612,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             else:
                 # Sensor unavailable - fall back to fixed price
                 fixed_price = float(
-                    self.config.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)
+                    self.config.get(
+                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                    )
                 )
                 feed_in_forecast = [fixed_price] * len(price_forecast)
         else:
