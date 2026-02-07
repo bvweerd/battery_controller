@@ -12,7 +12,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONTROL_MODES,
-    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Battery Controller select entities from a config entry."""
-    data = hass.data[DOMAIN][entry.entry_id]
+    data = entry.runtime_data
     device = data["device"]
     optimization_coordinator = data["optimization_coordinator"]
 

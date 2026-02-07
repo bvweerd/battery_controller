@@ -22,7 +22,6 @@ from .const import (
     DEFAULT_MIN_SOC_PERCENT,
     DEFAULT_MAX_SOC_PERCENT,
     DEFAULT_ZERO_GRID_DEADBAND_W,
-    DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,7 +33,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Battery Controller number entities from a config entry."""
-    data = hass.data[DOMAIN][entry.entry_id]
+    data = entry.runtime_data
     config = data["config"]
     device = data["device"]
 

@@ -2,13 +2,53 @@
 
 **Home battery cost optimization for Home Assistant**
 
-Minimize electricity costs by intelligently scheduling battery charge and discharge cycles using dynamic programming, price forecasts, PV production, and consumption patterns.
-
 [![GitHub Release](https://img.shields.io/github/release/bvweerd/battery_controller.svg?style=flat-square)](https://github.com/bvweerd/battery_controller/releases)
 [![License](https://img.shields.io/github/license/bvweerd/battery_controller.svg?style=flat-square)](LICENSE)
 [![hacs](https://img.shields.io/badge/HACS-Default-orange.svg?style=flat-square)](https://hacs.xyz)
 
 ---
+
+## High-level Description
+
+This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses dynamic programming to calculate the optimal charge/discharge schedule based on electricity price forecasts, PV production forecasts, and your household's energy consumption patterns. By intelligently deciding when to charge from the grid or solar, and when to discharge to power your home or sell back to the grid, it helps you save money and maximize your investment in a home battery and solar panels.
+
+## Installation
+
+### Prerequisites
+- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
+- A battery SoC sensor from your inverter integration.
+- [HACS](https://hacs.xyz/) installed in your Home Assistant.
+
+### Installation via HACS (Recommended)
+1.  Navigate to the HACS section in your Home Assistant.
+2.  Go to "Integrations", and click the three dots in the top right corner and select "Custom repositories".
+3.  Enter `https://github.com/bvweerd/battery_controller` in the "Repository" field, select "Integration" as the category, and click "Add".
+4.  The "Battery Controller" integration will now be shown. Click "Install" and proceed with the installation.
+5.  Restart Home Assistant.
+
+### Manual Installation
+1.  Copy the `custom_components/battery_controller` directory to your Home Assistant's `custom_components` directory.
+2.  Restart Home Assistant.
+
+After installation, the integration can be added and configured through the UI:
+**Settings -> Devices & Services -> Add Integration -> Battery Controller**
+
+## Removal
+
+1.  Go to **Settings -> Devices & Services**.
+2.  Find the "Battery Controller" integration and click the three dots.
+3.  Select "Delete" and confirm.
+4.  To completely remove it, use HACS to uninstall the repository or manually delete the `battery_controller` folder from your `custom_components` directory.
+5.  Restart Home Assistant.
+
+## Supported Devices
+
+This is a calculated integration and does not directly communicate with any specific hardware. It works with any battery inverter and electricity meter as long as they provide the required sensors in Home Assistant.
+
+## Known Limitations
+
+- The optimization is only as good as the forecasts it receives. Inaccurate price, PV, or consumption forecasts will lead to a suboptimal schedule.
+- The household consumption forecast is based on historical data and does not account for future one-off events (e.g., having a party, going on vacation).
 
 ## What is Battery Controller?
 
@@ -114,20 +154,6 @@ The optimizer automatically handles:
 - **AC charge path**: PV → Inverter → AC → Charger → Battery (~85% efficient)
 - **Excess DC PV**: Converted to AC through inverter (~96% efficient)
 - Optimizer prefers DC charging when available (higher efficiency = lower cost)
-
-## Installation
-
-### HACS (Recommended)
-
-1. Open HACS in Home Assistant
-2. Go to "Integrations" -> "+" -> Search "Battery Controller"
-3. Download and restart Home Assistant
-
-### Manual
-
-1. Copy `custom_components/battery_controller` to your `custom_components` directory
-2. Restart Home Assistant
-3. Go to **Settings -> Devices & Services -> Add Integration -> Battery Controller**
 
 ## Configuration
 

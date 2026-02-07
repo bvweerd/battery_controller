@@ -9,7 +9,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
 
 # Sensor entity IDs may be considered private; redact them
 TO_REDACT: set[str] = {
@@ -28,7 +27,7 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
 
-    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    entry_data = entry.runtime_data if hasattr(entry, "runtime_data") else {}
 
     weather_coord = entry_data.get("weather_coordinator")
     forecast_coord = entry_data.get("forecast_coordinator")

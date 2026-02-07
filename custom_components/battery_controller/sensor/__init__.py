@@ -29,7 +29,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Battery Controller sensors from a config entry."""
-    data = hass.data[DOMAIN][entry.entry_id]
+    data = entry.runtime_data
     optimization_coordinator = data["optimization_coordinator"]
     forecast_coordinator = data["forecast_coordinator"]
     device = data["device"]
@@ -74,10 +74,8 @@ class BatteryControllerSensor(CoordinatorEntity, SensorEntity):
 
     def _get_optimization_result(self):
         """Get the latest optimization result from the optimization coordinator."""
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
-        opt_coord = entry_data.get("optimization_coordinator")
-        if opt_coord and opt_coord.data:
-            return opt_coord.data.get("optimization_result")
+        if self.coordinator and self.coordinator.data:
+            return self.coordinator.data.get("optimization_result")
         return None
 
 
@@ -372,7 +370,11 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
         current_grid_w = action.get("current_grid_w", 0.0)
         return {
             "current_grid_kw": round(current_grid_w / 1000, 3),
-            "direction": "importing" if current_grid_w > 0 else "exporting" if current_grid_w < 0 else "balanced",
+            "direction": "importing"
+            if current_grid_w > 0
+            else "exporting"
+            if current_grid_w < 0
+            else "balanced",
             "import_w": round(max(0, current_grid_w), 0),
             "export_w": round(abs(min(0, current_grid_w)), 0),
         }

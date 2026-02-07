@@ -24,8 +24,6 @@ _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
-
-
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the base integration (no YAML)."""
     hass.data.setdefault(DOMAIN, {})
@@ -71,13 +69,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sw_version="1.0.0",
     )
 
-    # Store coordinators and config in hass.data
-    hass.data[DOMAIN][entry.entry_id] = {
+    # Store coordinators and config in runtime_data
+    entry.runtime_data = {
         "weather_coordinator": weather_coordinator,
         "forecast_coordinator": forecast_coordinator,
         "optimization_coordinator": optimization_coordinator,
         "config": config,
-        "entry": entry,
         "device": device,
     }
 
@@ -103,23 +100,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Unloading entry %s", entry.entry_id)
 
     # Shutdown coordinators
-    entry_data = hass.data[DOMAIN].get(entry.entry_id)
-    if entry_data:
-        forecast_coordinator = entry_data.get("forecast_coordinator")
+    if hasattr(entry, "runtime_data"):
+        forecast_coordinator = entry.runtime_data.get("forecast_coordinator")
         if forecast_coordinator:
             await forecast_coordinator.async_shutdown()
 
-        optimization_coordinator = entry_data.get("optimization_coordinator")
+        optimization_coordinator = entry.runtime_data.get("optimization_coordinator")
         if optimization_coordinator:
             await optimization_coordinator.async_shutdown()
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
         _LOGGER.debug("Successfully unloaded entry %s", entry.entry_id)
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
-    else:
-        _LOGGER.warning("Failed to unload entry %s", entry.entry_id)
 
     return unload_ok

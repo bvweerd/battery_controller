@@ -62,20 +62,6 @@ from .const import (
 )
 
 
-def _opt_entity(key: str, val: Any) -> vol.Optional:
-    """Create vol.Optional, omitting default when None to avoid selector validation."""
-    if val:
-        return vol.Optional(key, default=val)
-    return vol.Optional(key)
-
-
-def _req_entity(key: str, val: Any) -> vol.Required:
-    """Create vol.Required, omitting default when None to avoid selector validation."""
-    if val:
-        return vol.Required(key, default=val)
-    return vol.Required(key)
-
-
 def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     """Build the main config form schema (without extra PV arrays).
 
@@ -89,33 +75,39 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(
                 CONF_CAPACITY_KWH,
                 default=d.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH),
+                description={"suggested_value": d.get(CONF_CAPACITY_KWH)},
             ): vol.Coerce(float),
             vol.Required(
                 CONF_MAX_CHARGE_POWER_KW,
                 default=d.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW),
+                description={"suggested_value": d.get(CONF_MAX_CHARGE_POWER_KW)},
             ): vol.Coerce(float),
             vol.Required(
                 CONF_MAX_DISCHARGE_POWER_KW,
                 default=d.get(
                     CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
                 ),
+                description={"suggested_value": d.get(CONF_MAX_DISCHARGE_POWER_KW)},
             ): vol.Coerce(float),
             vol.Required(
                 CONF_ROUND_TRIP_EFFICIENCY,
                 default=d.get(
                     CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY
                 ),
+                description={"suggested_value": d.get(CONF_ROUND_TRIP_EFFICIENCY)},
             ): vol.Coerce(float),
         }
     )
 
     sensors_schema = vol.Schema(
         {
-            _req_entity(CONF_PRICE_SENSOR, d.get(CONF_PRICE_SENSOR)): selector(
-                {"entity": {"domain": "sensor"}}
-            ),
-            _req_entity(
-                CONF_BATTERY_SOC_SENSOR, d.get(CONF_BATTERY_SOC_SENSOR)
+            vol.Required(
+                CONF_PRICE_SENSOR,
+                description={"suggested_value": d.get(CONF_PRICE_SENSOR)},
+            ): selector({"entity": {"domain": "sensor"}}),
+            vol.Required(
+                CONF_BATTERY_SOC_SENSOR,
+                description={"suggested_value": d.get(CONF_BATTERY_SOC_SENSOR)},
             ): selector(
                 {
                     "entity": {
@@ -135,30 +127,37 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Optional(
                 CONF_PV_PEAK_POWER_KWP,
                 default=d.get(CONF_PV_PEAK_POWER_KWP, DEFAULT_PV_PEAK_POWER_KWP),
+                description={"suggested_value": d.get(CONF_PV_PEAK_POWER_KWP)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_ORIENTATION,
                 default=d.get(CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION),
+                description={"suggested_value": d.get(CONF_PV_ORIENTATION)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_TILT,
                 default=d.get(CONF_PV_TILT, DEFAULT_PV_TILT),
+                description={"suggested_value": d.get(CONF_PV_TILT)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_EFFICIENCY_FACTOR,
                 default=d.get(CONF_PV_EFFICIENCY_FACTOR, DEFAULT_PV_EFFICIENCY_FACTOR),
+                description={"suggested_value": d.get(CONF_PV_EFFICIENCY_FACTOR)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_DC_COUPLED,
                 default=d.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED),
+                description={"suggested_value": d.get(CONF_PV_DC_COUPLED)},
             ): bool,
             vol.Optional(
                 CONF_PV_DC_PEAK_POWER_KWP,
                 default=d.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP),
+                description={"suggested_value": d.get(CONF_PV_DC_PEAK_POWER_KWP)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_PV_DC_EFFICIENCY,
                 default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
+                description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
             ): vol.Coerce(float),
         }
     )
@@ -166,22 +165,28 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     energy_selector = selector(
         {"entity": {"domain": "sensor", "device_class": "energy", "multiple": True}}
     )
-    consumption_sensors = d.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS, [])
-    production_sensors = d.get(CONF_ELECTRICITY_PRODUCTION_SENSORS, [])
 
     optional_sensors_schema = vol.Schema(
         {
-            _opt_entity(
-                CONF_FEED_IN_PRICE_SENSOR, d.get(CONF_FEED_IN_PRICE_SENSOR)
+            vol.Optional(
+                CONF_FEED_IN_PRICE_SENSOR,
+                description={"suggested_value": d.get(CONF_FEED_IN_PRICE_SENSOR)},
             ): selector({"entity": {"domain": "sensor"}}),
-            _opt_entity(
-                CONF_BATTERY_POWER_SENSOR, d.get(CONF_BATTERY_POWER_SENSOR)
+            vol.Optional(
+                CONF_BATTERY_POWER_SENSOR,
+                description={"suggested_value": d.get(CONF_BATTERY_POWER_SENSOR)},
             ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
-            _opt_entity(
-                CONF_ELECTRICITY_CONSUMPTION_SENSORS, consumption_sensors or None
+            vol.Optional(
+                CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+                description={
+                    "suggested_value": d.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS)
+                },
             ): energy_selector,
-            _opt_entity(
-                CONF_ELECTRICITY_PRODUCTION_SENSORS, production_sensors or None
+            vol.Optional(
+                CONF_ELECTRICITY_PRODUCTION_SENSORS,
+                description={
+                    "suggested_value": d.get(CONF_ELECTRICITY_PRODUCTION_SENSORS)
+                },
             ): energy_selector,
         }
     )
@@ -191,6 +196,7 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Optional(
                 CONF_TIME_STEP_MINUTES,
                 default=d.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES),
+                description={"suggested_value": d.get(CONF_TIME_STEP_MINUTES)},
             ): vol.Coerce(int),
             vol.Optional(
                 CONF_OPTIMIZATION_INTERVAL_MINUTES,
@@ -198,14 +204,19 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     CONF_OPTIMIZATION_INTERVAL_MINUTES,
                     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
                 ),
+                description={
+                    "suggested_value": d.get(CONF_OPTIMIZATION_INTERVAL_MINUTES)
+                },
             ): vol.Coerce(int),
             vol.Optional(
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),
+                description={"suggested_value": d.get(CONF_FIXED_FEED_IN_PRICE)},
             ): vol.Coerce(float),
             vol.Optional(
                 CONF_ZERO_GRID_ENABLED,
                 default=d.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED),
+                description={"suggested_value": d.get(CONF_ZERO_GRID_ENABLED)},
             ): bool,
         }
     )
