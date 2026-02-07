@@ -226,21 +226,21 @@ class ZeroGridController:
     def apply_deadband(
         self,
         target_w: float,
-        current_w: float,
     ) -> float:
         """Apply deadband to prevent oscillation.
 
         Only change the setpoint if the difference exceeds the deadband.
+        Compares with the previous target, not current battery power,
+        to avoid oscillation caused by the battery responding to commands.
 
         Args:
             target_w: New target power in W
-            current_w: Current power setpoint in W
 
         Returns:
             Adjusted target respecting deadband
         """
-        if abs(target_w - current_w) < self.config.deadband_w:
-            return current_w
+        if abs(target_w - self._last_target_w) < self.config.deadband_w:
+            return self._last_target_w
         return target_w
 
     def get_control_action(
@@ -272,7 +272,10 @@ class ZeroGridController:
         )
 
         # Apply deadband
-        final_target_w = self.apply_deadband(raw_target_w, current_battery_w)
+        final_target_w = self.apply_deadband(raw_target_w)
+
+        # Update last target for next deadband calculation
+        self._last_target_w = final_target_w
 
         # Determine action mode
         if final_target_w > 50:

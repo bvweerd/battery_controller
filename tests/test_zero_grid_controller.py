@@ -232,12 +232,21 @@ class TestDeadband:
     """Tests for deadband hysteresis."""
 
     def test_within_deadband_no_change(self, controller):
-        result = controller.apply_deadband(target_w=1020, current_w=1000)
+        # Set previous target
+        controller._last_target_w = 1000
+        result = controller.apply_deadband(target_w=1020)
         assert result == 1000  # Within 50W deadband
 
     def test_exceeds_deadband_changes(self, controller):
-        result = controller.apply_deadband(target_w=1100, current_w=1000)
+        # Set previous target
+        controller._last_target_w = 1000
+        result = controller.apply_deadband(target_w=1100)
         assert result == 1100  # Exceeds 50W deadband
+
+    def test_first_call_no_deadband(self, controller):
+        # First call with _last_target_w = 0
+        result = controller.apply_deadband(target_w=1000)
+        assert result == 1000  # No previous target, apply new target
 
 
 class TestGetControlAction:
