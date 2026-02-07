@@ -607,6 +607,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else:
                     effective_mode = "zero_grid"
                 effective_power = 0.0
+            elif result.optimal_mode == "discharging":
+                # Use zero_grid instead of fixed-rate discharge.
+                # Fixed discharge may export excess to grid at low feed-in
+                # price, wasting battery capacity that could cover consumption
+                # longer during the expensive period.
+                effective_mode = "zero_grid"
+                effective_power = 0.0
             elif (
                 result.optimal_mode == "charging"
                 and total_pv_kw > current_consumption_kw
