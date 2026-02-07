@@ -739,11 +739,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 has_upcoming_discharge = any(
                     m == "discharging" for m in result.mode_schedule[1:]
                 )
-                if has_upcoming_discharge or current_grid < 0:
-                    # Preserve capacity (discharge planned or exporting already)
+                if has_upcoming_discharge and current_grid >= 0:
+                    # Preserve capacity (discharge planned, no PV surplus)
                     effective_mode = "idle"
                 else:
-                    # Importing from grid + no discharge planned → zero_grid OK
+                    # Either no discharge planned, or PV surplus to capture
                     effective_mode = "zero_grid"
                 effective_power = 0.0
             elif result.optimal_mode == "discharging":
