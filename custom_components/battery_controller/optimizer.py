@@ -323,6 +323,9 @@ def optimize_battery_schedule(
         time_step_hours=time_step_hours,
         min_soc_kwh=battery_config.min_soc_kwh,
         max_soc_kwh=battery_config.max_soc_kwh,
+        pv_forecast=pv_forecast[:n_steps],
+        consumption_forecast=consumption_forecast[:n_steps],
+        feed_in_forecast=feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps],
     )
 
     # Calculate costs
@@ -380,23 +383,32 @@ def _filter_oscillations(
     time_step_hours: float,
     min_soc_kwh: float,
     max_soc_kwh: float,
+    pv_forecast: list[float] | None = None,
+    consumption_forecast: list[float] | None = None,
+    feed_in_forecast: list[float] | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out unprofitable oscillations from the schedule.
 
     Removes rapid charge/discharge switches that don't have sufficient
     price spread to justify the round-trip efficiency losses and degradation.
 
+    Takes into account PV surplus opportunity cost (feed-in price) when
+    evaluating charging profitability.
+
     Args:
         power_schedule_kw: Power schedule in kW
         mode_schedule: Mode schedule
         soc_schedule_kwh: SoC schedule in kWh
-        price_forecast: Price forecast in EUR/kWh
+        price_forecast: Grid buy price forecast in EUR/kWh
         min_price_spread: Minimum price spread required
         degradation_cost_per_kwh: Degradation cost
         rte: Round trip efficiency
         time_step_hours: Time step duration in hours
         min_soc_kwh: Minimum SoC
         max_soc_kwh: Maximum SoC
+        pv_forecast: PV production forecast in kW (optional)
+        consumption_forecast: Consumption forecast in kW (optional)
+        feed_in_forecast: Feed-in price forecast in EUR/kWh (optional)
 
     Returns:
         Filtered (power_schedule, mode_schedule, soc_schedule)
@@ -414,6 +426,21 @@ def _filter_oscillations(
     # => P_discharge > P_charge / rte + (2 * degradation + min_spread) / sqrt(rte)
     min_arbitrage_spread = 2 * degradation_cost_per_kwh / sqrt_rte + min_price_spread
 
+    # Helper to get actual charge cost (grid price or feed-in opportunity cost)
+    def get_charge_cost(timestep: int) -> float:
+        """Get the actual cost of charging at a given timestep.
+
+        If there's PV surplus, charging costs the feed-in opportunity cost.
+        Otherwise, it costs the grid price.
+        """
+        if pv_forecast and consumption_forecast and feed_in_forecast:
+            pv_surplus = pv_forecast[timestep] - consumption_forecast[timestep]
+            if pv_surplus > 0.05:  # 50W threshold for PV surplus
+                # Charging with PV surplus = opportunity cost of not selling
+                return feed_in_forecast[timestep]
+        # Otherwise charging from grid
+        return price_forecast[timestep]
+
     # Look for rapid charge/discharge oscillations
     i = 0
     while i < len(filtered_mode) - 1:
@@ -422,9 +449,9 @@ def _filter_oscillations(
             for j in range(i + 1, min(i + 8, len(filtered_mode))):  # 2 hours lookahead
                 if filtered_mode[j] == "discharging":
                     # Found charge followed by discharge - check if profitable
-                    charge_price = price_forecast[i]
+                    charge_cost = get_charge_cost(i)  # May be feed-in opportunity cost
                     discharge_price = price_forecast[j]
-                    effective_spread = discharge_price - charge_price / rte
+                    effective_spread = discharge_price - charge_cost / rte
 
                     if effective_spread < min_arbitrage_spread:
                         # Not profitable - replace with idle
@@ -437,8 +464,8 @@ def _filter_oscillations(
                 if filtered_mode[j] == "charging":
                     # Found discharge followed by charge - check if profitable
                     discharge_price = price_forecast[i]
-                    charge_price = price_forecast[j]
-                    effective_spread = discharge_price - charge_price / rte
+                    charge_cost = get_charge_cost(j)  # May be feed-in opportunity cost
+                    effective_spread = discharge_price - charge_cost / rte
 
                     if effective_spread < min_arbitrage_spread:
                         # Not profitable - replace with idle

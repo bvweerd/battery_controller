@@ -578,3 +578,35 @@ class TestOscillationPrevention:
         assert any(mode == "charging" for mode in result.mode_schedule[:4])
         # Should discharge during expensive periods
         assert any(mode == "discharging" for mode in result.mode_schedule[4:8])
+
+    def test_allows_pv_arbitrage_with_feed_in(self, battery_config):
+        """Optimizer should charge during PV when can't discharge enough beforehand."""
+        # Low starting SoC scenario: can't discharge much in morning,
+        # so charging during PV for evening discharge becomes optimal
+        grid_price = [0.24] * 4 + [0.25] * 4 + [0.30] * 8  # Evening expensive
+        feed_in_price = [0.07] * 16  # Low feed-in price
+
+        # PV surplus in middle period
+        pv_forecast = [0.0] * 4 + [2.0] * 4 + [0.0] * 8  # 2kW PV midday
+        consumption_forecast = [0.5] * 16  # 0.5kW constant load
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=1.5,  # Very low SoC - can't discharge much in morning
+            price_forecast=grid_price,
+            feed_in_forecast=feed_in_price,
+            pv_forecast=pv_forecast,
+            consumption_forecast=consumption_forecast,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+        # Should charge during PV surplus (steps 4-7)
+        charge_count = sum(1 for mode in result.mode_schedule[4:8] if mode == "charging")
+
+        # Should discharge during evening high prices (steps 8-15)
+        discharge_count = sum(1 for mode in result.mode_schedule[8:] if mode == "discharging")
+
+        assert charge_count > 0, "Should charge during PV surplus to use later"
+        assert discharge_count > 0, "Should discharge during expensive evening"
