@@ -49,6 +49,7 @@ async def async_setup_entry(
         # Financial sensors
         BatteryDailySavingsSensor(optimization_coordinator, device, entry),
         # Grid control sensors
+        CurrentGridPowerSensor(optimization_coordinator, device, entry),
         BatteryGridSetpointSensor(optimization_coordinator, device, entry),
         BatteryControlModeSensor(optimization_coordinator, device, entry),
         # Diagnostics
@@ -339,6 +340,41 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
         return {
             "baseline_cost": round(self.coordinator.data.get("baseline_cost", 0.0), 3),
             "optimized_cost": round(self.coordinator.data.get("total_cost", 0.0), 3),
+        }
+
+
+class CurrentGridPowerSensor(BatteryControllerSensor):
+    """Sensor for current grid power (import/export)."""
+
+    _attr_translation_key = "current_grid_power"
+    _attr_name = "Current Grid Power"
+    _attr_native_unit_of_measurement = "W"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:transmission-tower"
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "current_grid_power")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        action = self.coordinator.data.get("control_action", {})
+        current_grid = action.get("current_grid_w", 0.0)
+        return round(current_grid, 0)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        action = self.coordinator.data.get("control_action", {})
+        current_grid_w = action.get("current_grid_w", 0.0)
+        return {
+            "current_grid_kw": round(current_grid_w / 1000, 3),
+            "direction": "importing" if current_grid_w > 0 else "exporting" if current_grid_w < 0 else "balanced",
+            "import_w": round(max(0, current_grid_w), 0),
+            "export_w": round(abs(min(0, current_grid_w)), 0),
         }
 
 

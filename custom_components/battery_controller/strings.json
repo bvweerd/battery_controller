@@ -187,6 +187,9 @@
       "daily_savings": {
         "name": "Estimated Savings"
       },
+      "current_grid_power": {
+        "name": "Current Grid Power"
+      },
       "grid_setpoint": {
         "name": "Grid Setpoint"
       },

@@ -729,14 +729,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if result.optimal_mode == "idle":
                 # Check if the optimizer has planned discharge periods ahead.
                 # If so, it needs the battery capacity preserved for those
-                # expensive periods -> stay idle (only allow PV surplus charging).
-                # If not, zero_grid is fine for self-consumption.
+                # expensive periods -> stay idle unless there's PV surplus.
+                # With PV surplus (grid < 0), switch to zero_grid to capture it.
                 has_upcoming_discharge = any(
                     m == "discharging" for m in result.mode_schedule[1:]
                 )
-                if has_upcoming_discharge:
+                if has_upcoming_discharge and current_grid >= 0:
+                    # Preserve battery capacity, no PV surplus
                     effective_mode = "idle"
                 else:
+                    # Either no upcoming discharge, or PV surplus to capture
                     effective_mode = "zero_grid"
                 effective_power = 0.0
             elif result.optimal_mode == "discharging":
