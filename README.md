@@ -241,7 +241,7 @@ The consumption and production sensors are used to learn your household's consum
 
 | Entity | Unit | Description | Attributes |
 |--------|------|-------------|------------|
-| Optimal Power | kW | Recommended battery power | `optimal_mode`, `current_price` |
+| **Optimal Power** | kW | **Strategy**: Battery power from DP optimizer (15-min planning). Use in `follow_schedule` mode. | `optimal_mode`, `current_price` |
 | Optimal Mode | — | Current mode: `charging`, `discharging`, `idle`, `zero_grid`, `manual` | — |
 | **Schedule** | — | Full optimization schedule (see below) | `power_schedule_kw`, `mode_schedule`, `soc_schedule_kwh`, `price_forecast` |
 | State of Charge | % | Current battery SoC | `soc_kwh`, `power_kw`, `mode` |
@@ -250,13 +250,37 @@ The consumption and production sensors are used to learn your household's consum
 | Consumption Forecast | kW | Current consumption estimate | `forecast_kw` |
 | Net Grid Forecast | kW | Net grid power (positive=import) | `forecast_kw` |
 | Estimated Savings | EUR | Cost savings from optimization | `baseline_cost`, `optimized_cost` |
-| Grid Setpoint | W | Target grid power (zero-grid) | Full control action dict |
+| **Grid Setpoint** | W | **Tactics**: Real-time battery power from zero-grid controller (~5s updates). Use in `hybrid`/`zero_grid` modes. | `target_power_w`, `current_grid_w`, `current_battery_w`, `dp_schedule_w`, `mode`, `action_mode`, `soc_kwh`, `soc_percent` |
 | Control Mode | — | Current control mode | — |
 | Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `timestamp` |
 
 \* Only present when DC-coupled PV is configured.
 
 All `forecast_kw` attributes are lists at **optimizer step resolution** (default: 15 minutes). Step 0 = current, step 1 = next step, etc. The PV, Consumption, and Net Grid sensors each have their own `forecast_kw`, all at the same resolution and time alignment as the Schedule sensor.
+
+#### Optimal Power vs Grid Setpoint
+
+These two sensors serve **different purposes** and update at different frequencies:
+
+| Aspect | Optimal Power | Grid Setpoint |
+|--------|---------------|---------------|
+| **Source** | DP optimizer (strategic planning) | Zero-grid controller (tactical execution) |
+| **Update frequency** | Every 15 minutes | Every ~5 seconds (when grid sensor configured) |
+| **Purpose** | Long-term cost optimization | Real-time grid exchange minimization |
+| **Value in follow_schedule** | DP schedule power (e.g., +0.5 kW) | Same as Optimal Power |
+| **Value in hybrid** | DP schedule or 0 (idle) | Real-time calculated (e.g., -680W to zero grid) |
+| **Value in zero_grid** | Always 0 kW | Real-time calculated |
+| **Use in automation** | ✅ follow_schedule mode | ✅ hybrid/zero_grid modes |
+
+**Example (hybrid mode):**
+- Situation: Grid importing 680W, battery charging 258W, PV producing 348W
+- **Optimal Power**: 0 kW (DP says "idle", let zero-grid decide)
+- **Grid Setpoint**: -680W (real-time: "discharge to eliminate grid import")
+
+**Which to use?**
+- **follow_schedule**: Use `optimal_power` (follows DP schedule exactly)
+- **hybrid/zero_grid**: Use `grid_setpoint` (real-time, more accurate)
+- **Monitoring**: Use both to see strategy vs execution
 
 ### Schedule Sensor (detail)
 
@@ -336,49 +360,67 @@ Battery Controller calculates the optimal schedule but does **not** directly con
 
 ### Key Sensors for Control
 
-| Sensor | Values | Purpose |
-|--------|--------|---------|
-| `sensor.battery_controller_optimal_mode` | `charging`, `discharging`, `idle`, `zero_grid`, `manual` | What the battery should do now |
-| `sensor.battery_controller_optimal_power` | float (kW) | How much power (positive=charge, negative=discharge) |
+| Sensor | Values | Update Frequency | Use When |
+|--------|--------|------------------|----------|
+| `sensor.battery_controller_optimal_mode` | `charging`, `discharging`, `idle`, `zero_grid`, `manual` | Every 15 min | Always (indicates what mode) |
+| `sensor.battery_controller_optimal_power` | float (kW) | Every 15 min | **follow_schedule** mode |
+| `sensor.battery_controller_grid_setpoint` | float (W) | Every ~5 sec | **hybrid** / **zero_grid** modes |
+
+**Which power sensor to use?**
+- **follow_schedule**: Use `optimal_power` (DP schedule, strategic planning)
+- **hybrid / zero_grid**: Use `grid_setpoint` (real-time calculated, tactical execution)
 
 The `optimal_mode` reflects the active **control mode**:
 
-| Control Mode | Optimal Mode | Optimal Power | Behavior |
-|-------------|-------------|---------------|----------|
-| `follow_schedule` | `charging` / `discharging` / `idle` | From DP schedule | Execute the optimized schedule exactly |
-| `hybrid` | `charging` / `discharging` / `zero_grid` | From DP schedule (0 for zero_grid) | Arbitrage from schedule, self-consumption during idle |
-| `zero_grid` | `zero_grid` | `0.0` | Inverter handles self-consumption |
-| `manual` | `manual` | `0.0` | No automatic control |
+| Control Mode | Optimal Mode | Power Sensor to Use | Behavior |
+|-------------|-------------|---------------------|----------|
+| `follow_schedule` | `charging` / `discharging` / `idle` | `optimal_power` (kW) | Execute the optimized schedule exactly |
+| `hybrid` | `charging` / `discharging` / `zero_grid` | `grid_setpoint` (W) | Arbitrage from schedule + real-time self-consumption |
+| `zero_grid` | `zero_grid` | `grid_setpoint` (W) | Real-time grid minimization |
+| `manual` | `manual` | (neither) | No automatic control |
 
 The raw DP schedule is always available via the **Schedule** sensor attributes, regardless of control mode.
 
 ### Example Automation
 
-This automation watches the optimal mode and sets the inverter accordingly. Adapt the entity IDs and service calls to your specific inverter integration.
+This automation uses the **correct sensor** for each control mode. Adapt the entity IDs and service calls to your specific inverter integration.
 
 ```yaml
 automation:
-  - alias: "Battery Controller - Follow optimal schedule"
-    description: "Set inverter mode and power based on optimizer output"
+  - alias: "Battery Controller - Control inverter"
+    description: "Set inverter mode and power based on Battery Controller"
     trigger:
       - platform: state
         entity_id: sensor.battery_controller_optimal_mode
       - platform: state
         entity_id: sensor.battery_controller_optimal_power
+      - platform: state
+        entity_id: sensor.battery_controller_grid_setpoint
     action:
+      - variables:
+          # Use grid_setpoint for hybrid/zero_grid (real-time), optimal_power for follow_schedule
+          control_mode: "{{ states('select.battery_controller_control_mode') }}"
+          optimal_mode: "{{ states('sensor.battery_controller_optimal_mode') }}"
+
+          # Select the right power sensor based on control mode
+          power_w: >
+            {% if control_mode in ['hybrid', 'zero_grid'] %}
+              {{ states('sensor.battery_controller_grid_setpoint') | float }}
+            {% else %}
+              {{ (states('sensor.battery_controller_optimal_power') | float * 1000) | round(0) }}
+            {% endif %}
+
       - choose:
           # Charging
           - conditions:
-              - condition: state
-                entity_id: sensor.battery_controller_optimal_mode
-                state: "charging"
+              - condition: template
+                value_template: "{{ optimal_mode == 'charging' or power_w > 50 }}"
             sequence:
               - service: number.set_value
                 target:
                   entity_id: number.YOUR_INVERTER_charge_power
                 data:
-                  value: >
-                    {{ (states('sensor.battery_controller_optimal_power') | float * 1000) | round(0) }}
+                  value: "{{ power_w | abs | round(0) }}"
               - service: select.select_option
                 target:
                   entity_id: select.YOUR_INVERTER_mode
@@ -387,33 +429,19 @@ automation:
 
           # Discharging
           - conditions:
-              - condition: state
-                entity_id: sensor.battery_controller_optimal_mode
-                state: "discharging"
+              - condition: template
+                value_template: "{{ optimal_mode == 'discharging' or power_w < -50 }}"
             sequence:
               - service: number.set_value
                 target:
                   entity_id: number.YOUR_INVERTER_discharge_power
                 data:
-                  value: >
-                    {{ (states('sensor.battery_controller_optimal_power') | float | abs * 1000) | round(0) }}
+                  value: "{{ power_w | abs | round(0) }}"
               - service: select.select_option
                 target:
                   entity_id: select.YOUR_INVERTER_mode
                 data:
                   option: "Force Discharge"
-
-          # Zero-grid: let inverter handle self-consumption
-          - conditions:
-              - condition: state
-                entity_id: sensor.battery_controller_optimal_mode
-                state: "zero_grid"
-            sequence:
-              - service: select.select_option
-                target:
-                  entity_id: select.YOUR_INVERTER_mode
-                data:
-                  option: "Maximize Self Consumption"
 
           # Idle or Manual: set inverter to auto/standby
         default:
@@ -423,6 +451,12 @@ automation:
             data:
               option: "Auto"
 ```
+
+**Key improvements:**
+- ✅ Uses `grid_setpoint` (W) for `hybrid` and `zero_grid` modes (real-time, accurate)
+- ✅ Uses `optimal_power` (kW) for `follow_schedule` mode (follows DP schedule)
+- ✅ Triggers on both sensors to catch all updates
+- ✅ Single logic for charge/discharge based on power value
 
 ### Inverter Integration
 
@@ -436,9 +470,11 @@ Check your inverter's Home Assistant integration documentation for the correct e
 - Mode: `select.{inverter}_mode`, `select.{inverter}_operation_mode`, `select.{inverter}_working_mode`
 - Power: `number.{inverter}_charge_power`, `number.{inverter}_discharge_power`, `number.{inverter}_max_power`
 
-> **Tip**: The `idle`, `manual`, and `zero_grid` modes all use the `default` branch. If you need different inverter behavior for each, replace the `default` with separate `choose` conditions.
+> **Tip**: The automation automatically uses the right sensor (`grid_setpoint` for hybrid/zero_grid, `optimal_power` for follow_schedule). No manual switching needed!
 
 > **Tip**: Set `select.battery_controller_control_mode` to `manual` to temporarily disable the automation and take manual control of your inverter.
+
+> **Note**: If your inverter requires separate entities for charge and discharge power, you may need to split the charge/discharge sequences to set the appropriate entity.
 
 ## Prerequisites
 
