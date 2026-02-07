@@ -616,9 +616,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 current_feed_in = (
                     resampled_feed_in[0]
                     if resampled_feed_in
-                    else float(self.config.get(
-                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                    ))
+                    else float(
+                        self.config.get(
+                            CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                        )
+                    )
                 )
                 if current_buy > 0 and current_feed_in >= current_buy:
                     # Feed-in >= buy: exporting is as good as self-consuming
