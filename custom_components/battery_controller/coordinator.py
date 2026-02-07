@@ -572,17 +572,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._last_result = result
 
         # Calculate zero-grid control action
-        # Net grid estimated from forecast (no instantaneous grid power sensor)
-        current_grid = 0.0
+        # Estimate current grid power from forecast data and battery state
+        # Net grid = consumption - PV + battery_charge (positive = importing)
+        current_pv_kw = forecast_data.get("current_pv_kw", 0.0)
+        current_dc_pv_kw = forecast_data.get("current_dc_pv_kw", 0.0)
+        current_consumption_kw = forecast_data.get("current_consumption_kw", 0.0)
+        # DC PV excess goes to AC side through inverter (~96% efficiency)
+        dc_pv_to_ac_kw = current_dc_pv_kw * 0.96
+        total_pv_kw = current_pv_kw + dc_pv_to_ac_kw
+        current_grid = (
+            current_consumption_kw - total_pv_kw + battery_state.power_kw
+        ) * 1000  # Convert to W
         dp_schedule_w = result.optimal_power_kw * 1000
-
-        control_action = self.zero_grid_controller.get_control_action(
-            current_grid_w=current_grid,
-            current_soc_kwh=battery_state.soc_kwh,
-            current_battery_w=battery_state.power_kw * 1000,
-            dp_schedule_w=dp_schedule_w,
-            mode=self._control_mode,
-        )
 
         # Determine effective mode/power based on control mode
         if self._control_mode == MODE_ZERO_GRID:
@@ -596,6 +597,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if result.optimal_mode == "idle":
                 effective_mode = "zero_grid"
                 effective_power = 0.0
+            elif result.optimal_mode == "charging" and total_pv_kw > current_consumption_kw:
+                # PV surplus available: use zero_grid to dynamically match
+                # the actual surplus instead of fixed-rate charging.
+                # Fixed charging may import from grid when clouds pass.
+                effective_mode = "zero_grid"
+                effective_power = 0.0
             else:
                 effective_mode = result.optimal_mode
                 effective_power = result.optimal_power_kw
@@ -603,6 +610,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # follow_schedule: execute DP schedule exactly
             effective_mode = result.optimal_mode
             effective_power = result.optimal_power_kw
+
+        # Calculate zero-grid control action using the resolved effective mode
+        # Map effective mode to zero_grid_controller mode
+        if effective_mode == "zero_grid":
+            controller_mode = "zero_grid"
+        elif effective_mode == "manual":
+            controller_mode = "manual"
+        elif effective_mode in ("charging", "discharging"):
+            controller_mode = "follow_schedule"
+        else:
+            controller_mode = self._control_mode
+
+        control_action = self.zero_grid_controller.get_control_action(
+            current_grid_w=current_grid,
+            current_soc_kwh=battery_state.soc_kwh,
+            current_battery_w=battery_state.power_kw * 1000,
+            dp_schedule_w=dp_schedule_w,
+            mode=controller_mode,
+        )
 
         return {
             "optimization_result": result,
