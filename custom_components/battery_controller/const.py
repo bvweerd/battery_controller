@@ -41,16 +41,6 @@ CONF_PV_EFFICIENCY_FACTOR = "pv_efficiency_factor"
 # Each dict has: peak_power_kwp, orientation, tilt
 CONF_PV_EXTRA_ARRAYS = "pv_extra_arrays"
 
-# Legacy keys - PV array 2 (kept for migration from VERSION 1)
-CONF_PV2_PEAK_POWER_KWP = "pv2_peak_power_kwp"
-CONF_PV2_ORIENTATION = "pv2_orientation"
-CONF_PV2_TILT = "pv2_tilt"
-
-# Legacy keys - PV array 3 (kept for migration from VERSION 1)
-CONF_PV3_PEAK_POWER_KWP = "pv3_peak_power_kwp"
-CONF_PV3_ORIENTATION = "pv3_orientation"
-CONF_PV3_TILT = "pv3_tilt"
-
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
 # battery without AC conversion. This is common with hybrid inverters
@@ -102,13 +92,6 @@ DEFAULT_PV_ORIENTATION = 180  # South
 DEFAULT_PV_TILT = 35  # Typical for Netherlands
 DEFAULT_PV_EFFICIENCY_FACTOR = 0.85
 
-# Default values - PV arrays 2 and 3
-DEFAULT_PV2_PEAK_POWER_KWP = 0.0
-DEFAULT_PV2_ORIENTATION = 90  # East
-DEFAULT_PV2_TILT = 35
-DEFAULT_PV3_PEAK_POWER_KWP = 0.0
-DEFAULT_PV3_ORIENTATION = 270  # West
-DEFAULT_PV3_TILT = 35
 
 # Default values - DC-coupled PV
 DEFAULT_PV_DC_COUPLED = False

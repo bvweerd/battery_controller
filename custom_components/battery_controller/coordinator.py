@@ -452,23 +452,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Read current battery state
         battery_state = self.get_current_battery_state()
 
-        # Determine controller mode based on last optimization's effective mode
-        # For idle mode: use zero_grid when PV surplus (grid < 0) since
-        # the real-time feedback loop (~5s) can switch back to idle fast
-        # enough to prevent meaningful battery drain when PV drops.
-        effective_mode = self._effective_mode
-        if effective_mode == "idle" and current_grid_w < 0:
-            controller_mode = "zero_grid"
-        elif effective_mode == "zero_grid":
-            controller_mode = "zero_grid"
-        elif effective_mode == "idle":
-            controller_mode = "idle"
-        elif effective_mode == "manual":
-            controller_mode = "manual"
-        elif effective_mode in ("charging", "discharging"):
-            controller_mode = "follow_schedule"
-        else:
-            controller_mode = self._control_mode
+        controller_mode = self._resolve_controller_mode(
+            self._effective_mode, current_grid_w
+        )
 
         # Recalculate zero_grid setpoint with actual sensor data
         control_action = self.zero_grid_controller.get_control_action(
@@ -489,6 +475,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "optimal_mode": control_action["action_mode"],
             }
         )
+
+    def _resolve_controller_mode(
+        self, effective_mode: str, current_grid_w: float
+    ) -> str:
+        """Map effective mode to zero_grid_controller mode.
+
+        For idle mode with PV surplus (grid < 0), upgrades to zero_grid
+        when a real-time grid sensor is available. The fast feedback loop
+        (~5s) ensures the controller reverts to idle quickly if PV drops.
+
+        Args:
+            effective_mode: The resolved mode from optimization logic.
+            current_grid_w: Current grid power in W (positive = import).
+
+        Returns:
+            Controller mode string for ZeroGridController.
+        """
+        if effective_mode == "zero_grid":
+            return "zero_grid"
+        if effective_mode == "idle" and current_grid_w < 0 and self._grid_power_sensor:
+            return "zero_grid"
+        if effective_mode == "idle":
+            return "idle"
+        if effective_mode == "manual":
+            return "manual"
+        if effective_mode in ("charging", "discharging"):
+            return "follow_schedule"
+        return self._control_mode
 
     def _get_realtime_grid_w(self) -> float | None:
         """Read current grid power from the configured grid sensor.
@@ -769,22 +783,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._dp_schedule_w = dp_schedule_w
 
         # Calculate zero-grid control action using the resolved effective mode
-        # Map effective mode to zero_grid_controller mode
-        if effective_mode == "zero_grid":
-            controller_mode = "zero_grid"
-        elif effective_mode == "idle" and current_grid < 0 and self._grid_power_sensor:
-            # Idle with real-time PV surplus: use zero_grid to charge.
-            # Real-time sensor feedback (~5s) makes this safe: if PV drops,
-            # the next update switches back to idle before meaningful drain.
-            controller_mode = "zero_grid"
-        elif effective_mode == "idle":
-            controller_mode = "idle"
-        elif effective_mode == "manual":
-            controller_mode = "manual"
-        elif effective_mode in ("charging", "discharging"):
-            controller_mode = "follow_schedule"
-        else:
-            controller_mode = self._control_mode
+        controller_mode = self._resolve_controller_mode(effective_mode, current_grid)
 
         control_action = self.zero_grid_controller.get_control_action(
             current_grid_w=current_grid,

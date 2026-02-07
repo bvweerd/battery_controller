@@ -86,10 +86,9 @@ def calculate_step_cost(
     Returns:
         Total cost in EUR for this time step
     """
-    charge_eff = math.sqrt(rte)
-    discharge_eff = math.sqrt(rte)
+    sqrt_rte = math.sqrt(rte)
     dc_eff = (
-        battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else charge_eff
+        battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else sqrt_rte
     )
 
     # Handle DC-coupled PV
@@ -101,8 +100,7 @@ def calculate_step_cost(
 
     if action_w > 0:  # CHARGING
         # Use DC PV first (free energy, higher efficiency)
-        dc_charge_possible = min(action_w, pv_dc_production_w * dc_eff)
-        dc_charge_w = dc_charge_possible
+        dc_charge_w = min(action_w, pv_dc_production_w * dc_eff)
         ac_charge_w = action_w - dc_charge_w
 
         # DC PV not used by battery goes to AC side (through inverter)
@@ -110,15 +108,14 @@ def calculate_step_cost(
         dc_pv_excess_w = max(0, pv_dc_production_w - dc_pv_used_w)
 
         # AC charging needs grid energy (with AC charge efficiency losses)
-        grid_to_battery_w = ac_charge_w / charge_eff if ac_charge_w > 0 else 0.0
+        grid_to_battery_w = ac_charge_w / sqrt_rte if ac_charge_w > 0 else 0.0
     else:  # DISCHARGING or IDLE
         # DC PV excess goes entirely to AC side (battery not absorbing it)
         dc_pv_excess_w = pv_dc_production_w
 
         if action_w < 0:
-            # Energy from battery to home (including losses)
-            battery_drained_w = abs(action_w)
-            usable_power_w = battery_drained_w * discharge_eff
+            # Energy from battery to home (including discharge losses)
+            usable_power_w = abs(action_w) * sqrt_rte
             grid_to_battery_w = -usable_power_w  # Negative = to home
         else:
             grid_to_battery_w = 0.0
@@ -359,17 +356,16 @@ def optimize_battery_schedule(
 
 
 def _find_nearest_soc_idx(soc_wh: float, soc_states: list[int]) -> int:
-    """Find the index of the nearest SoC state."""
-    best_idx = 0
-    best_diff = abs(soc_wh - soc_states[0])
+    """Find the index of the nearest SoC state.
 
-    for i, state in enumerate(soc_states):
-        diff = abs(soc_wh - state)
-        if diff < best_diff:
-            best_diff = diff
-            best_idx = i
-
-    return best_idx
+    Uses direct calculation since soc_states is a uniform grid,
+    giving O(1) lookup instead of O(n) linear scan.
+    """
+    if len(soc_states) <= 1:
+        return 0
+    step = soc_states[1] - soc_states[0]
+    idx = round((soc_wh - soc_states[0]) / step)
+    return max(0, min(idx, len(soc_states) - 1))
 
 
 def _empty_result(
