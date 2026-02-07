@@ -24,7 +24,7 @@ This Home Assistant custom integration optimizes your home battery to minimize e
 - **Price arbitrage**: Charge during cheap hours, discharge during expensive hours
 - **PV self-consumption**: Maximize use of solar energy, minimize feed-in
 - **Multi-array PV**: Up to 3 PV arrays with independent orientation/tilt (e.g. south + east + west)
-- **DC-coupled PV support**: Higher efficiency for panels directly on the battery inverter (hybrid inverters like SolarEdge, Huawei, GoodWe, Victron)
+- **DC-coupled PV support**: Higher efficiency for panels directly on the battery inverter's DC bus (hybrid inverters)
 - **DSMR energy sensors**: Learn consumption patterns from your smart meter's cumulative kWh sensors
 - **Zero-grid control**: Real-time battery control to minimize grid exchange
 - **Degradation-aware**: Accounts for battery wear in optimization decisions
@@ -32,24 +32,88 @@ This Home Assistant custom integration optimizes your home battery to minimize e
 
 ## How It Works
 
+### Architecture
+
 The integration runs three cascading coordinators:
 
 1. **Weather Coordinator** (every 30 min): Fetches solar radiation forecasts from open-meteo.com
 2. **Forecast Coordinator** (every 15 min): Calculates PV production and consumption forecasts
 3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller
 
-The optimizer discretizes the battery state-of-charge (100 Wh steps) and power actions (500 W steps), then uses backward induction to find the cost-minimal schedule over a configurable planning horizon.
+### Dynamic Programming Optimizer
 
-### Round-Trip Efficiency Model
+The core algorithm uses **backward induction** (dynamic programming) to find the cost-minimal battery schedule:
 
-Efficiency is split symmetrically: `charge_eff = discharge_eff = sqrt(RTE)`. For a battery with 90% RTE, each direction has ~95% efficiency.
+**1. State Space**
+- Time steps: 0 to T (e.g., 96 steps for 24 hours at 15-minute resolution)
+- SoC states: Discretized in 100 Wh steps (e.g., 100 states for a 10 kWh battery)
+- Power actions: Discretized in 500 W steps (charge/discharge/idle)
 
-### DC-Coupled PV
+**2. Cost Function** (per time step)
+- **Grid cost**: `price × (consumption - PV + battery_losses)`
+- **Degradation cost**: `€0.03/kWh × battery_throughput`
+- **Feed-in revenue**: `feed_in_price × exported_energy` (when negative)
 
-When PV panels are connected directly to the battery inverter's DC bus:
-- **Charge path**: PV -> MPPT -> Battery (~97% efficient)
-- **AC-coupled path**: PV -> Inverter -> AC -> Charger -> Battery (~85% efficient)
-- **Excess DC PV**: Goes through inverter to AC side at ~96% efficiency
+The optimizer compares:
+- Export PV surplus now vs store for later
+- Import from grid vs discharge battery
+- Battery cycling cost (RTE + degradation) vs price spread
+
+**3. Bellman Equation**
+
+```
+V[t][s] = min over actions (
+    step_cost(t, s, action) + V[t+1][s']
+)
+```
+
+Where:
+- `V[t][s]` = minimum cost from time `t` to end, starting at SoC state `s`
+- `s'` = new SoC after applying `action`
+- Terminal condition: `V[T][s] = 0` for all states
+
+**4. Algorithm Steps**
+
+**Backward pass** (planning):
+```python
+for t in range(T-1, -1, -1):  # From end to start
+    for each SoC state s:
+        for each action (charge/discharge/idle):
+            cost = immediate_cost + future_cost[next_state]
+            if cost < best_cost:
+                best_action[t][s] = action
+```
+
+**Forward pass** (execution):
+```python
+for t in range(0, T):
+    action = best_action[t][current_soc_state]
+    execute(action)
+    current_soc = new_soc_after_action
+```
+
+**5. Key Decisions**
+
+The optimizer automatically handles:
+- **Price arbitrage**: Charge during cheap hours (€0.05), discharge during expensive hours (€0.30)
+- **Feed-in optimization**:
+  - High feed-in (€0.10) + low future prices → Export now (don't store)
+  - Low feed-in (€0.04) + high future prices (€0.30) → Store for later
+- **Self-consumption**: Store PV surplus when grid import is expensive
+- **Degradation awareness**: Only cycles battery when price spread justifies wear cost
+
+### Efficiency Model
+
+**Round-Trip Efficiency (RTE)**
+- Split symmetrically: `charge_eff = discharge_eff = sqrt(RTE)`
+- For 90% RTE: each direction has ~94.9% efficiency
+- This ensures `charge_eff × discharge_eff = RTE`
+
+**DC-Coupled PV** (hybrid inverters)
+- **DC charge path**: PV → MPPT → Battery (~97% efficient)
+- **AC charge path**: PV → Inverter → AC → Charger → Battery (~85% efficient)
+- **Excess DC PV**: Converted to AC through inverter (~96% efficient)
+- Optimizer prefers DC charging when available (higher efficiency = lower cost)
 
 ## Installation
 
@@ -246,7 +310,7 @@ The raw DP schedule is always available via the **Schedule** sensor attributes, 
 
 ### Example Automation
 
-This automation watches the optimal mode and sets the inverter accordingly. Adapt the entity IDs and service calls to your inverter integration (e.g., SolarEdge, Huawei, GoodWe, Victron, SMA).
+This automation watches the optimal mode and sets the inverter accordingly. Adapt the entity IDs and service calls to your specific inverter integration.
 
 ```yaml
 automation:
@@ -316,17 +380,17 @@ automation:
               option: "Auto"
 ```
 
-### Inverter-Specific Notes
+### Inverter Integration
 
-Replace `YOUR_INVERTER` with your actual inverter entity names. Common patterns:
+Replace `YOUR_INVERTER` with your actual inverter entity names. Most battery inverters expose:
+- A **mode select entity** to control operation mode (charge/discharge/auto)
+- A **power number entity** to set charge/discharge power limits
 
-| Inverter | Mode Entity | Power Entity | Charge Mode | Discharge Mode | Idle Mode |
-|----------|------------|--------------|-------------|----------------|-----------|
-| SolarEdge (Modbus) | `select.solaredge_storage_command_mode` | `number.solaredge_storage_charge_limit` | `Charge from Solar+Grid` | `Discharge to Maximize Export` | `Maximize Self Consumption` |
-| Huawei (FusionSolar) | `select.battery_working_mode` | `number.battery_max_charge_power` | `Time of Use: Charge` | `Time of Use: Discharge` | `Maximize Self Consumption` |
-| GoodWe | `select.goodwe_operation_mode` | `number.goodwe_battery_charge_power` | `Eco Charge` | `Eco Discharge` | `General` |
-| Victron (VE.Bus) | `select.victron_ess_mode` | `number.victron_ess_max_charge_power` | `Keep batteries charged` | `Optimized (with BatteryLife)` | `Optimized (with BatteryLife)` |
-| SMA (Sunny Boy) | `select.sma_battery_control_mode` | `number.sma_battery_charge_power` | `Manual charge` | `Manual discharge` | `Automatic` |
+Check your inverter's Home Assistant integration documentation for the correct entity names and available modes.
+
+**Common entity patterns**:
+- Mode: `select.{inverter}_mode`, `select.{inverter}_operation_mode`, `select.{inverter}_working_mode`
+- Power: `number.{inverter}_charge_power`, `number.{inverter}_discharge_power`, `number.{inverter}_max_power`
 
 > **Tip**: The `idle`, `manual`, and `zero_grid` modes all use the `default` branch. If you need different inverter behavior for each, replace the `default` with separate `choose` conditions.
 

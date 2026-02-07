@@ -727,18 +727,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
             if result.optimal_mode == "idle":
-                # Check if the optimizer has planned discharge periods ahead.
-                # If so, it needs the battery capacity preserved for those
-                # expensive periods -> stay idle unless there's PV surplus.
-                # With PV surplus (grid < 0), switch to zero_grid to capture it.
+                # Optimizer wants to preserve battery capacity.
+                # This means: don't charge (even with PV surplus) and don't discharge.
+                #
+                # Why? Two common cases:
+                # 1. High feed-in price now → better to export than store
+                # 2. Upcoming expensive periods → preserve capacity for discharge
+                #
+                # Exception: if there's consumption (grid importing), use zero_grid
+                # to reduce import with available PV, without cycling the battery.
                 has_upcoming_discharge = any(
                     m == "discharging" for m in result.mode_schedule[1:]
                 )
-                if has_upcoming_discharge and current_grid >= 0:
-                    # Preserve battery capacity, no PV surplus
+                if has_upcoming_discharge or current_grid < 0:
+                    # Preserve capacity (discharge planned or exporting already)
                     effective_mode = "idle"
                 else:
-                    # Either no upcoming discharge, or PV surplus to capture
+                    # Importing from grid + no discharge planned → zero_grid OK
                     effective_mode = "zero_grid"
                 effective_power = 0.0
             elif result.optimal_mode == "discharging":
