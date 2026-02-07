@@ -132,7 +132,25 @@ for t in range(0, T):
     current_soc = new_soc_after_action
 ```
 
-**5. Key Decisions**
+**5. Oscillation Prevention**
+
+After the DP optimizer produces the initial schedule, a post-processing filter removes unprofitable charge/discharge oscillations:
+
+```python
+# Minimum profitable price spread for arbitrage
+min_spread_required = 2 * degradation / sqrt(RTE) + min_price_spread
+
+# For RTE=0.83, degradation=€0.03, min_price_spread=€0.05:
+# => min_spread_required ≈ €0.116/kWh
+
+# Check each charge/discharge pair within 2-hour window
+if P_discharge - P_charge / RTE < min_spread_required:
+    replace_with_idle()  # Not profitable enough
+```
+
+This prevents the battery from oscillating (charge → discharge → charge) when price differences are too small to justify the round-trip losses. The **Min Price Spread** number entity lets you adjust this threshold at runtime.
+
+**6. Key Decisions**
 
 The optimizer automatically handles:
 - **Price arbitrage**: Charge during cheap hours (€0.05), discharge during expensive hours (€0.30)
@@ -285,13 +303,13 @@ series:
 
 ### Number Entities (5)
 
-| Entity | Range | Description |
-|--------|-------|-------------|
-| Minimum SoC | 0-50% | Runtime adjustable min SoC |
-| Maximum SoC | 50-100% | Runtime adjustable max SoC |
-| Degradation Cost | 0-0.20 EUR/kWh | Battery wear cost per kWh throughput |
-| Min Price Spread | 0-0.50 EUR/kWh | Minimum price spread to trigger arbitrage |
-| Zero Grid Deadband | 0-500 W | Deadband for zero-grid mode |
+| Entity | Range | Default | Description |
+|--------|-------|---------|-------------|
+| Minimum SoC | 0-50% | 12% | Runtime adjustable min SoC |
+| Maximum SoC | 50-100% | 100% | Runtime adjustable max SoC |
+| Degradation Cost | 0-0.20 EUR/kWh | 0.03 | Battery wear cost per kWh throughput (accounts for battery replacement cost) |
+| **Min Price Spread** | 0-0.50 EUR/kWh | **0.05** | **Minimum price spread to trigger arbitrage**. Prevents oscillation when price differences are too small. Increase if battery cycles too frequently on small price variations. |
+| Zero Grid Deadband | 0-500 W | 10 W | Deadband for zero-grid mode (prevents rapid switching) |
 
 ### Select Entity
 

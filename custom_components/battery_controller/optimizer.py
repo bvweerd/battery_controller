@@ -311,6 +311,20 @@ def optimize_battery_schedule(
 
         soc_schedule_kwh.append(current_soc / 1000)
 
+    # Post-process: remove unprofitable oscillations
+    power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_oscillations(
+        power_schedule_kw=power_schedule_kw,
+        mode_schedule=mode_schedule,
+        soc_schedule_kwh=soc_schedule_kwh,
+        price_forecast=price_forecast[:n_steps],
+        min_price_spread=min_price_spread,
+        degradation_cost_per_kwh=degradation_cost_per_kwh,
+        rte=battery_config.round_trip_efficiency,
+        time_step_hours=time_step_hours,
+        min_soc_kwh=battery_config.min_soc_kwh,
+        max_soc_kwh=battery_config.max_soc_kwh,
+    )
+
     # Calculate costs
     total_cost = V[0][current_soc_idx]
 
@@ -353,6 +367,103 @@ def optimize_battery_schedule(
         pv_forecast=list(pv_forecast[:n_steps]),
         consumption_forecast=list(consumption_forecast[:n_steps]),
     )
+
+
+def _filter_oscillations(
+    power_schedule_kw: list[float],
+    mode_schedule: list[str],
+    soc_schedule_kwh: list[float],
+    price_forecast: list[float],
+    min_price_spread: float,
+    degradation_cost_per_kwh: float,
+    rte: float,
+    time_step_hours: float,
+    min_soc_kwh: float,
+    max_soc_kwh: float,
+) -> tuple[list[float], list[str], list[float]]:
+    """Filter out unprofitable oscillations from the schedule.
+
+    Removes rapid charge/discharge switches that don't have sufficient
+    price spread to justify the round-trip efficiency losses and degradation.
+
+    Args:
+        power_schedule_kw: Power schedule in kW
+        mode_schedule: Mode schedule
+        soc_schedule_kwh: SoC schedule in kWh
+        price_forecast: Price forecast in EUR/kWh
+        min_price_spread: Minimum price spread required
+        degradation_cost_per_kwh: Degradation cost
+        rte: Round trip efficiency
+        time_step_hours: Time step duration in hours
+        min_soc_kwh: Minimum SoC
+        max_soc_kwh: Maximum SoC
+
+    Returns:
+        Filtered (power_schedule, mode_schedule, soc_schedule)
+    """
+    if len(power_schedule_kw) == 0:
+        return power_schedule_kw, mode_schedule, soc_schedule_kwh
+
+    sqrt_rte = math.sqrt(rte)
+    filtered_power = list(power_schedule_kw)
+    filtered_mode = list(mode_schedule)
+    filtered_soc = list(soc_schedule_kwh)
+
+    # Minimum profitable price spread needed for arbitrage
+    # P_discharge * sqrt(rte) > P_charge / sqrt(rte) + 2 * degradation + min_spread
+    # => P_discharge > P_charge / rte + (2 * degradation + min_spread) / sqrt(rte)
+    min_arbitrage_spread = 2 * degradation_cost_per_kwh / sqrt_rte + min_price_spread
+
+    # Look for rapid charge/discharge oscillations
+    i = 0
+    while i < len(filtered_mode) - 1:
+        if filtered_mode[i] == "charging":
+            # Look ahead for quick discharge
+            for j in range(i + 1, min(i + 8, len(filtered_mode))):  # 2 hours lookahead
+                if filtered_mode[j] == "discharging":
+                    # Found charge followed by discharge - check if profitable
+                    charge_price = price_forecast[i]
+                    discharge_price = price_forecast[j]
+                    effective_spread = discharge_price - charge_price / rte
+
+                    if effective_spread < min_arbitrage_spread:
+                        # Not profitable - replace with idle
+                        filtered_power[i] = 0.0
+                        filtered_mode[i] = "idle"
+                        break
+        elif filtered_mode[i] == "discharging":
+            # Look ahead for quick charge
+            for j in range(i + 1, min(i + 8, len(filtered_mode))):
+                if filtered_mode[j] == "charging":
+                    # Found discharge followed by charge - check if profitable
+                    discharge_price = price_forecast[i]
+                    charge_price = price_forecast[j]
+                    effective_spread = discharge_price - charge_price / rte
+
+                    if effective_spread < min_arbitrage_spread:
+                        # Not profitable - replace with idle
+                        filtered_power[i] = 0.0
+                        filtered_mode[i] = "idle"
+                        break
+        i += 1
+
+    # Recalculate SoC schedule after filtering
+    current_soc_kwh = soc_schedule_kwh[0]
+    filtered_soc = [current_soc_kwh]
+
+    for t in range(len(filtered_power)):
+        power_kw = filtered_power[t]
+        if power_kw > 0:  # Charging
+            current_soc_kwh = min(
+                current_soc_kwh + power_kw * time_step_hours, max_soc_kwh
+            )
+        elif power_kw < 0:  # Discharging
+            current_soc_kwh = max(
+                current_soc_kwh + power_kw * time_step_hours, min_soc_kwh
+            )
+        filtered_soc.append(current_soc_kwh)
+
+    return filtered_power, filtered_mode, filtered_soc
 
 
 def _find_nearest_soc_idx(soc_wh: float, soc_states: list[int]) -> int:

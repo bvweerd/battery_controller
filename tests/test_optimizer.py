@@ -512,3 +512,64 @@ class TestHeuristics:
     def test_no_discharge_without_forecast(self):
         should, reason = should_discharge_now(0.35, [], 50.0)
         assert should is False
+
+
+class TestOscillationPrevention:
+    """Tests for oscillation prevention in optimizer."""
+
+    def test_no_oscillation_with_small_price_differences(self, battery_config):
+        """Optimizer should not oscillate when price differences are too small."""
+        # Small price variations (not enough for profitable arbitrage)
+        # RTE=0.9, degradation=0.03, min_spread=0.05
+        # Need ~0.15 EUR/kWh spread for profitability
+        price_forecast = [0.25, 0.25, 0.24, 0.24, 0.26, 0.26, 0.25, 0.25] * 4
+        pv_forecast = [0.0] * 32  # No PV
+        consumption_forecast = [0.5] * 32  # Constant load
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=price_forecast,
+            feed_in_forecast=None,
+            pv_forecast=pv_forecast,
+            consumption_forecast=consumption_forecast,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+        # Count mode switches
+        mode_switches = 0
+        for i in range(len(result.mode_schedule) - 1):
+            current = result.mode_schedule[i]
+            next_mode = result.mode_schedule[i + 1]
+            if (current == "charging" and next_mode == "discharging") or \
+               (current == "discharging" and next_mode == "charging"):
+                mode_switches += 1
+
+        # Should have very few or no switches with such small price variations
+        assert mode_switches <= 2, f"Too many mode switches: {mode_switches}"
+
+    def test_allows_profitable_arbitrage(self, battery_config):
+        """Optimizer should still allow arbitrage when profitable."""
+        # Large price difference: cheap night, expensive peak
+        price_forecast = [0.10, 0.10, 0.10, 0.10, 0.35, 0.35, 0.35, 0.35] * 2
+        pv_forecast = [0.0] * 16
+        consumption_forecast = [0.5] * 16
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=price_forecast,
+            feed_in_forecast=None,
+            pv_forecast=pv_forecast,
+            consumption_forecast=consumption_forecast,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+        # Should charge during cheap periods
+        assert any(mode == "charging" for mode in result.mode_schedule[:4])
+        # Should discharge during expensive periods
+        assert any(mode == "discharging" for mode in result.mode_schedule[4:8])
