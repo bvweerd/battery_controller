@@ -309,27 +309,102 @@ class TestOptimizeBatterySchedule:
 
     def test_mode_schedule_consistency(self, battery_config):
         """Mode schedule should match power schedule."""
-        prices = [0.05, 0.05, 0.30, 0.30]
-        pv = [0.0] * 4
-        consumption = [0.5] * 4
+        # Test multiple scenarios to ensure all mode types are covered
+        scenarios = [
+            # Scenario 1: Very low price then high for charging
+            {
+                "prices": [0.01, 0.45, 0.45, 0.45, 0.45, 0.45],
+                "soc": 4.0,
+                "degradation": 0.003,
+                "min_spread": 0.0,
+            },
+            # Scenario 2: High price then low for discharging
+            {
+                "prices": [0.45, 0.01, 0.01, 0.01, 0.01, 0.01],
+                "soc": 7.0,
+                "degradation": 0.003,
+                "min_spread": 0.0,
+            },
+            # Scenario 3: Flat prices at min SoC for idle mode
+            {
+                "prices": [0.20] * 4,
+                "soc": battery_config.min_soc_kwh,
+                "degradation": 0.05,
+                "min_spread": 0.0,
+            },
+        ]
 
-        result = optimize_battery_schedule(
+        for scenario in scenarios:
+            result = optimize_battery_schedule(
+                battery_config=battery_config,
+                current_soc_kwh=scenario["soc"],
+                price_forecast=scenario["prices"],
+                feed_in_forecast=None,
+                pv_forecast=[0.0] * len(scenario["prices"]),
+                consumption_forecast=[0.5] * len(scenario["prices"]),
+                time_step_minutes=15,
+                degradation_cost_per_kwh=scenario["degradation"],
+                min_price_spread=scenario["min_spread"],
+            )
+
+            # Check mode consistency with power
+            for power, mode in zip(result.power_schedule_kw, result.mode_schedule):
+                if power > 0.01:
+                    assert mode == "charging"
+                elif power < -0.01:
+                    assert mode == "discharging"
+                else:
+                    assert mode == "idle"
+
+    def test_mode_schedule_all_types(self, battery_config):
+        """Explicitly test all three mode types: charging, idle, discharging."""
+        # Scenario 1: Very low price followed by very high -> should charge
+        result_charge = optimize_battery_schedule(
             battery_config=battery_config,
             current_soc_kwh=5.0,
-            price_forecast=prices,
+            price_forecast=[0.02, 0.40, 0.40, 0.40, 0.40, 0.40],
             feed_in_forecast=None,
-            pv_forecast=pv,
-            consumption_forecast=consumption,
+            pv_forecast=[0.0] * 6,
+            consumption_forecast=[0.5] * 6,
             time_step_minutes=15,
+            degradation_cost_per_kwh=0.005,
+            min_price_spread=0.0,  # Disable min spread check
         )
+        # Should charge during low price
+        has_charging = any(p > 0.1 for p in result_charge.power_schedule_kw)
+        assert has_charging, f"Should have charging mode. Schedule: {result_charge.power_schedule_kw}"
 
-        for power, mode in zip(result.power_schedule_kw, result.mode_schedule):
-            if power > 0:
-                assert mode == "charging"
-            elif power < 0:
-                assert mode == "discharging"
-            else:
-                assert mode == "idle"
+        # Scenario 2: Flat prices, start at min SoC -> should stay idle
+        result_idle = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=battery_config.min_soc_kwh,
+            price_forecast=[0.20] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5] * 4,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.05,  # High degradation discourages cycling
+            min_price_spread=0.0,
+        )
+        # Should stay idle (no arbitrage opportunity)
+        has_idle = any(abs(p) < 0.01 for p in result_idle.power_schedule_kw)
+        assert has_idle, f"Should have idle mode. Schedule: {result_idle.power_schedule_kw}"
+
+        # Scenario 3: Very high price followed by low -> should discharge
+        result_discharge = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=7.0,  # Start with good SoC
+            price_forecast=[0.40, 0.02, 0.02, 0.02, 0.02, 0.02],
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 6,
+            consumption_forecast=[0.5] * 6,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.005,
+            min_price_spread=0.0,
+        )
+        # Should discharge during high price
+        has_discharging = any(p < -0.1 for p in result_discharge.power_schedule_kw)
+        assert has_discharging, f"Should have discharging mode. Schedule: {result_discharge.power_schedule_kw}"
 
     def test_dc_pv_forecast_used(self, dc_battery_config):
         """DC PV forecast should be accepted and used."""

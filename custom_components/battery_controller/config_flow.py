@@ -254,18 +254,22 @@ def _build_pv_array_schema(defaults: dict[str, Any] | None = None) -> vol.Schema
             vol.Required(
                 "peak_power_kwp",
                 default=d.get("peak_power_kwp", 0.0),
+                description={"suggested_value": d.get("peak_power_kwp")},
             ): vol.Coerce(float),
             vol.Required(
                 "orientation",
                 default=d.get("orientation", 180),
+                description={"suggested_value": d.get("orientation")},
             ): vol.Coerce(float),
             vol.Required(
                 "tilt",
                 default=d.get("tilt", 35),
+                description={"suggested_value": d.get("tilt")},
             ): vol.Coerce(float),
             vol.Optional(
                 "dc_coupled",
                 default=d.get("dc_coupled", False),
+                description={"suggested_value": d.get("dc_coupled")},
             ): bool,
         }
     )
