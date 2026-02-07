@@ -66,6 +66,8 @@ class ZeroGridController:
         """
         if mode == "zero_grid":
             return self._calculate_zero_grid(current_grid_w, current_soc_kwh)
+        elif mode == "idle":
+            return self._calculate_idle(current_grid_w, current_soc_kwh)
         elif mode == "follow_schedule":
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
         elif mode == "hybrid":
@@ -106,6 +108,23 @@ class ZeroGridController:
         target_battery_w = self._apply_soc_limits(target_battery_w, current_soc_kwh)
 
         return target_battery_w
+
+    def _calculate_idle(
+        self,
+        current_grid_w: float,
+        current_soc_kwh: float,
+    ) -> float:
+        """Idle mode: preserve battery capacity completely.
+
+        Used when the optimizer wants to preserve battery for upcoming
+        expensive periods. Does nothing - no charge, no discharge.
+        The optimizer already accounts for PV in its planning; if
+        significant PV surplus exists it recommends 'charging' not 'idle'.
+
+        Returns:
+            Battery power setpoint in W (always 0)
+        """
+        return 0.0
 
     def _calculate_follow_schedule(
         self,

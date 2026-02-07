@@ -595,8 +595,40 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
             if result.optimal_mode == "idle":
-                effective_mode = "zero_grid"
+                # Check if the optimizer has planned discharge periods ahead.
+                # If so, it needs the battery capacity preserved for those
+                # expensive periods -> stay idle (only allow PV surplus charging).
+                # If not, zero_grid is fine for self-consumption.
+                has_upcoming_discharge = any(
+                    m == "discharging" for m in result.mode_schedule[1:]
+                )
+                if has_upcoming_discharge:
+                    effective_mode = "idle"
+                else:
+                    effective_mode = "zero_grid"
                 effective_power = 0.0
+            elif result.optimal_mode == "discharging":
+                # Check if exporting to grid is worth it vs self-consumption.
+                # Energy is already stored, so RTE is irrelevant here:
+                # both export and self-consumption have the same discharge
+                # efficiency. The comparison is simply feed-in vs buy price.
+                current_buy = resampled_prices[0] if resampled_prices else 0.0
+                current_feed_in = (
+                    resampled_feed_in[0]
+                    if resampled_feed_in
+                    else float(self.config.get(
+                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                    ))
+                )
+                if current_buy > 0 and current_feed_in >= current_buy:
+                    # Feed-in >= buy: exporting is as good as self-consuming
+                    # (e.g. net metering / saldering) -> full rate discharge
+                    effective_mode = "discharging"
+                    effective_power = result.optimal_power_kw
+                else:
+                    # Feed-in < buy: self-consumption saves more -> zero_grid
+                    effective_mode = "zero_grid"
+                    effective_power = 0.0
             elif (
                 result.optimal_mode == "charging"
                 and total_pv_kw > current_consumption_kw
@@ -618,6 +650,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Map effective mode to zero_grid_controller mode
         if effective_mode == "zero_grid":
             controller_mode = "zero_grid"
+        elif effective_mode == "idle":
+            controller_mode = "idle"
         elif effective_mode == "manual":
             controller_mode = "manual"
         elif effective_mode in ("charging", "discharging"):

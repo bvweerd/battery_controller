@@ -171,6 +171,50 @@ class TestHybridMode:
         assert target == pytest.approx(1000)
 
 
+class TestIdleMode:
+    """Tests for idle control mode (preserve battery for peak pricing)."""
+
+    def test_idle_no_discharge_when_importing(self, controller):
+        """When grid is importing, idle mode should NOT discharge battery."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=1000,  # Importing 1 kW from grid
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0  # Preserve battery capacity
+
+    def test_idle_does_nothing_with_pv_surplus(self, controller):
+        """Idle mode does nothing, even with PV surplus."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=-2000,  # Exporting 2 kW (PV surplus)
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0  # True idle: no charge, no discharge
+
+    def test_idle_zero_grid_no_action(self, controller):
+        """When grid is balanced, idle mode does nothing."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=0,
+            mode="idle",
+        )
+        assert target == 0.0
+
+    def test_idle_ignores_dp_schedule(self, controller):
+        """Idle mode ignores DP schedule completely."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=1000,
+            current_soc_kwh=5.0,
+            dp_schedule_w=-5000,  # DP says discharge hard
+            mode="idle",
+        )
+        assert target == 0.0  # Idle overrides everything
+
+
 class TestManualMode:
     """Tests for manual control mode."""
 
