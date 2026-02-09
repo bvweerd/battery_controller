@@ -1,0 +1,234 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Controller",
+        "description": "Configureer je thuisbatterij voor kostenoptimalisatie.",
+        "sections": {
+          "battery": {
+            "name": "Batterij Specificaties",
+            "data": {
+              "capacity_kwh": "Capaciteit (kWh)",
+              "max_charge_power_kw": "Max laadvermogen (kW)",
+              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
+              "round_trip_efficiency": "Round-trip efficiency (0-1)"
+            }
+          },
+          "sensors": {
+            "name": "Verplichte Sensoren",
+            "data": {
+              "price_sensor": "Elektriciteitsprijs sensor",
+              "battery_soc_sensor": "Batterij SoC sensor"
+            }
+          },
+          "pv": {
+            "name": "PV Array 1 (Primair)",
+            "data": {
+              "pv_peak_power_kwp": "Piekvermogen AC PV (kWp)",
+              "pv_orientation": "Oriëntatie (graden, 180=zuid)",
+              "pv_tilt": "Hellingshoek (graden)",
+              "pv_efficiency_factor": "Systeemrendement (0-1)",
+              "pv_dc_coupled": "PV direct op batterij (DC-gekoppeld)",
+              "pv_dc_peak_power_kwp": "Piekvermogen DC PV op batterij (kWp)",
+              "pv_dc_efficiency": "DC-koppelingsrendement (0-1)"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optionele Sensoren",
+            "data": {
+              "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
+              "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh, bijv. DSMR tarief 1+2)",
+              "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
+            }
+          },
+          "advanced": {
+            "name": "Geavanceerde Instellingen",
+            "data": {
+              "time_step_minutes": "Tijdstap (minuten)",
+              "optimization_interval_minutes": "Optimalisatie-interval (minuten)",
+              "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
+              "zero_grid_enabled": "Nul-op-de-meter actief"
+            }
+          }
+        }
+      },
+      "pv_menu": {
+        "title": "Extra PV Arrays",
+        "description": "Je hebt {pv_count} extra PV array(s) geconfigureerd. Voeg meer arrays toe of rond de configuratie af.",
+        "menu_options": {
+          "add_pv_array": "Extra PV array toevoegen",
+          "remove_pv_array": "Laatste PV array verwijderen",
+          "finish_setup": "Afronden"
+        }
+      },
+      "add_pv_array": {
+        "title": "PV Array {array_number} toevoegen",
+        "description": "Configureer een extra PV array.",
+        "data": {
+          "peak_power_kwp": "Piekvermogen (kWp)",
+          "orientation": "Oriëntatie (graden, 180=zuid)",
+          "tilt": "Hellingshoek (graden)",
+          "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC)."
+    },
+    "abort": {
+      "already_configured": "Battery Controller is al geconfigureerd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Battery Controller",
+        "description": "Herconfigureer je battery controller instellingen.",
+        "sections": {
+          "battery": {
+            "name": "Batterij Specificaties",
+            "data": {
+              "capacity_kwh": "Capaciteit (kWh)",
+              "max_charge_power_kw": "Max laadvermogen (kW)",
+              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
+              "round_trip_efficiency": "Round-trip efficiency (0-1)"
+            }
+          },
+          "sensors": {
+            "name": "Verplichte Sensoren",
+            "data": {
+              "price_sensor": "Elektriciteitsprijs sensor",
+              "battery_soc_sensor": "Batterij SoC sensor"
+            }
+          },
+          "pv": {
+            "name": "PV Array 1 (Primair)",
+            "data": {
+              "pv_peak_power_kwp": "Piekvermogen AC PV (kWp)",
+              "pv_orientation": "Oriëntatie (graden, 180=zuid)",
+              "pv_tilt": "Hellingshoek (graden)",
+              "pv_efficiency_factor": "Systeemrendement (0-1)",
+              "pv_dc_coupled": "PV direct op batterij (DC-gekoppeld)",
+              "pv_dc_peak_power_kwp": "Piekvermogen DC PV op batterij (kWp)",
+              "pv_dc_efficiency": "DC-koppelingsrendement (0-1)"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optionele Sensoren",
+            "data": {
+              "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
+              "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh, bijv. DSMR tarief 1+2)",
+              "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
+            }
+          },
+          "advanced": {
+            "name": "Geavanceerde Instellingen",
+            "data": {
+              "time_step_minutes": "Tijdstap (minuten)",
+              "optimization_interval_minutes": "Optimalisatie-interval (minuten)",
+              "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
+              "zero_grid_enabled": "Nul-op-de-meter actief"
+            }
+          }
+        }
+      },
+      "pv_menu": {
+        "title": "Extra PV Arrays",
+        "description": "Je hebt {pv_count} extra PV array(s) geconfigureerd. Voeg meer arrays toe of rond af.",
+        "menu_options": {
+          "add_pv_array": "Extra PV array toevoegen",
+          "remove_pv_array": "Laatste PV array verwijderen",
+          "finish_setup": "Afronden"
+        }
+      },
+      "add_pv_array": {
+        "title": "PV Array {array_number} toevoegen",
+        "description": "Configureer een extra PV array.",
+        "data": {
+          "peak_power_kwp": "Piekvermogen (kWp)",
+          "orientation": "Oriëntatie (graden, 180=zuid)",
+          "tilt": "Hellingshoek (graden)",
+          "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC)."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "optimal_power": {
+        "name": "Optimaal Vermogen"
+      },
+      "optimal_mode": {
+        "name": "Optimale Modus"
+      },
+      "schedule": {
+        "name": "Schema"
+      },
+      "soc": {
+        "name": "Laadtoestand"
+      },
+      "battery_power": {
+        "name": "Batterij Vermogen"
+      },
+      "pv_forecast": {
+        "name": "PV Voorspelling"
+      },
+      "consumption_forecast": {
+        "name": "Verbruik Voorspelling"
+      },
+      "net_grid_forecast": {
+        "name": "Netto Grid Voorspelling"
+      },
+      "daily_savings": {
+        "name": "Geschatte Besparing"
+      },
+      "battery_setpoint": {
+        "name": "Batterij Setpoint"
+      },
+      "control_mode": {
+        "name": "Regelmodus"
+      },
+      "optimization_status": {
+        "name": "Optimalisatie Status"
+      }
+    },
+    "number": {
+      "min_soc_percent": {
+        "name": "Minimum SoC"
+      },
+      "max_soc_percent": {
+        "name": "Maximum SoC"
+      },
+      "degradation_cost": {
+        "name": "Degradatiekosten"
+      },
+      "min_price_spread": {
+        "name": "Minimale Prijsspread"
+      },
+      "zero_grid_deadband": {
+        "name": "Nul-op-de-meter Deadband"
+      }
+    },
+    "select": {
+      "control_mode": {
+        "name": "Regelmodus",
+        "state": {
+          "zero_grid": "Nul op de meter",
+          "follow_schedule": "Volg schema",
+          "hybrid": "Hybride",
+          "manual": "Handmatig"
+        }
+      }
+    },
+    "switch": {
+      "optimization_enabled": {
+        "name": "Optimalisatie Actief"
+      }
+    }
+  }
+}
