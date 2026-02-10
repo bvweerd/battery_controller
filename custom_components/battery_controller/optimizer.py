@@ -553,6 +553,7 @@ def _empty_result(
         power_schedule_kw=[],
         mode_schedule=[],
         soc_schedule_kwh=[current_soc_kwh],
+        step_profit_loss_eur=[],
         total_cost=0.0,
         baseline_cost=0.0,
         savings=0.0,
