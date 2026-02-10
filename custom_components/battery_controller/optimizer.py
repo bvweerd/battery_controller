@@ -20,7 +20,6 @@ class OptimizationResult:
     power_schedule_kw: list[float]  # Positive = charge, negative = discharge
     mode_schedule: list[str]  # 'charging', 'discharging', 'idle'
     soc_schedule_kwh: list[float]  # Expected SoC at each step
-    step_profit_loss_eur: list[float] # Profit/loss for each time step
 
     # Costs
     total_cost: float  # Total cost over planning horizon
@@ -360,45 +359,10 @@ def optimize_battery_schedule(
 
     savings = baseline_cost - total_cost
 
-    # Calculate step_profit_loss_eur for the filtered schedule
-    step_profit_loss_eur = []
-    # time_step_hours is already defined
-    # n_steps is already defined
-
-    for t in range(n_steps):
-        power_kw = power_schedule_kw[t]
-        buy_price = price_forecast[t]
-        sell_price = feed_in_forecast[t] # feed_in_forecast is guaranteed to be same length as price_forecast
-
-        pv_w_current_step = pv_forecast[t] * 1000
-        consumption_w_current_step = consumption_forecast[t] * 1000
-        pv_dc_w_current_step = pv_dc_forecast[t] * 1000 if pv_dc_forecast else 0
-
-        # SoC at the start of the current time step (soc_schedule_kwh has n_steps + 1 elements)
-        soc_wh_current_step = soc_schedule_kwh[t] * 1000
-
-        cost = calculate_step_cost(
-            time_step_hours=time_step_hours,
-            soc_wh=soc_wh_current_step,
-            action_w=power_kw * 1000, # Convert kW to W for calculate_step_cost
-            grid_price=buy_price,
-            feed_in_price=sell_price,
-            pv_production_w=pv_w_current_step,
-            consumption_w=consumption_w_current_step,
-            rte=battery_config.round_trip_efficiency,
-            degradation_cost_per_kwh=degradation_cost_per_kwh,
-            battery_config=battery_config,
-            pv_dc_production_w=pv_dc_w_current_step,
-        )
-        step_profit_loss_eur.append(-cost) # Profit is negative cost
-
-    step_profit_loss_eur = [round(x, 4) for x in step_profit_loss_eur]
-
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
         soc_schedule_kwh=soc_schedule_kwh,
-        step_profit_loss_eur=step_profit_loss_eur, # Add new field
         total_cost=total_cost,
         baseline_cost=baseline_cost,
         savings=savings,
@@ -553,7 +517,6 @@ def _empty_result(
         power_schedule_kw=[],
         mode_schedule=[],
         soc_schedule_kwh=[current_soc_kwh],
-        step_profit_loss_eur=[],
         total_cost=0.0,
         baseline_cost=0.0,
         savings=0.0,

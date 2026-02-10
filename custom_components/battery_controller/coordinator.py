@@ -932,10 +932,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "power_schedule_kw": result.power_schedule_kw,
             "mode_schedule": result.mode_schedule,
             "soc_schedule_kwh": result.soc_schedule_kwh,
-            "step_profit_loss_eur": result.step_profit_loss_eur,
             "total_cost": result.total_cost,
             "baseline_cost": result.baseline_cost,
-            "savings": round(sum(result.step_profit_loss_eur), 2), # Sum of direct battery action profits/losses
+            "savings": round(result.savings, 2),
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
             "current_feed_in_price": resampled_feed_in[0]
             if resampled_feed_in
