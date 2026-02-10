@@ -229,6 +229,14 @@
       "optimization_enabled": {
         "name": "Optimalisatie Actief"
       }
+    },
+    "binary_sensor": {
+      "pv_curtailment": {
+        "name": "PV Nul-Op-De-Meter Voorgesteld"
+      },
+      "use_max_power": {
+        "name": "Gebruik Maximale Energie Voorgesteld"
+      }
     }
   }
 }
