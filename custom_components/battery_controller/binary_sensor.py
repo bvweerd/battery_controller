@@ -100,7 +100,10 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
         setpoint_w = control_action.get("target_power_w", 0.0)
         actual_w = battery_state.power_kw * 1000  # positive = charging
 
-        if setpoint_w > _MIN_SETPOINT_W and actual_w < setpoint_w * _ABSORPTION_THRESHOLD:
+        if (
+            setpoint_w > _MIN_SETPOINT_W
+            and actual_w < setpoint_w * _ABSORPTION_THRESHOLD
+        ):
             return True
 
         return False
