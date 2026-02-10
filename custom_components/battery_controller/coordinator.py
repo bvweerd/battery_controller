@@ -858,11 +858,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     effective_mode = "zero_grid"
                     effective_power = 0.0
             elif result.optimal_mode == "charging" and current_grid < 0:
-                # PV surplus available (grid exporting): use zero_grid to
-                # dynamically match the actual surplus instead of fixed-rate
-                # charging. Fixed charging may import from grid when clouds pass.
-                effective_mode = "zero_grid"
-                effective_power = 0.0
+                current_feed_in = (
+                    resampled_feed_in[0]
+                    if resampled_feed_in
+                    else float(
+                        self.config.get(
+                            CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                        )
+                    )
+                )
+                if current_feed_in < 0:
+                    # Negative feed-in: exporting costs money. Use follow_schedule
+                    # so curtailing PV (grid → ~0) doesn't cause a zero_grid
+                    # deadlock that stops charging.
+                    effective_mode = result.optimal_mode
+                    effective_power = result.optimal_power_kw
+                else:
+                    # PV surplus available (grid exporting): use zero_grid to
+                    # dynamically match the actual surplus instead of fixed-rate
+                    # charging. Fixed charging may import from grid when clouds pass.
+                    effective_mode = "zero_grid"
+                    effective_power = 0.0
             else:
                 effective_mode = result.optimal_mode
                 effective_power = result.optimal_power_kw
@@ -913,5 +929,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "baseline_cost": result.baseline_cost,
             "savings": result.savings,
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
+            "current_feed_in_price": resampled_feed_in[0] if resampled_feed_in else float(self.config.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)),
             "timestamp": dt_util.utcnow(),
         }

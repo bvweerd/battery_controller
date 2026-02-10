@@ -7,7 +7,7 @@ DOMAIN = "battery_controller"
 DOMAIN_ABBREVIATION = "BC"
 
 # Supported platforms for this integration
-PLATFORMS = ["sensor", "number", "select", "switch"]
+PLATFORMS = ["sensor", "number", "select", "switch", "binary_sensor"]
 
 # Control modes
 MODE_ZERO_GRID = "zero_grid"

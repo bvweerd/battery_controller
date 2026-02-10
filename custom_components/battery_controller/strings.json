@@ -236,6 +236,14 @@
       "optimization_enabled": {
         "name": "Optimization Enabled"
       }
+    },
+    "binary_sensor": {
+      "pv_curtailment": {
+        "name": "PV Curtailment Suggested"
+      },
+      "use_max_power": {
+        "name": "Use Maximum Power Suggested"
+      }
     }
   }
 }
