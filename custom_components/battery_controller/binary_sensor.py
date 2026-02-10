@@ -67,7 +67,7 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
 
     _attr_translation_key = "pv_curtailment"
     _attr_name = "PV Curtailment Suggested"
-    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
     _attr_icon = "mdi:solar-power-variant-outline"
 
     def __init__(self, coordinator, device, entry):
