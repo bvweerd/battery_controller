@@ -596,7 +596,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         soc_sensor = self.config.get(CONF_BATTERY_SOC_SENSOR)
         power_sensor = self.config.get(CONF_BATTERY_POWER_SENSOR)
 
-        soc_value = get_sensor_value(self.hass, soc_sensor, 50.0)
+        # Determine a smarter default for soc_value: last known SoC, otherwise 50.0
+        smarter_soc_default = 50.0
+        if self._last_result and self._last_result.battery_state:
+            smarter_soc_default = self._last_result.battery_state.soc_percent
+        soc_value = get_sensor_value(self.hass, soc_sensor, smarter_soc_default)
         power_value = get_sensor_value(self.hass, power_sensor, 0.0)
 
         # Determine if SoC is in percent or kWh
@@ -928,9 +932,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "power_schedule_kw": result.power_schedule_kw,
             "mode_schedule": result.mode_schedule,
             "soc_schedule_kwh": result.soc_schedule_kwh,
+            "step_profit_loss_eur": result.step_profit_loss_eur,
             "total_cost": result.total_cost,
             "baseline_cost": result.baseline_cost,
-            "savings": result.savings,
+            "savings": round(sum(result.step_profit_loss_eur), 2), # Sum of direct battery action profits/losses
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
             "current_feed_in_price": resampled_feed_in[0]
             if resampled_feed_in

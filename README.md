@@ -193,7 +193,7 @@ Configuration is done through a single form with collapsible sections.
 | Parameter | Description |
 |-----------|-------------|
 | Electricity price sensor | Price sensor with forecast attributes (Nordpool, ENTSO-E, etc.) |
-| Battery SoC sensor | Battery state-of-charge sensor (% or kWh) |
+| Battery SoC sensor | Battery state-of-charge sensor (% or kWh). If temporarily unavailable, the last known SoC from a previous optimization run will be used as a fallback. |
 
 ### PV Array 1 (optional, collapsed)
 
@@ -255,7 +255,7 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 | PV Forecast | kW | Current PV production | `forecast_kw`, `dc_forecast_kw`\*, `current_dc_pv_kw`\* |
 | Consumption Forecast | kW | Current consumption estimate | `forecast_kw` |
 | Net Grid Forecast | kW | Net grid power (positive=import) | `forecast_kw` |
-| Estimated Savings | EUR | Cost savings from optimization | `baseline_cost`, `optimized_cost` |
+| Estimated Savings | EUR | **Net financial impact of battery actions** (sum of direct profits/losses per step, including degradation and PV opportunity cost) over the planning horizon. | `baseline_cost`, `optimized_cost`, `step_profit_loss_eur` |
 | **Grid Setpoint** | W | **Tactics**: Real-time battery power from zero-grid controller (~5s updates). Use in `hybrid`/`zero_grid` modes. | `target_power_w`, `current_grid_w`, `current_battery_w`, `dp_schedule_w`, `mode`, `action_mode`, `soc_kwh`, `soc_percent` |
 | Control Mode | — | Current control mode | — |
 | Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `timestamp` |
@@ -298,6 +298,7 @@ The **Schedule** sensor is the core output of the optimizer. Its state shows a s
 | `mode_schedule` | `list[str]` | Mode per step: `"charging"`, `"discharging"`, or `"idle"`. Same length as `power_schedule_kw`. |
 | `soc_schedule_kwh` | `list[float]` | Predicted state-of-charge (kWh) at the start of each step. |
 | `price_forecast` | `list[float]` | Electricity buy price (EUR/kWh) used for each step. |
+| `step_profit_loss_eur` | `list[float]` | Financial profit or loss (EUR) for each time step, attributable to direct battery actions. |
 
 All lists share the same length and time alignment. Step 0 = current time step, step 1 = next time step, etc. The time step duration is configured in Advanced settings (default: 15 minutes).
 
