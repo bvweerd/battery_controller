@@ -157,6 +157,8 @@ The optimizer automatically handles:
 - **Feed-in optimization**:
   - High feed-in (€0.10) + low future prices → Export now (don't store)
   - Low feed-in (€0.04) + high future prices (€0.30) → Store for later
+- **Negative buy price** (e.g. Tibber during wind surplus): Import and charge at maximum rate — you are paid to consume
+- **Negative feed-in price** (e.g. solar overproduction): Charge battery to avoid paying for exports; switches to `follow_schedule` mode so curtailing PV does not create a zero-grid deadlock
 - **Self-consumption**: Store PV surplus when grid import is expensive
 - **Degradation awareness**: Only cycles battery when price spread justifies wear cost
 
@@ -350,6 +352,15 @@ series:
 | Entity | Description |
 |--------|-------------|
 | Optimization Enabled | Enable/disable the optimizer |
+
+### Binary Sensors (2)
+
+| Entity | Device class | Description |
+|--------|-------------|-------------|
+| **PV Curtailment Suggested** | problem | ON when the feed-in price is negative **and** the battery can no longer absorb the surplus (SoC near maximum, or actual charging power significantly below the setpoint). Suggests reducing PV inverter output. |
+| **Use Maximum Power Suggested** | running | ON when the grid buy price is negative (you are paid to consume). Suggests running flexible loads and charging the battery at full rate. |
+
+> **Tip**: Both sensors expose price and battery data as attributes for use in automations.
 
 ## Control Modes
 
