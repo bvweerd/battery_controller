@@ -408,9 +408,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
 
         # Set up real-time zero_grid control via DSMR power sensors
+        # Note: battery_power_sensor is intentionally NOT included here.
+        # It is only read inside the handler (via get_current_battery_state),
+        # not used as a trigger. Including it would create a feedback loop:
+        # setpoint change → battery responds → battery_power_sensor fires →
+        # new calculation before DSMR has updated → integrator wind-up.
         realtime_sensors = []
-        if self._battery_power_sensor:
-            realtime_sensors.append(self._battery_power_sensor)
 
         # Add DSMR power sensors for grid balance calculation
         if self._power_consumption_sensors:
