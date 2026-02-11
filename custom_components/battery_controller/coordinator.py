@@ -598,8 +598,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Determine a smarter default for soc_value: last known SoC, otherwise 50.0
         smarter_soc_default = 50.0
-        if self._last_result and self._last_result.battery_state:
-            smarter_soc_default = self._last_result.battery_state.soc_percent
+        if self.data and self.data.get("battery_state"):
+            smarter_soc_default = self.data["battery_state"].soc_percent
         soc_value = get_sensor_value(self.hass, soc_sensor, smarter_soc_default)
         power_value = get_sensor_value(self.hass, power_sensor, 0.0)
 
