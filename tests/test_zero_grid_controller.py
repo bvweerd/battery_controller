@@ -134,41 +134,17 @@ class TestFollowScheduleMode:
         assert target == pytest.approx(5000)
 
 
-class TestHybridMode:
-    """Tests for hybrid control mode."""
+class TestUnknownMode:
+    """Unknown mode falls through to manual (returns 0)."""
 
-    def test_base_follows_schedule(self, controller):
-        """Hybrid starts from DP schedule."""
-        target = controller.calculate_battery_setpoint(
-            current_grid_w=0,  # Zero grid -> no correction
-            current_soc_kwh=5.0,
-            dp_schedule_w=2000,
-            mode="hybrid",
-        )
-        assert target == pytest.approx(2000)
-
-    def test_correction_for_import(self, controller):
-        """Hybrid corrects for unexpected grid import."""
-        # DP says idle, but we're importing 1kW
+    def test_unknown_mode_returns_zero(self, controller):
         target = controller.calculate_battery_setpoint(
             current_grid_w=1000,
             current_soc_kwh=5.0,
-            dp_schedule_w=0,
-            mode="hybrid",
+            dp_schedule_w=2000,
+            mode="unknown_mode",
         )
-        # 50% correction: -500W (discharge to help)
-        assert target == pytest.approx(-500)
-
-    def test_correction_for_export(self, controller):
-        """Hybrid corrects for unexpected grid export."""
-        target = controller.calculate_battery_setpoint(
-            current_grid_w=-2000,
-            current_soc_kwh=5.0,
-            dp_schedule_w=0,
-            mode="hybrid",
-        )
-        # 50% correction: +1000W (charge surplus)
-        assert target == pytest.approx(1000)
+        assert target == 0.0
 
 
 class TestIdleMode:

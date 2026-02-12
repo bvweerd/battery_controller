@@ -70,10 +70,6 @@ class ZeroGridController:
             return self._calculate_idle(current_grid_w, current_soc_kwh)
         elif mode == "follow_schedule":
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
-        elif mode == "hybrid":
-            return self._calculate_hybrid(
-                current_grid_w, current_soc_kwh, dp_schedule_w
-            )
         else:
             # Manual mode - return 0 (no automatic control)
             return 0.0
@@ -155,48 +151,6 @@ class ZeroGridController:
         target_battery_w = self._apply_soc_limits(target_battery_w, current_soc_kwh)
 
         return target_battery_w
-
-    def _calculate_hybrid(
-        self,
-        current_grid_w: float,
-        current_soc_kwh: float,
-        dp_schedule_w: float,
-    ) -> float:
-        """Hybrid mode: follow schedule with real-time corrections.
-
-        Combines the planning from DP optimizer with real-time grid balancing.
-
-        Args:
-            current_grid_w: Current grid power in W (positive = import)
-            current_soc_kwh: Current battery SoC in kWh
-            dp_schedule_w: DP optimizer recommendation in W
-
-        Returns:
-            Battery power setpoint in W
-        """
-        # Base: DP schedule
-        base_w = dp_schedule_w
-
-        # Correction: proportional to grid error
-        # If grid is importing more than expected, increase discharge
-        # If grid is exporting more than expected, increase charge
-        grid_error_w = current_grid_w  # How much we're off from zero-grid
-        correction_w = -grid_error_w * 0.5  # 50% proportional correction
-
-        # Combine (weighted towards schedule)
-        target_w = base_w + correction_w
-
-        # Apply battery limits
-        target_w = clamp(
-            target_w,
-            -self.config.max_discharge_w,
-            self.config.max_charge_w,
-        )
-
-        # Apply SoC limits
-        target_w = self._apply_soc_limits(target_w, current_soc_kwh)
-
-        return target_w
 
     def _apply_soc_limits(
         self,

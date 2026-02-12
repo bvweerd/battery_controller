@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -32,6 +32,7 @@ from .const import (
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
+    CONF_PV_PRODUCTION_SENSORS,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_PV_EFFICIENCY_FACTOR,
@@ -119,11 +120,13 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No forecast data in API response")
 
         # Find current hour index
-        now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         start_idx = 0
         for i, ts in enumerate(times):
             try:
                 t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
             if t >= now:
@@ -235,6 +238,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
             production_sensors=config.get(CONF_ELECTRICITY_PRODUCTION_SENSORS, []),
             history_days=14,
             base_consumption_kw=0.5,
+            pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),
+            entry_id=config.get("entry_id"),
         )
 
         self.net_load_model = NetLoadForecast(
@@ -260,7 +265,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         radiation_forecast = weather_data.get("radiation_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
         if forecast_start and radiation_forecast:
-            current_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
             hours_elapsed = max(
                 0, int((current_hour - forecast_start).total_seconds() / 3600)
             )

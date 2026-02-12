@@ -3,12 +3,12 @@
 import pytest
 
 from custom_components.battery_controller.battery_model import BatteryConfig
+import math
+
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
     calculate_step_cost,
     optimize_battery_schedule,
-    should_charge_now,
-    should_discharge_now,
     _find_nearest_soc_idx,
 )
 
@@ -484,38 +484,109 @@ class TestFindNearestSocIdx:
         assert _find_nearest_soc_idx(5000, states) == 2
 
 
-class TestHeuristics:
-    """Tests for should_charge_now and should_discharge_now heuristics."""
+class TestActionSpace:
+    """Tests that the DP action space never exceeds rated max power."""
 
-    def test_charge_on_arbitrage(self):
-        should, reason = should_charge_now(0.05, [0.10, 0.20, 0.30], 50.0)
-        assert should is True
-        assert "arbitrage" in reason
-
-    def test_no_charge_at_high_soc(self):
-        should, reason = should_charge_now(0.05, [0.30] * 5, 95.0)
-        assert should is False
-        assert "soc_high" in reason
-
-    def test_no_charge_without_forecast(self):
-        should, reason = should_charge_now(0.05, [], 50.0)
-        assert should is False
-
-    def test_discharge_at_high_price(self):
-        # Current price is highest -> should discharge
-        should, reason = should_discharge_now(0.35, [0.10, 0.15, 0.20], 70.0)
-        assert should is True
-
-    def test_no_discharge_at_low_soc(self):
-        should, reason = should_discharge_now(
-            0.35, [0.10] * 5, 5.0, min_soc_percent=10.0
+    def test_charge_actions_within_max(self, battery_config):
+        """No charge action should exceed max_charge_power_kw."""
+        # Non-round max (e.g. 4600 W is not a multiple of 500)
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=4.6,
+            max_discharge_power_kw=4.6,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
         )
-        assert should is False
-        assert "soc_low" in reason
+        result = optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.05] * 4 + [0.35] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            time_step_minutes=15,
+        )
+        for power in result.power_schedule_kw:
+            assert power <= config.max_charge_power_kw + 1e-6
+            assert power >= -config.max_discharge_power_kw - 1e-6
 
-    def test_no_discharge_without_forecast(self):
-        should, reason = should_discharge_now(0.35, [], 50.0)
-        assert should is False
+    def test_schedule_power_bounded(self, battery_config):
+        """Scheduled power should never exceed rated limits."""
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.02] * 4 + [0.40] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.001,
+            min_price_spread=0.0,
+        )
+        for power in result.power_schedule_kw:
+            assert power <= battery_config.max_charge_power_kw + 1e-6
+            assert power >= -battery_config.max_discharge_power_kw - 1e-6
+
+
+class TestOscillationFilterFormula:
+    """Tests that min_arbitrage_spread uses the correct formula."""
+
+    def test_min_spread_consistent_with_rte(self, battery_config):
+        """With large enough price spread, arbitrage should be allowed despite RTE losses."""
+        # With RTE=0.90, sqrt_rte≈0.9487
+        # min_arbitrage_spread = (2*0.03 + 0.05) / 0.9487 ≈ 0.116
+        # So a 0.20 spread (0.30 - 0.10) should allow arbitrage
+        rte = battery_config.round_trip_efficiency
+        sqrt_rte = math.sqrt(rte)
+        deg = 0.03
+        min_spread = 0.05
+        expected_threshold = (2 * deg + min_spread) / sqrt_rte
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.10] * 4 + [0.30] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=deg,
+            min_price_spread=min_spread,
+        )
+        # Price spread = 0.20 > expected_threshold ≈ 0.116 → arbitrage expected
+        assert any(m == "charging" for m in result.mode_schedule[:4]), (
+            f"Expected charging; threshold={expected_threshold:.3f}, spread=0.20"
+        )
+
+    def test_spread_below_threshold_no_arbitrage(self, battery_config):
+        """Price spread below corrected threshold should produce no arbitrage."""
+        rte = battery_config.round_trip_efficiency
+        sqrt_rte = math.sqrt(rte)
+        deg = 0.03
+        min_spread = 0.05
+        threshold = (2 * deg + min_spread) / sqrt_rte  # ≈ 0.116
+        # Use a spread just below the threshold
+        low_price = 0.20
+        high_price = low_price + threshold * 0.5  # well below threshold
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=[low_price] * 4 + [high_price] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=deg,
+            min_price_spread=min_spread,
+        )
+        has_charge_then_discharge = any(
+            result.mode_schedule[i] == "charging"
+            and any(result.mode_schedule[j] == "discharging" for j in range(i + 1, i + 8))
+            for i in range(len(result.mode_schedule))
+        )
+        assert not has_charge_then_discharge, "Should not arbitrage with tiny spread"
 
 
 class TestOscillationPrevention:

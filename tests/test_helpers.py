@@ -231,3 +231,45 @@ class TestExtractPriceForecast:
         state = self._make_state(state_value="unknown", attributes={})
         prices, interval = extract_price_forecast_with_interval(state)
         assert prices == []
+
+    def test_today_skips_past_hours(self):
+        """today attribute must not include already-elapsed hours."""
+        from unittest.mock import patch
+        from homeassistant.util import dt as dt_util
+
+        # 24 hourly prices for a full day
+        today_prices = [float(i) * 0.01 for i in range(24)]
+        state = self._make_state(attributes={"today": today_prices})
+
+        # Simulate that it is currently 10:00
+        fake_now = dt_util.utcnow().replace(hour=10, minute=5, second=0, microsecond=0)
+        with patch(
+            "custom_components.battery_controller.helpers.dt_util.utcnow",
+            return_value=fake_now,
+        ):
+            prices, interval = extract_price_forecast_with_interval(state)
+
+        # Prices from hour 10 onwards (index 10..23 = 14 entries)
+        assert prices == today_prices[10:]
+        assert interval == 60
+
+    def test_today_and_tomorrow_combined(self):
+        """today[hour:] + tomorrow should be combined correctly."""
+        from unittest.mock import patch
+        from homeassistant.util import dt as dt_util
+
+        today_prices = [float(i) for i in range(24)]
+        tomorrow_prices = [float(i + 24) for i in range(24)]
+        state = self._make_state(
+            attributes={"today": today_prices, "tomorrow": tomorrow_prices}
+        )
+
+        fake_now = dt_util.utcnow().replace(hour=20, minute=0, second=0, microsecond=0)
+        with patch(
+            "custom_components.battery_controller.helpers.dt_util.utcnow",
+            return_value=fake_now,
+        ):
+            prices, interval = extract_price_forecast_with_interval(state)
+
+        expected = today_prices[20:] + tomorrow_prices
+        assert prices == expected

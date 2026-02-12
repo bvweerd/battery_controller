@@ -145,11 +145,14 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         return forecast, 60
 
     # Try today/tomorrow
+    # Skip past hours from today (one entry per hour, starting at midnight)
     combined: list[Any] = []
-    for key in ("today", "tomorrow"):
-        attr = state.attributes.get(key)
-        if isinstance(attr, list):
-            combined.extend(attr)
+    today_attr = state.attributes.get("today")
+    if isinstance(today_attr, list):
+        combined.extend(today_attr[hour:])
+    tomorrow_attr = state.attributes.get("tomorrow")
+    if isinstance(tomorrow_attr, list):
+        combined.extend(tomorrow_attr)
 
     for entry in combined:
         price = _normalize_price_value(entry)
