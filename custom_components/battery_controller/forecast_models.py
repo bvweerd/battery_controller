@@ -56,6 +56,11 @@ class ConsumptionForecastModel:
     Uses DSMR-style energy sensors (kWh, total_increasing) for pattern learning.
     Net consumption = sum(consumption_sensors) - sum(production_sensors).
     Hourly kWh change from HA statistics equals average kW during that hour.
+
+    PV double-counting correction (three layers, first available wins):
+    1. pv_production_sensors: real kWh sensors from inverter(s) → add back to net
+    2. own pv_forecast sensor history (via entry_id lookup) → self-consistent correction
+    3. Warning log when production_sensors configured without a correction method
     """
 
     def __init__(
@@ -65,6 +70,8 @@ class ConsumptionForecastModel:
         production_sensors: list[str] | None = None,
         history_days: int = 14,
         base_consumption_kw: float = 0.5,
+        pv_production_sensors: list[str] | None = None,
+        entry_id: str | None = None,
     ):
         """Initialize consumption forecast model."""
         self.hass = hass
@@ -72,6 +79,8 @@ class ConsumptionForecastModel:
         self.production_sensors = production_sensors or []
         self.history_days = history_days
         self.base_consumption_kw = base_consumption_kw
+        self.pv_production_sensors = pv_production_sensors or []
+        self._entry_id = entry_id
         self._hourly_pattern: dict[tuple[int, int], float] = {}
 
     async def async_update_pattern(self) -> None:
@@ -80,6 +89,14 @@ class ConsumptionForecastModel:
         Queries HA recorder statistics for hourly energy changes (kWh).
         Net consumption = sum(consumption) - sum(production) per hour.
         kWh per hour equals average kW, so values map directly to power.
+
+        If electricity_production_sensors are configured alongside a PV model,
+        the learned value is net grid exchange (import - export = consumption - PV).
+        To avoid double-counting when the optimizer subtracts PV forecast again,
+        we add back the historical PV production (three-layer fallback):
+          1. pv_production_sensors: real inverter kWh sensors (most accurate)
+          2. own pv_forecast sensor history from HA recorder (self-consistent)
+          3. Warning log if no correction is possible
         """
         all_sensors = self.consumption_sensors + self.production_sensors
         if not all_sensors:
@@ -113,51 +130,120 @@ class ConsumptionForecastModel:
             # Each stat entry's "change" = kWh in that hour = avg kW
             hourly_net: dict[str, float] = {}  # key: ISO timestamp -> net kWh
 
+            # Normalise a stat entry to (ts_key, value) regardless of whether
+            # the recorder returns the "start" field as a string or datetime.
+            def _ts_and_value(stat: dict, field: str) -> tuple[str, float] | None:
+                value = stat.get(field)
+                if value is None:
+                    return None
+                start = stat.get("start")
+                if isinstance(start, datetime):
+                    ts_key = start.isoformat()
+                else:
+                    ts_key = str(start or "")
+                return ts_key, float(value)
+
             for sensor_id in self.consumption_sensors:
                 for stat in stats.get(sensor_id, []):
-                    change = stat.get("change")
-                    if change is None:
-                        continue
-                    ts_key = str(stat.get("start", ""))
-                    hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + float(change)
+                    result = _ts_and_value(stat, "change")
+                    if result:
+                        ts_key, val = result
+                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + val
 
             for sensor_id in self.production_sensors:
                 for stat in stats.get(sensor_id, []):
-                    change = stat.get("change")
-                    if change is None:
-                        continue
-                    ts_key = str(stat.get("start", ""))
-                    hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) - float(change)
+                    result = _ts_and_value(stat, "change")
+                    if result:
+                        ts_key, val = result
+                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) - val
 
-            # Group by (hour, day_of_week)
+            # PV correction: add back historical PV production so that the
+            # stored pattern represents gross household consumption.
+            # This prevents double-counting when the optimizer subtracts pv_forecast.
+            pv_corrected = False
+            if self.production_sensors and self.pv_production_sensors:
+                # Layer 1: real PV inverter kWh sensors
+                pv_stats = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    set(self.pv_production_sensors),
+                    "hour",
+                    None,
+                    {"change"},
+                )
+                for sensor_id in self.pv_production_sensors:
+                    for stat in pv_stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            ts_key, val = result
+                            hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
+                                0.0, val
+                            )
+                pv_corrected = True
+                _LOGGER.debug(
+                    "PV correction applied from %d production sensor(s)",
+                    len(self.pv_production_sensors),
+                )
+            elif self.production_sensors and self._entry_id:
+                # Layer 2: own pv_forecast sensor history (state_class=MEASUREMENT)
+                try:
+                    from homeassistant.helpers import entity_registry as er
+
+                    ent_reg = er.async_get(self.hass)
+                    from .const import DOMAIN
+
+                    pv_entity_id = ent_reg.async_get_entity_id(
+                        "sensor", DOMAIN, f"{self._entry_id}_pv_forecast"
+                    )
+                    if pv_entity_id:
+                        pv_stats = await get_instance(self.hass).async_add_executor_job(
+                            statistics_during_period,
+                            self.hass,
+                            start_time,
+                            end_time,
+                            {pv_entity_id},
+                            "hour",
+                            None,
+                            {"mean"},
+                        )
+                        for stat in pv_stats.get(pv_entity_id, []):
+                            result = _ts_and_value(stat, "mean")
+                            if result:
+                                ts_key, val = result
+                                # mean kW over 1 h = kWh for that hour
+                                hourly_net[ts_key] = hourly_net.get(
+                                    ts_key, 0.0
+                                ) + max(0.0, val)
+                        pv_corrected = True
+                        _LOGGER.debug(
+                            "PV correction applied from own pv_forecast sensor (%s)",
+                            pv_entity_id,
+                        )
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Could not apply PV correction from forecast sensor: %s", err
+                    )
+
+            if self.production_sensors and not pv_corrected:
+                # Layer 3: warn that double-counting may occur
+                _LOGGER.warning(
+                    "electricity_production_sensors are configured alongside a PV model "
+                    "but no PV correction could be applied. This may cause double-counting "
+                    "of PV in the consumption forecast. Configure 'pv_production_sensors' "
+                    "with your inverter's total energy sensor(s) to fix this."
+                )
+
+            # Group by (hour, day_of_week) and average
             hourly_values: dict[tuple[int, int], list[float]] = {}
-
             for ts_key, net_kwh in hourly_net.items():
                 dt = dt_util.parse_datetime(ts_key)
                 if dt is None:
-                    # Try parsing as datetime object (recorder may return datetime)
                     continue
-
                 key = (dt.hour, dt.weekday())
-                if key not in hourly_values:
-                    hourly_values[key] = []
-                # kWh per hour = average kW, clamp to >= 0
-                hourly_values[key].append(max(0.0, net_kwh))
+                hourly_values.setdefault(key, []).append(max(0.0, net_kwh))
 
-            # Also handle datetime objects from recorder
-            for sensor_id in self.consumption_sensors:
-                for stat in stats.get(sensor_id, []):
-                    start = stat.get("start")
-                    if isinstance(start, datetime) and str(start) not in hourly_net:
-                        change = stat.get("change")
-                        if change is None:
-                            continue
-                        key = (start.hour, start.weekday())
-                        if key not in hourly_values:
-                            hourly_values[key] = []
-                        hourly_values[key].append(max(0.0, float(change)))
-
-            # Calculate averages
             for key, values in hourly_values.items():
                 if values:
                     self._hourly_pattern[key] = sum(values) / len(values)

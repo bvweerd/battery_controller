@@ -27,6 +27,7 @@ from .const import (
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
+    CONF_PV_PRODUCTION_SENSORS,
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
@@ -202,6 +203,10 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     "suggested_value": d.get(CONF_ELECTRICITY_PRODUCTION_SENSORS)
                 },
             ): energy_selector,
+            vol.Optional(
+                CONF_PV_PRODUCTION_SENSORS,
+                description={"suggested_value": d.get(CONF_PV_PRODUCTION_SENSORS)},
+            ): energy_selector,
         }
     )
 
@@ -343,6 +348,7 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_ELECTRICITY_PRODUCTION_SENSORS: _g(
             opt, CONF_ELECTRICITY_PRODUCTION_SENSORS, []
         ),
+        CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
         # Advanced
         CONF_TIME_STEP_MINUTES: int(
             _g(adv, CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES)

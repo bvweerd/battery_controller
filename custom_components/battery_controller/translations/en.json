@@ -41,7 +41,8 @@
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)"
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
             }
           },
           "advanced": {
@@ -124,7 +125,8 @@
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)"
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
             }
           },
           "advanced": {

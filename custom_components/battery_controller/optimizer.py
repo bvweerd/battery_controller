@@ -211,12 +211,12 @@ def optimize_battery_schedule(
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
     power_step_w = 500  # 500W resolution
 
-    charge_actions = [
-        float(x) for x in range(0, int(max_charge_w) + power_step_w, power_step_w)
-    ]
-    discharge_actions = [
-        float(x) for x in range(-int(max_discharge_w), 0, power_step_w)
-    ]
+    # Generate actions up to (but never exceeding) the rated max power.
+    # Using integer division ensures the last step stays within limits.
+    charge_steps = int(max_charge_w / power_step_w)
+    charge_actions = [float(i * power_step_w) for i in range(charge_steps + 1)]
+    discharge_steps = int(max_discharge_w / power_step_w)
+    discharge_actions = [float(-i * power_step_w) for i in range(discharge_steps, 0, -1)]
     actions = discharge_actions + charge_actions
 
     # Backward induction
@@ -426,7 +426,7 @@ def _filter_oscillations(
     # Minimum profitable price spread needed for arbitrage
     # P_discharge * sqrt(rte) > P_charge / sqrt(rte) + 2 * degradation + min_spread
     # => P_discharge > P_charge / rte + (2 * degradation + min_spread) / sqrt(rte)
-    min_arbitrage_spread = 2 * degradation_cost_per_kwh / sqrt_rte + min_price_spread
+    min_arbitrage_spread = (2 * degradation_cost_per_kwh + min_price_spread) / sqrt_rte
 
     # Helper to get actual charge cost (grid price or feed-in opportunity cost)
     def get_charge_cost(timestep: int) -> float:
@@ -528,87 +528,3 @@ def _empty_result(
     )
 
 
-def should_charge_now(
-    current_price: float,
-    price_forecast: list[float],
-    current_soc_percent: float,
-    rte: float = 0.90,
-    degradation_per_kwh: float = 0.03,
-) -> tuple[bool, str]:
-    """Simple heuristic to decide if charging is beneficial now.
-
-    Args:
-        current_price: Current grid price in EUR/kWh
-        price_forecast: Future price forecast
-        current_soc_percent: Current SoC in percent
-        rte: Round trip efficiency
-        degradation_per_kwh: Degradation cost per kWh
-
-    Returns:
-        Tuple of (should_charge, reason)
-    """
-    if not price_forecast:
-        return False, "no_forecast"
-
-    # Already full?
-    if current_soc_percent >= 90:
-        return False, "soc_high"
-
-    # Find maximum future price
-    max_future_price = max(price_forecast)
-
-    # Minimum price spread needed
-    min_spread = current_price / rte - current_price + 2 * degradation_per_kwh
-
-    if max_future_price - current_price > min_spread:
-        return True, f"arbitrage_opportunity_{max_future_price:.3f}"
-
-    # Is current price in lowest 25% of forecast?
-    sorted_prices = sorted([current_price] + price_forecast)
-    rank = sorted_prices.index(current_price)
-    percentile = rank / len(sorted_prices)
-
-    if percentile < 0.25 and current_soc_percent < 50:
-        return True, "low_price_percentile"
-
-    return False, "no_opportunity"
-
-
-def should_discharge_now(
-    current_price: float,
-    price_forecast: list[float],
-    current_soc_percent: float,
-    min_soc_percent: float = 10.0,
-) -> tuple[bool, str]:
-    """Simple heuristic to decide if discharging is beneficial now.
-
-    Args:
-        current_price: Current grid price in EUR/kWh
-        price_forecast: Future price forecast
-        current_soc_percent: Current SoC in percent
-        min_soc_percent: Minimum SoC to maintain
-
-    Returns:
-        Tuple of (should_discharge, reason)
-    """
-    if not price_forecast:
-        return False, "no_forecast"
-
-    # Too low?
-    if current_soc_percent <= min_soc_percent:
-        return False, "soc_low"
-
-    # Is current price in highest 25% of forecast?
-    sorted_prices = sorted([current_price] + price_forecast, reverse=True)
-    rank = sorted_prices.index(current_price)
-    percentile = rank / len(sorted_prices)
-
-    if percentile < 0.25 and current_soc_percent > 30:
-        return True, "high_price_percentile"
-
-    # Is current price significantly higher than average?
-    avg_price = sum(price_forecast) / len(price_forecast)
-    if current_price > avg_price * 1.3 and current_soc_percent > 50:
-        return True, "price_above_average"
-
-    return False, "no_opportunity"

@@ -38,8 +38,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Ensure DOMAIN exists in hass.data
     hass.data.setdefault(DOMAIN, {})
 
-    # Merge options and data for configuration
-    config = {**entry.data, **entry.options}
+    # Merge options and data for configuration; include entry_id for sensor lookups
+    config = {**entry.data, **entry.options, "entry_id": entry.entry_id}
 
     # Initialize coordinators
     _LOGGER.debug("Initializing coordinators for entry %s", entry.entry_id)

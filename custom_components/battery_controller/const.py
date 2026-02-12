@@ -56,6 +56,8 @@ CONF_BATTERY_SOC_SENSOR = "battery_soc_sensor"
 CONF_BATTERY_POWER_SENSOR = "battery_power_sensor"
 CONF_ELECTRICITY_CONSUMPTION_SENSORS = "electricity_consumption_sensors"
 CONF_ELECTRICITY_PRODUCTION_SENSORS = "electricity_production_sensors"
+# kWh total-energy sensors from PV inverters (used to reconstruct gross consumption)
+CONF_PV_PRODUCTION_SENSORS = "pv_production_sensors"
 CONF_POWER_CONSUMPTION_SENSORS = "power_consumption_sensors"
 CONF_POWER_PRODUCTION_SENSORS = "power_production_sensors"
 
