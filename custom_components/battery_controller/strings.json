@@ -51,7 +51,8 @@
               "time_step_minutes": "Time step (minutes)",
               "optimization_interval_minutes": "Optimization interval (minutes)",
               "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
-              "zero_grid_enabled": "Zero-grid control enabled"
+              "zero_grid_enabled": "Zero-grid control enabled",
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)"
             }
           }
         }
@@ -135,7 +136,8 @@
               "time_step_minutes": "Time step (minutes)",
               "optimization_interval_minutes": "Optimization interval (minutes)",
               "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
-              "zero_grid_enabled": "Zero-grid control enabled"
+              "zero_grid_enabled": "Zero-grid control enabled",
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)"
             }
           }
         }
