@@ -515,8 +515,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Map effective mode to zero_grid_controller mode.
 
         For idle mode with PV surplus (grid < 0), upgrades to zero_grid
-        when real-time power sensors are available. The fast feedback loop
-        (~5s) ensures the controller reverts to idle quickly if PV drops.
+        when real-time power sensors are available. Uses a 50 W hysteresis:
+        enter zero_grid when grid < 0, stay in zero_grid until grid >= 50 W.
+        This prevents oscillation when the battery successfully absorbs PV and
+        grid reads near 0 W (which would otherwise flip back to idle mode,
+        stopping the charge, causing the grid to go negative again).
 
         Args:
             effective_mode: The resolved mode from optimization logic.
@@ -531,7 +534,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         if effective_mode == "zero_grid":
             return "zero_grid"
-        if effective_mode == "idle" and current_grid_w < 0 and has_power_sensors:
+        if effective_mode == "idle" and current_grid_w < 50 and has_power_sensors:
             return "zero_grid"
         if effective_mode == "idle":
             return "idle"
