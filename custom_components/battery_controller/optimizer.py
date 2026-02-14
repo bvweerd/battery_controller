@@ -209,7 +209,7 @@ def optimize_battery_schedule(
     # Power action space (discretized in W)
     max_charge_w = battery_config.max_charge_power_kw * 1000
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
-    power_step_w = 500  # 500W resolution
+    power_step_w = 100  # 100W resolution
 
     # Generate actions up to (but never exceeding) the rated max power.
     # Using integer division ensures the last step stays within limits.
