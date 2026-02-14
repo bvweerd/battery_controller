@@ -24,6 +24,7 @@ from .const import (
     CONF_BATTERY_POWER_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
+    CONF_DEGRADATION_COST_PER_KWH,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
@@ -31,6 +32,9 @@ from .const import (
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
+    CONF_MAX_SOC_PERCENT,
+    CONF_MIN_PRICE_SPREAD,
+    CONF_MIN_SOC_PERCENT,
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
@@ -45,6 +49,7 @@ from .const import (
     CONF_PV_TILT,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_TIME_STEP_MINUTES,
+    CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_ENABLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_CAPACITY_KWH,
@@ -576,4 +581,14 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Finish the options flow."""
         self._data[CONF_PV_EXTRA_ARRAYS] = self._pv_extra_arrays
+        # Preserve number entity values managed outside the config flow
+        for key in (
+            CONF_MIN_SOC_PERCENT,
+            CONF_MAX_SOC_PERCENT,
+            CONF_DEGRADATION_COST_PER_KWH,
+            CONF_MIN_PRICE_SPREAD,
+            CONF_ZERO_GRID_DEADBAND_W,
+        ):
+            if key in self.config_entry.options:
+                self._data.setdefault(key, self.config_entry.options[key])
         return self.async_create_entry(title="", data=self._data)
