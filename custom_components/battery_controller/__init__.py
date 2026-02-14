@@ -46,19 +46,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 1. Weather data coordinator (API calls to open-meteo)
     weather_coordinator = WeatherDataCoordinator(hass)
-    await weather_coordinator.async_config_entry_first_refresh()
 
     # 2. Forecast coordinator (depends on weather coordinator)
     forecast_coordinator = ForecastCoordinator(hass, weather_coordinator, config)
     await forecast_coordinator.async_setup()
-    await forecast_coordinator.async_config_entry_first_refresh()
 
     # 3. Optimization coordinator (depends on forecast coordinator)
     optimization_coordinator = OptimizationCoordinator(
         hass, weather_coordinator, forecast_coordinator, config
     )
     await optimization_coordinator.async_setup()
-    await optimization_coordinator.async_config_entry_first_refresh()
 
     # Create device info for all entities
     device = DeviceInfo(
