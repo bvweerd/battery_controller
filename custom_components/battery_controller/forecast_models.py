@@ -213,9 +213,9 @@ class ConsumptionForecastModel:
                             if result:
                                 ts_key, val = result
                                 # mean kW over 1 h = kWh for that hour
-                                hourly_net[ts_key] = hourly_net.get(
-                                    ts_key, 0.0
-                                ) + max(0.0, val)
+                                hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
+                                    0.0, val
+                                )
                         pv_corrected = True
                         _LOGGER.debug(
                             "PV correction applied from own pv_forecast sensor (%s)",

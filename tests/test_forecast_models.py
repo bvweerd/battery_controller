@@ -268,9 +268,7 @@ class TestAsyncUpdatePattern:
             consumption_sensors=["sensor.consumption"],
         )
         dt_start = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
-        base_stats = {
-            "sensor.consumption": [{"start": dt_start, "change": 3.0}]
-        }
+        base_stats = {"sensor.consumption": [{"start": dt_start, "change": 3.0}]}
         mock_instance = MagicMock()
         mock_instance.async_add_executor_job = AsyncMock(return_value=base_stats)
 
