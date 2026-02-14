@@ -270,7 +270,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
         radiation_forecast = weather_data.get("radiation_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
         if forecast_start and radiation_forecast:
-            current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+            current_hour = datetime.now(timezone.utc).replace(
+                minute=0, second=0, microsecond=0
+            )
             hours_elapsed = max(
                 0, int((current_hour - forecast_start).total_seconds() / 3600)
             )

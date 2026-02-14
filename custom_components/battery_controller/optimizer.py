@@ -216,7 +216,9 @@ def optimize_battery_schedule(
     charge_steps = int(max_charge_w / power_step_w)
     charge_actions = [float(i * power_step_w) for i in range(charge_steps + 1)]
     discharge_steps = int(max_discharge_w / power_step_w)
-    discharge_actions = [float(-i * power_step_w) for i in range(discharge_steps, 0, -1)]
+    discharge_actions = [
+        float(-i * power_step_w) for i in range(discharge_steps, 0, -1)
+    ]
     actions = discharge_actions + charge_actions
 
     # Backward induction
@@ -526,5 +528,3 @@ def _empty_result(
         pv_forecast=[],
         consumption_forecast=[],
     )
-
-

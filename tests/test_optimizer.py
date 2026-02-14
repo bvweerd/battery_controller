@@ -555,9 +555,9 @@ class TestOscillationFilterFormula:
             min_price_spread=min_spread,
         )
         # Price spread = 0.20 > expected_threshold ≈ 0.116 → arbitrage expected
-        assert any(m == "charging" for m in result.mode_schedule[:4]), (
-            f"Expected charging; threshold={expected_threshold:.3f}, spread=0.20"
-        )
+        assert any(
+            m == "charging" for m in result.mode_schedule[:4]
+        ), f"Expected charging; threshold={expected_threshold:.3f}, spread=0.20"
 
     def test_spread_below_threshold_no_arbitrage(self, battery_config):
         """Price spread below corrected threshold should produce no arbitrage."""
@@ -583,7 +583,9 @@ class TestOscillationFilterFormula:
         )
         has_charge_then_discharge = any(
             result.mode_schedule[i] == "charging"
-            and any(result.mode_schedule[j] == "discharging" for j in range(i + 1, i + 8))
+            and any(
+                result.mode_schedule[j] == "discharging" for j in range(i + 1, i + 8)
+            )
             for i in range(len(result.mode_schedule))
         )
         assert not has_charge_then_discharge, "Should not arbitrage with tiny spread"
