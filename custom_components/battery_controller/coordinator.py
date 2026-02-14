@@ -14,7 +14,10 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState
@@ -53,6 +56,8 @@ from .const import (
     DEFAULT_PV_PEAK_POWER_KWP,
     DEFAULT_PV_TILT,
     DEFAULT_TIME_STEP_MINUTES,
+    CONF_ZERO_GRID_RESPONSE_TIME_S,
+    DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_HYBRID,
     MODE_MANUAL,
     MODE_ZERO_GRID,
@@ -412,29 +417,30 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
 
-        # Set up real-time zero_grid control via DSMR power sensors
-        # Note: battery_power_sensor is intentionally NOT included here.
-        # It is only read inside the handler (via get_current_battery_state),
-        # not used as a trigger. Including it would create a feedback loop:
-        # setpoint change → battery responds → battery_power_sensor fires →
-        # new calculation before DSMR has updated → integrator wind-up.
-        realtime_sensors = []
-
-        # Add DSMR power sensors for grid balance calculation
-        if self._power_consumption_sensors:
-            realtime_sensors.extend(self._power_consumption_sensors)
-        if self._power_production_sensors:
-            realtime_sensors.extend(self._power_production_sensors)
-
-        if realtime_sensors:
-            self._unsub_realtime = async_track_state_change_event(
+        # Set up real-time zero_grid control via a periodic timer.
+        # A timer avoids the double-trigger problem that occurs when multiple
+        # sensors (e.g. DSMR consumption + production) update simultaneously:
+        # with state-change tracking each sensor fires a separate event,
+        # causing the zero_grid integrator to run twice in rapid succession
+        # and double the setpoint. A fixed interval reads all sensors at once.
+        has_power_sensors = bool(
+            self._power_consumption_sensors or self._power_production_sensors
+        )
+        if has_power_sensors:
+            interval_s = float(
+                self.config.get(
+                    CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
+                )
+            )
+            self._unsub_realtime = async_track_time_interval(
                 self.hass,
-                realtime_sensors,
                 self._handle_realtime_update,
+                timedelta(seconds=interval_s),
             )
             _LOGGER.debug(
-                "Real-time zero_grid control enabled, tracking: %s",
-                realtime_sensors,
+                "Real-time zero_grid control enabled, interval=%.1fs, sensors: %s",
+                interval_s,
+                self._power_consumption_sensors + self._power_production_sensors,
             )
 
     async def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
@@ -458,20 +464,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         except (ValueError, TypeError):
             pass
 
-    async def _handle_realtime_update(
-        self, event: Event[EventStateChangedData]
-    ) -> None:
-        """Handle real-time grid/battery sensor changes for zero_grid control.
+    async def _handle_realtime_update(self, now: datetime) -> None:
+        """Periodic real-time update for zero_grid control.
 
-        This runs on every sensor update (~5s for DSMR) and recalculates
-        only the zero_grid setpoint. No re-optimization is triggered.
+        Runs every CONF_ZERO_GRID_RESPONSE_TIME_S seconds and recalculates
+        the zero_grid setpoint from current sensor values. Using a timer
+        instead of state-change events avoids double-triggers when multiple
+        sensors (e.g. DSMR consumption + production) update simultaneously.
         """
         if self.data is None or self._last_result is None:
             return  # No optimization result yet
-
-        new_state = event.data.get("new_state")
-        if not new_state or new_state.state in ("unknown", "unavailable"):
-            return
 
         # Read actual grid power from DSMR sensor
         current_grid_w = self._get_realtime_grid_w()

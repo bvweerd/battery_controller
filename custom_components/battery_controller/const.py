@@ -110,7 +110,7 @@ DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
 # Default values - Zero grid control
 DEFAULT_ZERO_GRID_ENABLED = True
 DEFAULT_ZERO_GRID_DEADBAND_W = 50.0
-DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 5.0
+DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
 DEFAULT_ZERO_GRID_PRIORITY = "schedule"
 
 # Default values - Fixed prices
