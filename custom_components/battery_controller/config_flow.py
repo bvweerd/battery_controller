@@ -46,6 +46,7 @@ from .const import (
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_TIME_STEP_MINUTES,
     CONF_ZERO_GRID_ENABLED,
+    CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_CAPACITY_KWH,
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MAX_CHARGE_POWER_KW,
@@ -61,6 +62,7 @@ from .const import (
     DEFAULT_ROUND_TRIP_EFFICIENCY,
     DEFAULT_TIME_STEP_MINUTES,
     DEFAULT_ZERO_GRID_ENABLED,
+    DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
 )
 
@@ -237,6 +239,15 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 default=d.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED),
                 description={"suggested_value": d.get(CONF_ZERO_GRID_ENABLED)},
             ): bool,
+            vol.Optional(
+                CONF_ZERO_GRID_RESPONSE_TIME_S,
+                default=d.get(
+                    CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
+                ),
+                description={
+                    "suggested_value": d.get(CONF_ZERO_GRID_RESPONSE_TIME_S)
+                },
+            ): vol.Coerce(float),
         }
     )
 
@@ -365,6 +376,9 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         ),
         CONF_ZERO_GRID_ENABLED: bool(
             _g(adv, CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED)
+        ),
+        CONF_ZERO_GRID_RESPONSE_TIME_S: float(
+            _g(adv, CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S)
         ),
     }
 
