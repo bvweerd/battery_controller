@@ -534,7 +534,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         if effective_mode == "zero_grid":
             return "zero_grid"
-        if effective_mode == "idle" and current_grid_w < 50 and has_power_sensors:
+        deadband_w = self.zero_grid_controller.config.deadband_w
+        if effective_mode == "idle" and current_grid_w < deadband_w and has_power_sensors:
             return "zero_grid"
         if effective_mode == "idle":
             return "idle"
