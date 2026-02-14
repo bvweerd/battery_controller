@@ -249,9 +249,7 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 default=d.get(
                     CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
                 ),
-                description={
-                    "suggested_value": d.get(CONF_ZERO_GRID_RESPONSE_TIME_S)
-                },
+                description={"suggested_value": d.get(CONF_ZERO_GRID_RESPONSE_TIME_S)},
             ): vol.Coerce(float),
         }
     )
