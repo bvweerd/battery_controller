@@ -129,7 +129,7 @@ BATTERY_REPLACEMENT_COST_PER_KWH = 500  # EUR
 BATTERY_DOD_FACTOR = 0.8
 
 # SoC discretization for DP (in Wh steps)
-SOC_RESOLUTION_WH = 100  # 100 Wh steps for 10 kWh = 100 states
+SOC_RESOLUTION_WH = 25  # 25 Wh steps → aligns with 100W×0.25h per action
 
 # Time constants
 HOURS_PER_DAY = 24
