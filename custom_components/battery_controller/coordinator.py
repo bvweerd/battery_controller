@@ -525,13 +525,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Trigger refresh when SoC sensor transitions from unavailable to available."""
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
-        was_unavailable = (
-            old_state is None
-            or old_state.state in ("unknown", "unavailable")
+        was_unavailable = old_state is None or old_state.state in (
+            "unknown",
+            "unavailable",
         )
-        is_available = (
-            new_state is not None
-            and new_state.state not in ("unknown", "unavailable")
+        is_available = new_state is not None and new_state.state not in (
+            "unknown",
+            "unavailable",
         )
         if was_unavailable and is_available:
             _LOGGER.debug(
@@ -715,7 +715,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 # Sensor unavailable/not yet loaded — use default
                 soc_percent = smarter_soc_default
                 soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
-                _LOGGER.debug("SoC sensor unavailable, using fallback SoC=%.1f%%", soc_percent)
+                _LOGGER.debug(
+                    "SoC sensor unavailable, using fallback SoC=%.1f%%", soc_percent
+                )
         else:
             soc_percent = soc_value
             soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
@@ -772,7 +774,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._price_sensor,
                 price_state.state if price_state else "unavailable",
             )
-            self._last_failure_reason = f"Price sensor '{self._price_sensor}' not available"
+            self._last_failure_reason = (
+                f"Price sensor '{self._price_sensor}' not available"
+            )
             raise UpdateFailed(
                 f"Price sensor '{self._price_sensor}' not available", retry_after=60
             )
@@ -792,7 +796,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     price_state.state,
                     e,
                 )
-                self._last_failure_reason = f"Cannot extract price data from '{self._price_sensor}'"
+                self._last_failure_reason = (
+                    f"Cannot extract price data from '{self._price_sensor}'"
+                )
                 raise UpdateFailed(
                     f"Cannot extract price data from '{self._price_sensor}'"
                 )
