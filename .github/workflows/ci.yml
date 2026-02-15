@@ -68,6 +68,7 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          ignore: brands,description,topics
 
   hassfest:
     name: Home Assistant hassfest
