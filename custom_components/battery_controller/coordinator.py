@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
-from homeassistant.core import HomeAssistant, Event, EventStateChangedData
+from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -399,6 +399,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._effective_power: float = 0.0
         self._dp_schedule_w: float = 0.0
 
+        # Failure tracking and cascade listeners
+        self._last_failure_reason: str | None = None
+        self._last_success_time: datetime | None = None
+        self._unsub_soc: Any | None = None
+        self._unsub_forecast: Any | None = None
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -409,6 +415,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Set control mode."""
         self._control_mode = mode
 
+    @property
+    def last_failure_reason(self) -> str | None:
+        """Return the reason for the last failed update, or None if last update succeeded."""
+        return self._last_failure_reason
+
+    @property
+    def last_success_time(self) -> datetime | None:
+        """Return the UTC timestamp of the last successful optimization, or None."""
+        return self._last_success_time
+
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
         if self._price_sensor:
@@ -418,6 +434,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._handle_price_change,
             )
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
+
+        if self._battery_soc_sensor:
+            self._unsub_soc = async_track_state_change_event(
+                self.hass,
+                [self._battery_soc_sensor],
+                self._handle_soc_available,
+            )
+            _LOGGER.debug("Tracking SoC sensor: %s", self._battery_soc_sensor)
+
+        @callback
+        def _on_forecast_update() -> None:
+            """Trigger optimization when forecast data first becomes available."""
+            if self.forecast_coordinator.data is not None and self.data is None:
+                self.hass.async_create_task(self.async_request_refresh())
+
+        self._unsub_forecast = self.forecast_coordinator.async_add_listener(
+            _on_forecast_update
+        )
 
         # Set up real-time zero_grid control via a periodic timer.
         # A timer avoids the double-trigger problem that occurs when multiple
@@ -486,6 +520,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 await self.async_request_refresh()
             self._last_price = new_price
+
+    async def _handle_soc_available(self, event: Event[EventStateChangedData]) -> None:
+        """Trigger refresh when SoC sensor transitions from unavailable to available."""
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        was_unavailable = (
+            old_state is None
+            or old_state.state in ("unknown", "unavailable")
+        )
+        is_available = (
+            new_state is not None
+            and new_state.state not in ("unknown", "unavailable")
+        )
+        if was_unavailable and is_available:
+            _LOGGER.debug(
+                "SoC sensor '%s' became available, triggering optimization",
+                self._battery_soc_sensor,
+            )
+            await self.async_request_refresh()
 
     async def _handle_realtime_update(self, now: datetime) -> None:
         """Periodic real-time update for zero_grid control.
@@ -625,6 +678,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_price:
             self._unsub_price()
             self._unsub_price = None
+        if self._unsub_soc:
+            self._unsub_soc()
+            self._unsub_soc = None
+        if self._unsub_forecast:
+            self._unsub_forecast()
+            self._unsub_forecast = None
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
@@ -644,7 +703,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Determine if SoC is in percent or kWh
         if soc_sensor:
             state = self.hass.states.get(soc_sensor)
-            if state:
+            if state and state.state not in ("unknown", "unavailable"):
                 unit = state.attributes.get("unit_of_measurement", "")
                 if unit == "kWh":
                     soc_kwh = soc_value
@@ -652,6 +711,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else:
                     soc_percent = soc_value
                     soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
+            else:
+                # Sensor unavailable/not yet loaded — use default
+                soc_percent = smarter_soc_default
+                soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
+                _LOGGER.debug("SoC sensor unavailable, using fallback SoC=%.1f%%", soc_percent)
         else:
             soc_percent = soc_value
             soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
@@ -690,13 +754,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             _LOGGER.error(
                 "OptimizationCoordinator: Forecast data is not available. Cannot run optimization."
             )
-            raise UpdateFailed("No forecast data available")
+            self._last_failure_reason = "No forecast data available"
+            raise UpdateFailed("No forecast data available", retry_after=60)
 
         # Get price forecast
         if not self._price_sensor:
             _LOGGER.error(
                 "OptimizationCoordinator: No price sensor configured. Cannot run optimization."
             )
+            self._last_failure_reason = "No price sensor configured"
             raise UpdateFailed("No price sensor configured")
 
         price_state = self.hass.states.get(self._price_sensor)
@@ -706,7 +772,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._price_sensor,
                 price_state.state if price_state else "unavailable",
             )
-            raise UpdateFailed(f"Price sensor '{self._price_sensor}' not available")
+            self._last_failure_reason = f"Price sensor '{self._price_sensor}' not available"
+            raise UpdateFailed(
+                f"Price sensor '{self._price_sensor}' not available", retry_after=60
+            )
 
         price_forecast, price_interval = extract_price_forecast_with_interval(
             price_state
@@ -723,6 +792,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     price_state.state,
                     e,
                 )
+                self._last_failure_reason = f"Cannot extract price data from '{self._price_sensor}'"
                 raise UpdateFailed(
                     f"Cannot extract price data from '{self._price_sensor}'"
                 )
@@ -957,6 +1027,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             control_action["target_power_w"] = 0.0
             control_action["target_power_kw"] = 0.0
             control_action["action_mode"] = "zero_grid"
+
+        # Record successful run
+        self._last_failure_reason = None
+        self._last_success_time = dt_util.utcnow()
 
         return {
             "optimization_result": result,
