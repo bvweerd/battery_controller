@@ -327,9 +327,9 @@ def optimize_battery_schedule(
         max_soc_kwh=battery_config.max_soc_kwh,
         pv_forecast=pv_forecast[:n_steps],
         consumption_forecast=consumption_forecast[:n_steps],
-        feed_in_forecast=feed_in_forecast[:n_steps]
-        if feed_in_forecast
-        else price_forecast[:n_steps],
+        feed_in_forecast=(
+            feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps]
+        ),
     )
 
     # Calculate costs
