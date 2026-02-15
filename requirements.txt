@@ -1,5 +1,5 @@
 asyncio
 pytest
 pytest-cov
-pytest-homeassistant-custom-component
+pytest-homeassistant-custom-component==0.13.315
 syrupy
