@@ -1,12 +1,12 @@
 {
   "domain": "battery_controller",
   "name": "Battery Controller",
+  "after_dependencies": ["recorder"],
   "codeowners": [
     "@bvweerd"
   ],
   "config_flow": true,
   "dependencies": [],
-  "after_dependencies": ["recorder"],
   "documentation": "https://www.github.com/bvweerd/battery_controller",
   "homekit": {},
   "iot_class": "calculated",
