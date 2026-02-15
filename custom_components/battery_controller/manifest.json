@@ -1,7 +1,9 @@
 {
   "domain": "battery_controller",
   "name": "Battery Controller",
-  "codeowners": ["@bvweerd"],
+  "codeowners": [
+    "@bvweerd"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://www.github.com/bvweerd/battery_controller",
@@ -9,7 +11,9 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/bvweerd/battery_controller/issues",
   "quality_scale": "silver",
-  "requirements": ["aiohttp"],
+  "requirements": [
+    "aiohttp"
+  ],
   "icon": "mdi:battery-high",
   "logo": "brands/logo.svg",
   "ssdp": [],
