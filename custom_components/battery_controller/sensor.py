@@ -372,11 +372,13 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
         current_grid_w = action.get("current_grid_w", 0.0)
         return {
             "current_grid_kw": round(current_grid_w / 1000, 3),
-            "direction": "importing"
-            if current_grid_w > 0
-            else "exporting"
-            if current_grid_w < 0
-            else "balanced",
+            "direction": (
+                "importing"
+                if current_grid_w > 0
+                else "exporting"
+                if current_grid_w < 0
+                else "balanced"
+            ),
             "import_w": round(max(0, current_grid_w), 0),
             "export_w": round(abs(min(0, current_grid_w)), 0),
         }

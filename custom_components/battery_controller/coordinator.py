@@ -953,10 +953,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "baseline_cost": result.baseline_cost,
             "savings": round(result.savings, 2),
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
-            "current_feed_in_price": resampled_feed_in[0]
-            if resampled_feed_in
-            else float(
-                self.config.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)
+            "current_feed_in_price": (
+                resampled_feed_in[0]
+                if resampled_feed_in
+                else float(
+                    self.config.get(
+                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                    )
+                )
             ),
             "timestamp": dt_util.utcnow(),
         }

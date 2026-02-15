@@ -9,7 +9,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-
 # Sensor entity IDs may be considered private; redact them
 TO_REDACT: set[str] = {
     "price_sensor",
