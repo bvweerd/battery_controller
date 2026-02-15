@@ -6,6 +6,7 @@
   ],
   "config_flow": true,
   "dependencies": [],
+  "after_dependencies": ["recorder"],
   "documentation": "https://www.github.com/bvweerd/battery_controller",
   "homekit": {},
   "iot_class": "calculated",
@@ -14,8 +15,6 @@
   "requirements": [
     "aiohttp"
   ],
-  "icon": "mdi:battery-high",
-  "logo": "brands/logo.svg",
   "ssdp": [],
   "version": "1.0.0",
   "zeroconf": []
