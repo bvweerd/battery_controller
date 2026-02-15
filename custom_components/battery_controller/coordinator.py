@@ -446,25 +446,46 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
 
     async def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
-        """Handle significant price changes."""
+        """Handle price sensor state changes.
+
+        Triggers optimization when:
+        - The sensor becomes available for the first time (e.g. after HA restart)
+        - The price changes significantly (>10%)
+        """
         new_state = event.data.get("new_state")
         if not new_state:
             return
 
         try:
             new_price = float(new_state.state)
-            # Only trigger on significant price change (>10%)
-            if self._last_price is not None and self._last_price != 0:
-                change_pct = abs(new_price - self._last_price) / abs(self._last_price)
-                if change_pct >= 0.10:
-                    _LOGGER.debug(
-                        "Significant price change: %.2f%%, triggering optimization",
-                        change_pct * 100,
-                    )
-                    await self.async_request_refresh()
-            self._last_price = new_price
         except (ValueError, TypeError):
-            pass
+            return  # Sensor is unavailable/unknown, ignore
+
+        old_state = event.data.get("old_state")
+        was_unavailable = (
+            self._last_price is None
+            or old_state is None
+            or old_state.state in ("unknown", "unavailable")
+        )
+
+        if was_unavailable:
+            # Sensor just became available — trigger a full optimization refresh
+            _LOGGER.debug(
+                "Price sensor '%s' became available (%.4f), triggering optimization",
+                self._price_sensor,
+                new_price,
+            )
+            self._last_price = new_price
+            await self.async_request_refresh()
+        elif self._last_price != 0:
+            change_pct = abs(new_price - self._last_price) / abs(self._last_price)
+            if change_pct >= 0.10:
+                _LOGGER.debug(
+                    "Significant price change: %.2f%%, triggering optimization",
+                    change_pct * 100,
+                )
+                await self.async_request_refresh()
+            self._last_price = new_price
 
     async def _handle_realtime_update(self, now: datetime) -> None:
         """Periodic real-time update for zero_grid control.
