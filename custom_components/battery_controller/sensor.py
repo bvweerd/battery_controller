@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -17,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -448,17 +450,27 @@ class OptimizationStatusSensor(BatteryControllerSensor):
         super().__init__(coordinator, device, entry, "optimization_status")
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> str:
         """Return the native value of the sensor."""
-        if self.coordinator.last_update_success:
-            return "ok"
-        return "failed"
+        if self.coordinator.data is None:
+            return "initializing"
+        if not self.coordinator.last_update_success:
+            return "failed"
+        last_success = self.coordinator.last_success_time
+        if last_success is not None:
+            interval = self.coordinator.update_interval or timedelta(minutes=15)
+            age = dt_util.utcnow() - last_success
+            if age > interval * 2.5:
+                return "stale"
+        return "ok"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         attrs: dict[str, Any] = {
             "last_update_success": self.coordinator.last_update_success,
+            "failure_reason": self.coordinator.last_failure_reason,
+            "last_success": str(self.coordinator.last_success_time),
         }
         if self.coordinator.data is None:
             return attrs
