@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
 
 import pytest
 from homeassistant import config_entries, setup
@@ -125,10 +126,14 @@ async def test_pv_array_add_only_flow(hass: HomeAssistant, mock_config: dict) ->
     assert result["step_id"] == "pv_menu"
     assert result["description_placeholders"]["pv_count"] == "1"
 
-    # Finish setup
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={"next_step_id": "finish_setup"}
-    )
+    # Finish setup — mock async_setup_entry to avoid real HTTP calls in flow tests
+    with patch(
+        "custom_components.battery_controller.async_setup_entry",
+        return_value=True,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"next_step_id": "finish_setup"}
+        )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Battery Controller"
     assert len(result["data"][CONF_PV_EXTRA_ARRAYS]) == 1
