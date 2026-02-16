@@ -405,6 +405,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_soc: Any | None = None
         self._unsub_forecast: Any | None = None
 
+        # Enabled flag: when False _async_update_data returns cached data immediately
+        # without re-running the optimizer. The 15-min scheduler keeps running so it
+        # is trivial to re-enable without manual intervention.
+        self._optimization_enabled: bool = True
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -424,6 +429,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def last_success_time(self) -> datetime | None:
         """Return the UTC timestamp of the last successful optimization, or None."""
         return self._last_success_time
+
+    @property
+    def optimization_enabled(self) -> bool:
+        """Return whether the optimizer is enabled."""
+        return self._optimization_enabled
+
+    @optimization_enabled.setter
+    def optimization_enabled(self, value: bool) -> None:
+        """Enable or disable the optimizer."""
+        self._optimization_enabled = value
 
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
@@ -750,6 +765,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Run battery optimization."""
+        # When disabled via switch, skip re-running the optimizer but keep the
+        # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
+        if not self._optimization_enabled:
+            if self.data is not None:
+                return self.data
+            # First run before any data exists: fall through to normal path so we
+            # get valid initial data even when starting in the disabled state.
+
         # Get forecast data
         forecast_data = self.forecast_coordinator.data
         if not forecast_data:
