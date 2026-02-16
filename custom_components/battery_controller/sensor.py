@@ -454,6 +454,8 @@ class OptimizationStatusSensor(BatteryControllerSensor):
         """Return the native value of the sensor."""
         if self.coordinator.data is None:
             return "initializing"
+        if not self.coordinator.optimization_enabled:
+            return "disabled"
         if not self.coordinator.last_update_success:
             return "failed"
         last_success = self.coordinator.last_success_time
@@ -467,10 +469,19 @@ class OptimizationStatusSensor(BatteryControllerSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
+        last_success = self.coordinator.last_success_time
+        interval = self.coordinator.update_interval or timedelta(minutes=15)
+        age_minutes = (
+            round((dt_util.utcnow() - last_success).total_seconds() / 60, 1)
+            if last_success is not None
+            else None
+        )
         attrs: dict[str, Any] = {
             "last_update_success": self.coordinator.last_update_success,
             "failure_reason": self.coordinator.last_failure_reason,
-            "last_success": str(self.coordinator.last_success_time),
+            "last_success": str(last_success) if last_success else None,
+            "age_minutes": age_minutes,
+            "update_interval_minutes": interval.total_seconds() / 60,
         }
         if self.coordinator.data is None:
             return attrs
