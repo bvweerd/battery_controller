@@ -404,6 +404,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._last_success_time: datetime | None = None
         self._unsub_soc: Any | None = None
         self._unsub_forecast: Any | None = None
+        self._unsub_optimizer_timer: Any | None = None
+        self._interval_minutes: int = interval_minutes
 
         # Enabled flag: when False _async_update_data returns cached data immediately
         # without re-running the optimizer. The 15-min scheduler keeps running so it
@@ -466,6 +468,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         self._unsub_forecast = self.forecast_coordinator.async_add_listener(
             _on_forecast_update
+        )
+
+        # Guaranteed periodic timer using async_track_time_interval.
+        # DataUpdateCoordinator's own update_interval only reschedules when
+        # listeners are registered — which doesn't happen until platform entities
+        # call async_added_to_hass(). If the first refresh fails before entities
+        # register (common at HA startup when input sensors are unavailable) the
+        # coordinator's internal timer is never created and the optimizer never
+        # runs again. This timer fires unconditionally, bypassing that mechanism.
+        self._unsub_optimizer_timer = async_track_time_interval(
+            self.hass,
+            self._handle_optimization_interval,
+            timedelta(minutes=self._interval_minutes),
+        )
+        _LOGGER.debug(
+            "Optimization interval timer started: every %d minutes",
+            self._interval_minutes,
         )
 
         # Set up real-time zero_grid control via a periodic timer.
@@ -535,6 +554,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 await self.async_request_refresh()
             self._last_price = new_price
+
+    async def _handle_optimization_interval(self, now: datetime) -> None:
+        """Periodic optimization trigger via async_track_time_interval.
+
+        This fires unconditionally every interval_minutes, independent of whether
+        DataUpdateCoordinator has any listeners registered.  It is the primary
+        scheduling mechanism; the coordinator's own update_interval is kept as a
+        fallback so that HA's built-in retry / backoff logic still applies.
+        """
+        _LOGGER.debug("Optimization interval timer fired at %s", now)
+        await self.async_request_refresh()
 
     async def _handle_soc_available(self, event: Event[EventStateChangedData]) -> None:
         """Trigger refresh when SoC sensor transitions from unavailable to available."""
@@ -699,6 +729,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_forecast:
             self._unsub_forecast()
             self._unsub_forecast = None
+        if self._unsub_optimizer_timer:
+            self._unsub_optimizer_timer()
+            self._unsub_optimizer_timer = None
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
@@ -765,16 +798,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Run battery optimization."""
+        _LOGGER.debug("OptimizationCoordinator: _async_update_data started.")
         # When disabled via switch, skip re-running the optimizer but keep the
         # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
         if not self._optimization_enabled:
+            _LOGGER.debug("OptimizationCoordinator: Optimization disabled, returning cached data.")
             if self.data is not None:
                 return self.data
-            # First run before any data exists: fall through to normal path so we
-            # get valid initial data even when starting in the disabled state.
 
+        # First run before any data exists: fall through to normal path so we
+        # get valid initial data even when starting in the disabled state.
+        _LOGGER.debug("OptimizationCoordinator: Fetching forecast data.")
         # Get forecast data
         forecast_data = self.forecast_coordinator.data
+        _LOGGER.debug(
+            "OptimizationCoordinator: Forecast data fetched (available: %s).",
+            forecast_data is not None,
+            )
         if not forecast_data:
             _LOGGER.error(
                 "OptimizationCoordinator: Forecast data is not available. Cannot run optimization."
@@ -790,7 +830,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._last_failure_reason = "No price sensor configured"
             raise UpdateFailed("No price sensor configured")
 
+        _LOGGER.debug(
+            "OptimizationCoordinator: Fetching price sensor state for %s.",
+            self._price_sensor,
+        )
         price_state = self.hass.states.get(self._price_sensor)
+        _LOGGER.debug(
+            "OptimizationCoordinator: Price sensor state fetched (available: %s).",
+            price_state is not None
+            and price_state.state not in ("unknown", "unavailable"),
+        )
         if not price_state or price_state.state in ("unknown", "unavailable"):
             _LOGGER.error(
                 "OptimizationCoordinator: Price sensor '%s' is not available (%s). Cannot run optimization.",
@@ -907,6 +956,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
+        _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
         # Run optimization
         _LOGGER.debug(
             "Running optimization: SoC=%.1f%%, %d steps, %d prices",
@@ -925,8 +975,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             consumption_forecast,
             time_step,
             degradation_cost,
-            min_spread,
-            pv_dc_forecast,
         )
 
         self._last_result = result
@@ -1057,6 +1105,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             control_action["target_power_kw"] = 0.0
             control_action["action_mode"] = "zero_grid"
 
+        _LOGGER.debug(
+            "OptimizationCoordinator: Recording successful run at %s.",
+            dt_util.utcnow(),
+        )
         # Record successful run
         self._last_failure_reason = None
         self._last_success_time = dt_util.utcnow()
