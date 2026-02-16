@@ -110,9 +110,25 @@ V[t][s] = min over actions (
 Where:
 - `V[t][s]` = minimum cost from time `t` to end, starting at SoC state `s`
 - `s'` = new SoC after applying `action`
-- Terminal condition: `V[T][s] = 0` for all states
+- Terminal condition: `V[T][s] = -(stored_kwh × feed_in_price_T)` — stored energy at the end of the horizon retains value at the last known feed-in price. This prevents the optimizer from irrationally discharging the battery just before the horizon ends.
 
-**4. Algorithm Steps**
+**4. Shadow Price of Stored Energy**
+
+After the backward pass, the optimizer computes the **shadow price** (marginal value) of stored energy at the current SoC:
+
+```
+λ = -dV[0]/dSoC ≈ (V[0][s-1] - V[0][s+1]) / (2 × ΔSoC)
+```
+
+This answers: *"If I have 1 extra kWh in the battery right now, how much will my future electricity costs decrease?"*
+
+The shadow price is used as an economic threshold for real-time decisions in hybrid mode:
+- **Export/discharge**: worth it when `feed_in × √RTE ≥ λ` (selling captures at least as much value as keeping it)
+- **Charge from grid**: worth it when `buy_price ≤ λ / √RTE` (buying is cheaper than the future saving it will generate)
+
+The **Shadow Price of Storage** sensor exposes this value and its derived thresholds for use in external automations.
+
+**5. Algorithm Steps**
 
 **Backward pass** (planning):
 ```python
@@ -132,7 +148,7 @@ for t in range(0, T):
     current_soc = new_soc_after_action
 ```
 
-**5. Oscillation Prevention**
+**6. Oscillation Prevention**
 
 After the DP optimizer produces the initial schedule, a post-processing filter removes unprofitable charge/discharge oscillations:
 
@@ -150,7 +166,7 @@ if P_discharge - P_charge / RTE < min_spread_required:
 
 This prevents the battery from oscillating (charge → discharge → charge) when price differences are too small to justify the round-trip losses. The **Min Price Spread** number entity lets you adjust this threshold at runtime.
 
-**6. Key Decisions**
+**7. Key Decisions**
 
 The optimizer automatically handles:
 - **Price arbitrage**: Charge during cheap hours (€0.05), discharge during expensive hours (€0.30)
@@ -243,7 +259,7 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 
 ## Entities Created
 
-### Sensors (12)
+### Sensors (13)
 
 | Entity | Unit | Description | Attributes |
 |--------|------|-------------|------------|
@@ -256,6 +272,7 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 | Consumption Forecast | kW | Current consumption estimate | `forecast_kw` |
 | Net Grid Forecast | kW | Net grid power (positive=import) | `forecast_kw` |
 | Estimated Savings | EUR | **Net financial impact of battery actions** (sum of direct profits/losses per step, including degradation and PV opportunity cost) over the planning horizon. | `baseline_cost`, `optimized_cost`, `step_profit_loss_eur` |
+| **Shadow Price of Storage** | EUR/kWh | **Marginal value of 1 kWh stored right now**, derived from the DP value function. Use as a threshold for external automations. | `discharge_threshold_eur_kwh`, `charge_threshold_eur_kwh` |
 | **Grid Setpoint** | W | **Tactics**: Real-time battery power from zero-grid controller (~5s updates). Use in `hybrid`/`zero_grid` modes. | `target_power_w`, `current_grid_w`, `current_battery_w`, `dp_schedule_w`, `mode`, `action_mode`, `soc_kwh`, `soc_percent` |
 | Control Mode | — | Current control mode | — |
 | Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `timestamp` |
@@ -362,6 +379,38 @@ series:
 | **Use Maximum Power Suggested** | running | ON when the grid buy price is negative (you are paid to consume). Suggests running flexible loads and charging the battery at full rate. |
 
 > **Tip**: Both sensors expose price and battery data as attributes for use in automations.
+
+### Shadow Price of Storage (detail)
+
+The **Shadow Price of Storage** sensor (`sensor.battery_controller_shadow_price`) exposes the marginal value of 1 kWh stored in the battery right now (EUR/kWh), derived from the DP value function after every optimization run.
+
+**Attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `shadow_price_eur_kwh` | Same as state value |
+| `discharge_threshold_eur_kwh` | `shadow_price × √RTE` — minimum feed-in price at which exporting is worth at least as much as keeping the energy |
+| `charge_threshold_eur_kwh` | `shadow_price / √RTE` — maximum buy price at which charging from the grid is still economically justified |
+
+**Example use cases:**
+
+```yaml
+# External automation: charge an EV or other flexible load
+# when the current buy price is below the charge threshold
+- condition: template
+  value_template: >
+    {{ states('sensor.current_electricity_price') | float <
+       state_attr('sensor.battery_controller_shadow_price', 'charge_threshold_eur_kwh') | float }}
+
+# External automation: trigger export / peak shaving
+# when the feed-in price exceeds the discharge threshold
+- condition: template
+  value_template: >
+    {{ states('sensor.current_feed_in_price') | float >
+       state_attr('sensor.battery_controller_shadow_price', 'discharge_threshold_eur_kwh') | float }}
+```
+
+The shadow price naturally reflects all future price information available to the optimizer. When expensive hours are approaching, the shadow price is high (→ don't sell cheaply now). When prices are flat, the shadow price is close to the feed-in price (→ exporting is fine).
 
 ## Control Modes
 

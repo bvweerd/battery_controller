@@ -48,6 +48,7 @@ async def async_setup_entry(
         NetGridForecastSensor(forecast_coordinator, device, entry),
         # Financial sensors
         BatteryDailySavingsSensor(optimization_coordinator, device, entry),
+        BatteryShadowPriceSensor(optimization_coordinator, device, entry),
         # Grid control sensors
         CurrentGridPowerSensor(optimization_coordinator, device, entry),
         BatteryGridSetpointSensor(optimization_coordinator, device, entry),
@@ -343,6 +344,55 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
         if result:
             attrs["price_forecast"] = result.price_forecast
         return attrs
+
+
+class BatteryShadowPriceSensor(BatteryControllerSensor):
+    """Sensor for the shadow price (marginal value) of stored energy.
+
+    Represents how much future electricity costs decrease per additional kWh
+    stored in the battery right now, derived from the DP value function.
+
+    Use as a decision threshold:
+    - Charge when buy_price < shadow_price / sqrt(RTE)
+    - Export/discharge when feed_in_price > shadow_price * sqrt(RTE)
+    """
+
+    _attr_translation_key = "shadow_price"
+    _attr_name = "Shadow Price of Storage"
+    _attr_native_unit_of_measurement = "EUR/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:battery-arrow-up"
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "shadow_price")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("shadow_price_eur_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        shadow_price = self.coordinator.data.get("shadow_price_eur_kwh", 0.0)
+        # Compute discharge and charge thresholds from battery config
+        rte = (
+            self.coordinator.battery_config.round_trip_efficiency
+            if hasattr(self.coordinator, "battery_config")
+            else 0.9
+        )
+        sqrt_rte_val = rte ** 0.5
+        return {
+            "shadow_price_eur_kwh": shadow_price,
+            # Minimum sell price at which discharging/exporting captures full value
+            "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte_val, 4),
+            # Maximum buy price at which charging is still economically justified
+            "charge_threshold_eur_kwh": (
+                round(shadow_price / sqrt_rte_val, 4) if sqrt_rte_val > 0 else None
+            ),
+        }
 
 
 class CurrentGridPowerSensor(BatteryControllerSensor):

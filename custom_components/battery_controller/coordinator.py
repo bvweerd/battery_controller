@@ -975,6 +975,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             consumption_forecast,
             time_step,
             degradation_cost,
+            min_spread,
+            pv_dc_forecast,
         )
 
         self._last_result = result
@@ -1026,11 +1028,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     effective_mode = "zero_grid"
                 effective_power = 0.0
             elif result.optimal_mode == "discharging":
-                # Check if exporting to grid is worth it vs self-consumption.
-                # Energy is already stored, so RTE is irrelevant here:
-                # both export and self-consumption have the same discharge
-                # efficiency. The comparison is simply feed-in vs buy price.
-                current_buy = resampled_prices[0] if resampled_prices else 0.0
+                # Decide: full-rate export vs zero_grid (self-consumption only).
+                # Use shadow price as the threshold: net sell value per kWh stored
+                # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
+                # value of keeping the energy for future use), exporting is better.
                 current_feed_in = (
                     resampled_feed_in[0]
                     if resampled_feed_in
@@ -1040,13 +1041,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         )
                     )
                 )
-                if current_buy > 0 and current_feed_in >= current_buy:
-                    # Feed-in >= buy: exporting is as good as self-consuming
-                    # (e.g. net metering / saldering) -> full rate discharge
+                sqrt_rte = self.battery_config.round_trip_efficiency ** 0.5
+                if current_feed_in * sqrt_rte >= result.shadow_price_eur_kwh:
+                    # Selling captures at least as much value as keeping
                     effective_mode = "discharging"
                     effective_power = result.optimal_power_kw
                 else:
-                    # Feed-in < buy: self-consumption saves more -> zero_grid
+                    # Shadow price > sell value: energy is more valuable later
                     effective_mode = "zero_grid"
                     effective_power = 0.0
             elif result.optimal_mode == "charging" and current_grid < 0:
@@ -1128,6 +1129,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "total_cost": result.total_cost,
             "baseline_cost": result.baseline_cost,
             "savings": round(result.savings, 2),
+            "shadow_price_eur_kwh": round(result.shadow_price_eur_kwh, 4),
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
             "current_feed_in_price": (
                 resampled_feed_in[0]

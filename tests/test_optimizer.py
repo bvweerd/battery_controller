@@ -569,24 +569,29 @@ class TestOscillationFilterFormula:
         # Use a spread just below the threshold
         low_price = 0.20
         high_price = low_price + threshold * 0.5  # well below threshold
+        # Use a low fixed feed-in price so the terminal condition does not
+        # create spurious arbitrage incentive (terminal_price = feed_in[-1]).
+        feed_in = [0.07] * 8
 
         result = optimize_battery_schedule(
             battery_config=battery_config,
             current_soc_kwh=5.0,
             price_forecast=[low_price] * 4 + [high_price] * 4,
-            feed_in_forecast=None,
+            feed_in_forecast=feed_in,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
             time_step_minutes=15,
             degradation_cost_per_kwh=deg,
             min_price_spread=min_spread,
         )
+        n = len(result.mode_schedule)
         has_charge_then_discharge = any(
             result.mode_schedule[i] == "charging"
             and any(
-                result.mode_schedule[j] == "discharging" for j in range(i + 1, i + 8)
+                result.mode_schedule[j] == "discharging"
+                for j in range(i + 1, min(i + 8, n))
             )
-            for i in range(len(result.mode_schedule))
+            for i in range(n)
         )
         assert not has_charge_then_discharge, "Should not arbitrage with tiny spread"
 
