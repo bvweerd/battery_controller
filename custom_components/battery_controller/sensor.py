@@ -168,6 +168,8 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         }
         if result is not None:
             attrs["price_forecast"] = result.price_forecast
+            attrs["pv_forecast_kw"] = result.pv_forecast
+            attrs["consumption_forecast_kw"] = result.consumption_forecast
         return attrs
 
 
@@ -334,14 +336,10 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        attrs: dict[str, Any] = {
+        return {
             "baseline_cost": round(self.coordinator.data.get("baseline_cost", 0.0), 3),
             "optimized_cost": round(self.coordinator.data.get("total_cost", 0.0), 3),
         }
-        result = self._get_optimization_result()
-        if result:
-            attrs["price_forecast"] = result.price_forecast
-        return attrs
 
 
 class BatteryShadowPriceSensor(BatteryControllerSensor):
@@ -397,7 +395,7 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
 
     _attr_translation_key = "current_grid_power"
     _attr_name = "Current Grid Power"
-    _attr_native_unit_of_measurement = "W"
+    _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -411,26 +409,24 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return None
         action = self.coordinator.data.get("control_action", {})
-        current_grid = action.get("current_grid_w", 0.0)
-        return round(current_grid, 0)
+        return round(action.get("current_grid_w", 0.0) / 1000, 3)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
         action = self.coordinator.data.get("control_action", {})
-        current_grid_w = action.get("current_grid_w", 0.0)
+        current_grid_kw = action.get("current_grid_w", 0.0) / 1000
         return {
-            "current_grid_kw": round(current_grid_w / 1000, 3),
             "direction": (
                 "importing"
-                if current_grid_w > 0
+                if current_grid_kw > 0
                 else "exporting"
-                if current_grid_w < 0
+                if current_grid_kw < 0
                 else "balanced"
             ),
-            "import_w": round(max(0, current_grid_w), 0),
-            "export_w": round(abs(min(0, current_grid_w)), 0),
+            "import_kw": round(max(0.0, current_grid_kw), 3),
+            "export_kw": round(abs(min(0.0, current_grid_kw)), 3),
         }
 
 
