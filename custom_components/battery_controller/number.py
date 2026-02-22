@@ -8,7 +8,7 @@ from typing import Any
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -25,6 +25,9 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Number entities are not polled; state is set by the user or coordinator.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -52,6 +55,7 @@ class BatteryControllerNumber(NumberEntity):
     """Base class for Battery Controller number entities."""
 
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
@@ -85,7 +89,6 @@ class BatteryMinSoCNumber(BatteryControllerNumber):
 
     _attr_translation_key = "min_soc_percent"
     _attr_name = "Minimum SoC"
-    _attr_icon = "mdi:battery-low"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 50.0
     _attr_native_step = 1.0
@@ -109,7 +112,6 @@ class BatteryMaxSoCNumber(BatteryControllerNumber):
 
     _attr_translation_key = "max_soc_percent"
     _attr_name = "Maximum SoC"
-    _attr_icon = "mdi:battery-high"
     _attr_native_min_value = 50.0
     _attr_native_max_value = 100.0
     _attr_native_step = 1.0
@@ -133,7 +135,6 @@ class DegradationCostNumber(BatteryControllerNumber):
 
     _attr_translation_key = "degradation_cost"
     _attr_name = "Degradation Cost"
-    _attr_icon = "mdi:currency-eur"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 0.20
     _attr_native_step = 0.005
@@ -159,7 +160,6 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
 
     _attr_translation_key = "min_price_spread"
     _attr_name = "Minimum Price Spread"
-    _attr_icon = "mdi:swap-vertical"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 0.50
     _attr_native_step = 0.01
@@ -183,7 +183,6 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
 
     _attr_translation_key = "zero_grid_deadband"
     _attr_name = "Zero Grid Deadband"
-    _attr_icon = "mdi:sine-wave"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 500.0
     _attr_native_step = 10.0

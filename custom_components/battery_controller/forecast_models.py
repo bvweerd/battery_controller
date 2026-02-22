@@ -312,6 +312,261 @@ class ConsumptionForecastModel:
         )
 
 
+class PriceForecastModel:
+    """Price forecast model using historical patterns with optional weather correction.
+
+    Falls back gracefully when data is sparse:
+    1. (hour, day_of_week, ghi_bin, wind_bin) → average price  [weather-corrected]
+    2. (hour, day_of_week) → average price                     [simple pattern]
+    3. Overall average price                                    [last resort]
+
+    The model improves over time as more historical data accumulates in HA recorder.
+    Weather sensor data (GHI, wind speed) is only available after the integration
+    starts logging those sensors.
+    """
+
+    # W/m² boundaries → bins: dark/night, overcast, partial cloud, bright sun
+    _GHI_THRESHOLDS = (50.0, 200.0, 500.0)
+    # m/s boundaries → bins: calm, moderate, strong wind
+    _WIND_THRESHOLDS = (4.0, 8.0)
+    # Minimum samples required to use a bin (avoids noise from sparse data)
+    _MIN_SAMPLES = 2
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        price_sensor_id: str,
+        entry_id: str | None = None,
+        history_days: int = 30,
+    ) -> None:
+        """Initialize price forecast model."""
+        self.hass = hass
+        self.price_sensor_id = price_sensor_id
+        self._entry_id = entry_id
+        self.history_days = history_days
+        self._weather_pattern: dict[tuple[int, int, int, int], list[float]] = {}
+        self._simple_pattern: dict[tuple[int, int], list[float]] = {}
+        self._overall_avg: float | None = None
+
+    @classmethod
+    def _ghi_bin(cls, ghi: float) -> int:
+        """Return bin index for a GHI value (W/m²)."""
+        for i, threshold in enumerate(cls._GHI_THRESHOLDS):
+            if ghi < threshold:
+                return i
+        return len(cls._GHI_THRESHOLDS)
+
+    @classmethod
+    def _wind_bin(cls, wind: float) -> int:
+        """Return bin index for a wind speed value (m/s)."""
+        for i, threshold in enumerate(cls._WIND_THRESHOLDS):
+            if wind < threshold:
+                return i
+        return len(cls._WIND_THRESHOLDS)
+
+    def has_data(self) -> bool:
+        """Return True if the model has enough data for a useful forecast."""
+        return self._overall_avg is not None
+
+    async def async_update_pattern(self) -> None:
+        """Update price pattern from historical recorder data."""
+        if not self.price_sensor_id:
+            return
+
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                statistics_during_period,
+            )
+
+            end_time = dt_util.utcnow()
+            start_time = end_time - timedelta(days=self.history_days)
+
+            # Resolve GHI and wind sensor entity IDs via entity registry
+            ghi_entity_id: str | None = None
+            wind_entity_id: str | None = None
+            if self._entry_id:
+                try:
+                    from homeassistant.helpers import entity_registry as er
+                    from .const import DOMAIN
+
+                    ent_reg = er.async_get(self.hass)
+                    ghi_entity_id = ent_reg.async_get_entity_id(
+                        "sensor", DOMAIN, f"{self._entry_id}_ghi"
+                    )
+                    wind_entity_id = ent_reg.async_get_entity_id(
+                        "sensor", DOMAIN, f"{self._entry_id}_wind_speed_ms"
+                    )
+                except Exception as err:
+                    _LOGGER.debug("Could not resolve weather sensor IDs: %s", err)
+
+            # Query price sensor statistics (hourly mean)
+            price_stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                start_time,
+                end_time,
+                {self.price_sensor_id},
+                "hour",
+                None,
+                {"mean"},
+            )
+
+            def _ts_key(stat: dict) -> str | None:
+                start = stat.get("start")
+                if start is None:
+                    return None
+                if isinstance(start, datetime):
+                    return start.isoformat()
+                return str(start)
+
+            price_hourly: dict[str, float] = {}
+            for stat in price_stats.get(self.price_sensor_id, []):
+                mean = stat.get("mean")
+                ts = _ts_key(stat)
+                if mean is not None and ts:
+                    price_hourly[ts] = float(mean)
+
+            if not price_hourly:
+                _LOGGER.debug(
+                    "No price statistics found for %s; price model not yet available",
+                    self.price_sensor_id,
+                )
+                return
+
+            # Query weather sensor statistics if GHI/wind sensors exist
+            ghi_hourly: dict[str, float] = {}
+            wind_hourly: dict[str, float] = {}
+            weather_ids = {sid for sid in (ghi_entity_id, wind_entity_id) if sid}
+            if weather_ids:
+                weather_stats = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    weather_ids,
+                    "hour",
+                    None,
+                    {"mean"},
+                )
+                for stat in weather_stats.get(ghi_entity_id or "", []):
+                    mean = stat.get("mean")
+                    ts = _ts_key(stat)
+                    if mean is not None and ts:
+                        ghi_hourly[ts] = float(mean)
+                for stat in weather_stats.get(wind_entity_id or "", []):
+                    mean = stat.get("mean")
+                    ts = _ts_key(stat)
+                    if mean is not None and ts:
+                        wind_hourly[ts] = float(mean)
+
+            # Build lookup tables
+            weather_raw: dict[tuple[int, int, int, int], list[float]] = {}
+            simple_raw: dict[tuple[int, int], list[float]] = {}
+            all_prices: list[float] = []
+
+            for ts, price in price_hourly.items():
+                dt_obj = dt_util.parse_datetime(ts)
+                if dt_obj is None:
+                    continue
+                hour = dt_obj.hour
+                dow = dt_obj.weekday()
+                all_prices.append(price)
+                simple_raw.setdefault((hour, dow), []).append(price)
+                if ts in ghi_hourly and ts in wind_hourly:
+                    gb = self._ghi_bin(ghi_hourly[ts])
+                    wb = self._wind_bin(wind_hourly[ts])
+                    weather_raw.setdefault((hour, dow, gb, wb), []).append(price)
+
+            self._simple_pattern = simple_raw
+            self._weather_pattern = weather_raw
+            self._overall_avg = (
+                sum(all_prices) / len(all_prices) if all_prices else None
+            )
+
+            weather_bins_ok = sum(
+                1 for v in weather_raw.values() if len(v) >= self._MIN_SAMPLES
+            )
+            simple_bins_ok = sum(
+                1 for v in simple_raw.values() if len(v) >= self._MIN_SAMPLES
+            )
+            _LOGGER.debug(
+                "Price model updated: %d price hours, %d/%d simple bins, "
+                "%d/%d weather bins usable (min %d samples)",
+                len(price_hourly),
+                simple_bins_ok,
+                len(simple_raw),
+                weather_bins_ok,
+                len(weather_raw),
+                self._MIN_SAMPLES,
+            )
+
+        except ImportError:
+            _LOGGER.debug("Recorder not available for price pattern learning")
+        except Exception as err:
+            _LOGGER.warning("Failed to update price pattern: %s", err)
+
+    def forecast(
+        self,
+        hours: int = 24,
+        start_time: datetime | None = None,
+        ghi_forecast: list[float] | None = None,
+        wind_forecast: list[float] | None = None,
+    ) -> list[float]:
+        """Generate hourly price forecast from historical patterns.
+
+        Lookup priority per hour:
+        1. (hour, dow, ghi_bin, wind_bin) when weather data available and bins populated
+        2. (hour, dow) simple historical average
+        3. Overall average price across all recorded hours
+
+        Args:
+            hours: Number of hours to forecast.
+            start_time: Start time (default: current hour, rounded down).
+            ghi_forecast: Solar irradiance forecast in W/m² per hour.
+            wind_forecast: Wind speed forecast in m/s per hour.
+
+        Returns:
+            Hourly price forecast list in EUR/kWh.
+        """
+        if start_time is None:
+            start_time = dt_util.now().replace(minute=0, second=0, microsecond=0)
+
+        result = []
+        for h in range(hours):
+            step_time = start_time + timedelta(hours=h)
+            hour = step_time.hour
+            dow = step_time.weekday()
+            price: float | None = None
+
+            # 1. Weather-corrected lookup
+            if (
+                ghi_forecast is not None
+                and wind_forecast is not None
+                and h < len(ghi_forecast)
+                and h < len(wind_forecast)
+            ):
+                gb = self._ghi_bin(ghi_forecast[h])
+                wb = self._wind_bin(wind_forecast[h])
+                vals = self._weather_pattern.get((hour, dow, gb, wb), [])
+                if len(vals) >= self._MIN_SAMPLES:
+                    price = sum(vals) / len(vals)
+
+            # 2. Simple (hour, dow) historical average
+            if price is None:
+                vals = self._simple_pattern.get((hour, dow), [])
+                if len(vals) >= self._MIN_SAMPLES:
+                    price = sum(vals) / len(vals)
+
+            # 3. Overall average (last resort)
+            if price is None:
+                price = self._overall_avg or 0.20
+
+            result.append(round(price, 4))
+
+        return result
+
+
 class NetLoadForecast:
     """Combined PV and consumption forecast for net load calculation."""
 

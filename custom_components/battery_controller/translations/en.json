@@ -192,6 +192,12 @@
       "net_grid_forecast": {
         "name": "Net Grid Forecast"
       },
+      "ghi": {
+        "name": "Solar Irradiance"
+      },
+      "wind_speed_ms": {
+        "name": "Wind Speed"
+      },
       "daily_savings": {
         "name": "Estimated Savings"
       },

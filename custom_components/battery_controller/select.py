@@ -7,7 +7,7 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -15,6 +15,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -40,7 +42,7 @@ class BatteryControlModeSelect(SelectEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "control_mode"
     _attr_name = "Control Mode"
-    _attr_icon = "mdi:tune-variant"
+    _attr_entity_category = EntityCategory.CONFIG
     _attr_options = CONTROL_MODES
 
     def __init__(
