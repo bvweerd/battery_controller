@@ -8,10 +8,12 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 _LOGGER = logging.getLogger(__name__)
+
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -37,7 +39,7 @@ class BatteryOptimizationSwitch(SwitchEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "optimization_enabled"
     _attr_name = "Optimization Enabled"
-    _attr_icon = "mdi:battery-sync-outline"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,

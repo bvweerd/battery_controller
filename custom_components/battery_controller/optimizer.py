@@ -387,7 +387,14 @@ def optimize_battery_schedule(
         else:
             baseline_cost -= energy_kwh * feed_in_price
 
-    savings = baseline_cost - total_cost
+    # Savings = value added by battery ACTIONS only.
+    # total_cost already contains the terminal value of stored energy at horizon end.
+    # baseline_cost does not include any terminal value.
+    # Subtracting the terminal value of the *initial* SoC makes savings = 0 when the
+    # battery is idle, regardless of how much energy is already stored.
+    initial_stored_kwh = max(0.0, (soc_states[current_soc_idx] - min_soc_wh) / 1000.0)
+    initial_terminal_value = initial_stored_kwh * terminal_price
+    savings = baseline_cost - initial_terminal_value - total_cost
 
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,

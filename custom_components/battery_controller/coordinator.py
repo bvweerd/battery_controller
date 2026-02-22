@@ -65,6 +65,7 @@ from .const import (
 from .forecast_models import (
     ConsumptionForecastModel,
     NetLoadForecast,
+    PriceForecastModel,
     PVForecastModel,
 )
 from .helpers import (
@@ -102,7 +103,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={self.latitude}&longitude={self.longitude}"
-            "&hourly=temperature_2m,shortwave_radiation"
+            "&hourly=temperature_2m,shortwave_radiation,wind_speed_10m"
             "&current_weather=true&timezone=UTC&forecast_days=2"
         )
 
@@ -120,6 +121,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
         radiation = hourly.get("shortwave_radiation", [])
+        wind_speed = hourly.get("wind_speed_10m", [])
 
         if not times or not radiation:
             raise UpdateFailed("No forecast data in API response")
@@ -140,15 +142,21 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
 
         # Extract next 48 hours
         radiation_forecast = [float(v) for v in radiation[start_idx : start_idx + 48]]
+        wind_speed_forecast = (
+            [float(v) for v in wind_speed[start_idx : start_idx + 48]]
+            if wind_speed
+            else [0.0] * len(radiation_forecast)
+        )
 
         result = {
             "radiation_forecast": [round(v, 1) for v in radiation_forecast],
+            "wind_speed_forecast": [round(v, 1) for v in wind_speed_forecast],
             "forecast_start_utc": now,
             "timestamp": dt_util.utcnow(),
         }
 
         _LOGGER.debug(
-            "Weather data updated: %d hours of radiation forecast",
+            "Weather data updated: %d hours of radiation/wind forecast",
             len(radiation_forecast),
         )
 
@@ -268,6 +276,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No weather data available")
 
         radiation_forecast = weather_data.get("radiation_forecast", [])
+        wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
         if forecast_start and radiation_forecast:
             current_hour = datetime.now(timezone.utc).replace(
@@ -278,6 +287,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
             )
             if hours_elapsed > 0:
                 radiation_forecast = radiation_forecast[hours_elapsed:]
+                wind_speed_forecast = (
+                    wind_speed_forecast[hours_elapsed:] if wind_speed_forecast else []
+                )
                 _LOGGER.debug(
                     "Radiation forecast shifted by %d hours (weather data age)",
                     hours_elapsed,
@@ -327,6 +339,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
             "current_dc_pv_kw": round(current_dc_pv, 3),
             "current_consumption_kw": round(current_consumption, 3),
             "current_net_load_kw": round(current_consumption - current_pv, 3),
+            "current_ghi_wm2": round(radiation_forecast[0], 1)
+            if radiation_forecast
+            else 0.0,
+            "current_wind_speed_ms": round(wind_speed_forecast[0], 1)
+            if wind_speed_forecast
+            else 0.0,
             "pv_dc_coupled": has_dc,
             "timestamp": dt_util.utcnow(),
         }
@@ -407,6 +425,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_optimizer_timer: Any | None = None
         self._interval_minutes: int = interval_minutes
 
+        # Historical price forecast model (fallback when day-ahead not yet published)
+        self._price_model = PriceForecastModel(
+            hass=hass,
+            price_sensor_id=config.get(CONF_PRICE_SENSOR, ""),
+            entry_id=config.get("entry_id"),
+            history_days=30,
+        )
+
         # Enabled flag: when False _async_update_data returns cached data immediately
         # without re-running the optimizer. The 15-min scheduler keeps running so it
         # is trivial to re-enable without manual intervention.
@@ -444,6 +470,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
+        await self._price_model.async_update_pattern()
+
         if self._price_sensor:
             self._unsub_price = async_track_state_change_event(
                 self.hass,
@@ -802,7 +830,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # When disabled via switch, skip re-running the optimizer but keep the
         # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
         if not self._optimization_enabled:
-            _LOGGER.debug("OptimizationCoordinator: Optimization disabled, returning cached data.")
+            _LOGGER.debug(
+                "OptimizationCoordinator: Optimization disabled, returning cached data."
+            )
             if self.data is not None:
                 return self.data
 
@@ -814,7 +844,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         _LOGGER.debug(
             "OptimizationCoordinator: Forecast data fetched (available: %s).",
             forecast_data is not None,
-            )
+        )
         if not forecast_data:
             _LOGGER.error(
                 "OptimizationCoordinator: Forecast data is not available. Cannot run optimization."
@@ -835,44 +865,72 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._price_sensor,
         )
         price_state = self.hass.states.get(self._price_sensor)
+        price_forecast: list[float] = []
+        price_interval: int = 60
+        price_forecast_source: str = "live"
+
+        sensor_ok = price_state is not None and price_state.state not in (
+            "unknown",
+            "unavailable",
+        )
         _LOGGER.debug(
             "OptimizationCoordinator: Price sensor state fetched (available: %s).",
-            price_state is not None
-            and price_state.state not in ("unknown", "unavailable"),
+            sensor_ok,
         )
-        if not price_state or price_state.state in ("unknown", "unavailable"):
-            _LOGGER.error(
-                "OptimizationCoordinator: Price sensor '%s' is not available (%s). Cannot run optimization.",
-                self._price_sensor,
-                price_state.state if price_state else "unavailable",
-            )
-            self._last_failure_reason = (
-                f"Price sensor '{self._price_sensor}' not available"
-            )
-            raise UpdateFailed(
-                f"Price sensor '{self._price_sensor}' not available", retry_after=60
-            )
 
-        price_forecast, price_interval = extract_price_forecast_with_interval(
-            price_state
-        )
+        if sensor_ok:
+            price_forecast, price_interval = extract_price_forecast_with_interval(
+                price_state
+            )
 
         if not price_forecast:
-            try:
-                current_price = float(price_state.state)
-                price_forecast = [current_price]
-            except (ValueError, TypeError) as e:
+            # Sensor unavailable or has no forecast attributes: try historical model
+            if self._price_model.has_data():
+                weather_data = self.weather_coordinator.data or {}
+                price_forecast = self._price_model.forecast(
+                    hours=24,
+                    ghi_forecast=weather_data.get("radiation_forecast"),
+                    wind_forecast=weather_data.get("wind_speed_forecast"),
+                )
+                price_interval = 60
+                price_forecast_source = "historical_model"
+                _LOGGER.info(
+                    "Using historical price model as fallback (price sensor %s)",
+                    "unavailable" if not sensor_ok else "has no forecast",
+                )
+            elif sensor_ok:
+                # No model data yet; fall back to current price as single value
+                try:
+                    price_forecast = [float(price_state.state)]
+                    price_interval = 60
+                    price_forecast_source = "current_only"
+                except (ValueError, TypeError) as e:
+                    _LOGGER.error(
+                        "OptimizationCoordinator: Cannot extract numeric price data "
+                        "from sensor '%s' (state: %s). Error: %s",
+                        self._price_sensor,
+                        price_state.state,
+                        e,
+                    )
+                    self._last_failure_reason = (
+                        f"Cannot extract price data from '{self._price_sensor}'"
+                    )
+                    raise UpdateFailed(
+                        f"Cannot extract price data from '{self._price_sensor}'"
+                    ) from e
+            else:
+                # Sensor unavailable and no model data
                 _LOGGER.error(
-                    "OptimizationCoordinator: Cannot extract numeric price data from sensor '%s' (state: %s). Error: %s",
+                    "OptimizationCoordinator: Price sensor '%s' not available and "
+                    "no historical price model data yet.",
                     self._price_sensor,
-                    price_state.state,
-                    e,
                 )
                 self._last_failure_reason = (
-                    f"Cannot extract price data from '{self._price_sensor}'"
+                    f"Price sensor '{self._price_sensor}' not available"
                 )
                 raise UpdateFailed(
-                    f"Cannot extract price data from '{self._price_sensor}'"
+                    f"Price sensor '{self._price_sensor}' not available",
+                    retry_after=60,
                 )
 
         # Get feed-in price forecast
@@ -913,6 +971,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Resample all forecasts to time step resolution
         resampled_prices = resample_forecast(price_forecast, price_interval, time_step)
+
+        # Extend horizon with historical model if live forecast covers less than 24 hours
+        min_horizon_steps = 24 * 60 // time_step
+        if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
+            steps_needed = min_horizon_steps - len(resampled_prices)
+            hours_already = len(resampled_prices) * time_step / 60
+            hours_for_model = (steps_needed * time_step + 59) // 60  # ceiling division
+            extension_start = dt_util.now().replace(
+                minute=0, second=0, microsecond=0
+            ) + timedelta(hours=int(hours_already))
+            weather_raw = self.weather_coordinator.data or {}
+            ghi_raw = weather_raw.get("radiation_forecast", [])
+            wind_raw = weather_raw.get("wind_speed_forecast", [])
+            offset = int(hours_already)
+            model_extension = self._price_model.forecast(
+                hours=hours_for_model,
+                start_time=extension_start,
+                ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
+                wind_forecast=wind_raw[offset:] if wind_raw else None,
+            )
+            resampled_extension = resample_forecast(model_extension, 60, time_step)
+            original_steps = len(resampled_prices)
+            resampled_prices = resampled_prices + resampled_extension[:steps_needed]
+            if price_forecast_source == "live":
+                price_forecast_source = "live+historical_model"
+            _LOGGER.debug(
+                "Extended price horizon from %d to %d steps with historical model",
+                original_steps,
+                len(resampled_prices),
+            )
 
         resampled_feed_in = None
         if feed_in_forecast:
@@ -1041,7 +1129,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         )
                     )
                 )
-                sqrt_rte = self.battery_config.round_trip_efficiency ** 0.5
+                sqrt_rte = self.battery_config.round_trip_efficiency**0.5
                 if current_feed_in * sqrt_rte >= result.shadow_price_eur_kwh:
                     # Selling captures at least as much value as keeping
                     effective_mode = "discharging"
@@ -1140,5 +1228,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     )
                 )
             ),
+            "price_forecast_source": price_forecast_source,
             "timestamp": dt_util.utcnow(),
         }
