@@ -297,7 +297,7 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 |--------|------|-------------|------------|
 | **Optimal Power** | W | **Strategy**: Battery power from DP optimizer (15-min planning). Use in `follow_schedule` mode. | `optimal_mode`, `current_price` |
 | Optimal Mode | — | Current mode: `charging`, `discharging`, `idle`, `zero_grid`, `manual` | — |
-| **Schedule** | — | Full optimization schedule (see below) | `power_schedule_kw`, `mode_schedule`, `soc_schedule_kwh`, `price_forecast` |
+| **Schedule** | — | Full optimization schedule (see below) | `power_schedule_kw`, `mode_schedule`, `soc_schedule_kwh`, `price_forecast`, `pv_forecast_kw`, `consumption_forecast_kw` |
 | State of Charge | % | Current battery SoC | `soc_kwh`, `power_kw`, `mode` |
 | Battery Power | kW | Current battery power | — |
 | PV Forecast | kW | Current PV production | `forecast_kw`, `dc_forecast_kw`\*, `current_dc_pv_kw`\* |
@@ -305,10 +305,10 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 | Net Grid Forecast | kW | Net grid power (positive=import) | `forecast_kw` |
 | **Solar Irradiance** | W/m² | Current solar irradiance (GHI) from open-meteo. Logged to recorder for price model training. | — |
 | **Wind Speed** | m/s | Current wind speed from open-meteo. Logged to recorder for price model training. | — |
-| Estimated Savings | EUR | **Net financial impact of battery actions** (sum of direct profits/losses per step, including degradation and PV opportunity cost) over the planning horizon. | `baseline_cost`, `optimized_cost`, `step_profit_loss_eur` |
+| Estimated Savings | EUR | **Net financial impact of battery actions** (vs. doing nothing) over the planning horizon, including degradation cost. | `baseline_cost`, `optimized_cost` |
 | **Shadow Price of Storage** | EUR/kWh | **Marginal value of 1 kWh stored right now**, derived from the DP value function. Use as a threshold for external automations. | `discharge_threshold_eur_kwh`, `charge_threshold_eur_kwh` |
 | **Grid Setpoint** | W | **Tactics**: Real-time battery power from zero-grid controller (~5s updates). Use in `hybrid`/`zero_grid` modes. | `target_power_w`, `current_grid_w`, `current_battery_w`, `dp_schedule_w`, `mode`, `action_mode`, `soc_kwh`, `soc_percent` |
-| Control Mode | — | Current control mode | — |
+| Control Mode *(diagnostic)* | — | Current control mode | — |
 | Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `price_forecast_source`, `timestamp` |
 
 \* Only present when DC-coupled PV is configured.
@@ -345,11 +345,12 @@ The **Schedule** sensor is the core output of the optimizer. Its state shows a s
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `power_schedule_kw` | `list[float]` | Battery power for each time step. Positive = charge, negative = discharge. Length equals the number of planning steps (e.g. 96 for 24h at 15-min resolution). |
+| `power_schedule_kw` | `list[float]` | Battery power for each time step (kW). Positive = charge, negative = discharge. Length equals the number of planning steps (e.g. 96 for 24h at 15-min resolution). |
 | `mode_schedule` | `list[str]` | Mode per step: `"charging"`, `"discharging"`, or `"idle"`. Same length as `power_schedule_kw`. |
 | `soc_schedule_kwh` | `list[float]` | Predicted state-of-charge (kWh) at the start of each step. |
 | `price_forecast` | `list[float]` | Electricity buy price (EUR/kWh) used for each step. |
-| `step_profit_loss_eur` | `list[float]` | Financial profit or loss (EUR) for each time step, attributable to direct battery actions. |
+| `pv_forecast_kw` | `list[float]` | PV production forecast (kW) used in the optimization. |
+| `consumption_forecast_kw` | `list[float]` | Household consumption forecast (kW) used in the optimization. |
 
 All lists share the same length and time alignment. Step 0 = current time step, step 1 = next time step, etc. The time step duration is configured in Advanced settings (default: 15 minutes).
 
@@ -361,6 +362,9 @@ All lists share the same length and time alignment. Step 0 = current time step, 
 
 # Price in 2 hours (step 8 at 15-min resolution)
 {{ state_attr('sensor.battery_controller_schedule', 'price_forecast')[8] }}
+
+# PV production expected in 1 hour (step 4 at 15-min resolution)
+{{ state_attr('sensor.battery_controller_schedule', 'pv_forecast_kw')[4] }}
 ```
 
 **Example ApexCharts card:**
