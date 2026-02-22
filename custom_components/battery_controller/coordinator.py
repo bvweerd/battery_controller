@@ -104,7 +104,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={self.latitude}&longitude={self.longitude}"
             "&hourly=temperature_2m,shortwave_radiation,wind_speed_10m"
-            "&current_weather=true&timezone=UTC&forecast_days=2"
+            "&wind_speed_unit=ms&current_weather=true&timezone=UTC&forecast_days=2"
         )
 
         try:
