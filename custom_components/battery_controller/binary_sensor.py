@@ -14,6 +14,8 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .coordinator import OptimizationCoordinator
+
 _LOGGER = logging.getLogger(__name__)
 
 PARALLEL_UPDATES = 0
@@ -43,12 +45,21 @@ async def async_setup_entry(
     )
 
 
-class BatteryControllerBinarySensor(CoordinatorEntity, BinarySensorEntity):
+class BatteryControllerBinarySensor(
+    CoordinatorEntity[OptimizationCoordinator], BinarySensorEntity
+):
     """Base class for Battery Controller binary sensors."""
 
     _attr_has_entity_name = True
+    coordinator: OptimizationCoordinator
 
-    def __init__(self, coordinator, device: DeviceInfo, entry: ConfigEntry, key: str):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        key: str,
+    ):
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device

@@ -18,6 +18,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .coordinator import OptimizationCoordinator
 from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,12 +68,19 @@ async def async_setup_entry(
     async_add_entities(sensors)
 
 
-class BatteryControllerSensor(CoordinatorEntity, SensorEntity):
+class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], SensorEntity):
     """Base class for Battery Controller sensors."""
 
     _attr_has_entity_name = True
+    coordinator: OptimizationCoordinator
 
-    def __init__(self, coordinator, device: DeviceInfo, entry: ConfigEntry, key: str):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        key: str,
+    ):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device
