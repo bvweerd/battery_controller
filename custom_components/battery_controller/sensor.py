@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -14,11 +15,15 @@ from homeassistant.config_entries import ConfigEntry
 
 from homeassistant.core import HomeAssistant
 
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
+
+# All entities are updated by the coordinator (push model); no parallel polling.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -44,8 +49,12 @@ async def async_setup_entry(
         PVForecastSensor(forecast_coordinator, device, entry),
         ConsumptionForecastSensor(forecast_coordinator, device, entry),
         NetGridForecastSensor(forecast_coordinator, device, entry),
+        # Weather logging sensors (stored in recorder for price model training)
+        SolarIrradianceSensor(forecast_coordinator, device, entry),
+        WindSpeedSensor(forecast_coordinator, device, entry),
         # Financial sensors
         BatteryDailySavingsSensor(optimization_coordinator, device, entry),
+        BatteryShadowPriceSensor(optimization_coordinator, device, entry),
         # Grid control sensors
         CurrentGridPowerSensor(optimization_coordinator, device, entry),
         BatteryGridSetpointSensor(optimization_coordinator, device, entry),
@@ -88,7 +97,6 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:battery-charging"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "optimal_power")
@@ -100,7 +108,8 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
         # Convert kW to W and invert sign for consistency with battery_setpoint
         # Optimizer uses (positive=charge, negative=discharge)
         # Sensor uses (positive=discharge, negative=charge)
-        return round(-self.coordinator.data.get("optimal_power_kw", 0.0) * 1000, 0)
+        value = -self.coordinator.data.get("optimal_power_kw", 0.0) * 1000
+        return round(value, 0) or 0.0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -117,7 +126,6 @@ class BatteryOptimalModeSensor(BatteryControllerSensor):
 
     _attr_translation_key = "optimal_mode"
     _attr_name = "Optimal Mode"
-    _attr_icon = "mdi:battery-sync"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "optimal_mode")
@@ -134,7 +142,6 @@ class BatteryScheduleSensor(BatteryControllerSensor):
 
     _attr_translation_key = "schedule"
     _attr_name = "Schedule"
-    _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "schedule")
@@ -161,6 +168,8 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         }
         if result is not None:
             attrs["price_forecast"] = result.price_forecast
+            attrs["pv_forecast_kw"] = result.pv_forecast
+            attrs["consumption_forecast_kw"] = result.consumption_forecast
         return attrs
 
 
@@ -172,7 +181,6 @@ class BatterySoCSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:battery"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "soc")
@@ -208,7 +216,6 @@ class BatteryPowerSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:flash"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "battery_power")
@@ -231,7 +238,6 @@ class PVForecastSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:solar-power"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "pv_forecast")
@@ -266,7 +272,6 @@ class ConsumptionForecastSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:home-lightning-bolt"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "consumption_forecast")
@@ -292,7 +297,6 @@ class NetGridForecastSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:transmission-tower"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "net_grid_forecast")
@@ -318,7 +322,6 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "EUR"
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
-    _attr_icon = "mdi:currency-eur"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "daily_savings")
@@ -333,14 +336,58 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        attrs: dict[str, Any] = {
+        return {
             "baseline_cost": round(self.coordinator.data.get("baseline_cost", 0.0), 3),
             "optimized_cost": round(self.coordinator.data.get("total_cost", 0.0), 3),
         }
-        result = self._get_optimization_result()
-        if result:
-            attrs["price_forecast"] = result.price_forecast
-        return attrs
+
+
+class BatteryShadowPriceSensor(BatteryControllerSensor):
+    """Sensor for the shadow price (marginal value) of stored energy.
+
+    Represents how much future electricity costs decrease per additional kWh
+    stored in the battery right now, derived from the DP value function.
+
+    Use as a decision threshold:
+    - Charge when buy_price < shadow_price / sqrt(RTE)
+    - Export/discharge when feed_in_price > shadow_price * sqrt(RTE)
+    """
+
+    _attr_translation_key = "shadow_price"
+    _attr_name = "Shadow Price of Storage"
+    _attr_native_unit_of_measurement = "EUR/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "shadow_price")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("shadow_price_eur_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        shadow_price = self.coordinator.data.get("shadow_price_eur_kwh", 0.0)
+        # Compute discharge and charge thresholds from battery config
+        rte = (
+            self.coordinator.battery_config.round_trip_efficiency
+            if hasattr(self.coordinator, "battery_config")
+            else 0.9
+        )
+        sqrt_rte_val = rte**0.5
+        return {
+            "shadow_price_eur_kwh": shadow_price,
+            # Minimum sell price at which discharging/exporting captures full value
+            "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte_val, 4),
+            # Maximum buy price at which charging is still economically justified
+            "charge_threshold_eur_kwh": (
+                round(shadow_price / sqrt_rte_val, 4) if sqrt_rte_val > 0 else None
+            ),
+        }
 
 
 class CurrentGridPowerSensor(BatteryControllerSensor):
@@ -348,10 +395,11 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
 
     _attr_translation_key = "current_grid_power"
     _attr_name = "Current Grid Power"
-    _attr_native_unit_of_measurement = "W"
+    _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:transmission-tower"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "current_grid_power")
@@ -361,24 +409,24 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return None
         action = self.coordinator.data.get("control_action", {})
-        current_grid = action.get("current_grid_w", 0.0)
-        return round(current_grid, 0)
+        return round(action.get("current_grid_w", 0.0) / 1000, 3)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
         action = self.coordinator.data.get("control_action", {})
-        current_grid_w = action.get("current_grid_w", 0.0)
+        current_grid_kw = action.get("current_grid_w", 0.0) / 1000
         return {
-            "current_grid_kw": round(current_grid_w / 1000, 3),
-            "direction": "importing"
-            if current_grid_w > 0
-            else "exporting"
-            if current_grid_w < 0
-            else "balanced",
-            "import_w": round(max(0, current_grid_w), 0),
-            "export_w": round(abs(min(0, current_grid_w)), 0),
+            "direction": (
+                "importing"
+                if current_grid_kw > 0
+                else "exporting"
+                if current_grid_kw < 0
+                else "balanced"
+            ),
+            "import_kw": round(max(0.0, current_grid_kw), 3),
+            "export_kw": round(abs(min(0.0, current_grid_kw)), 3),
         }
 
 
@@ -397,7 +445,6 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_icon = "mdi:battery-arrow-up-down"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "battery_setpoint")
@@ -409,7 +456,9 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
         action = self.coordinator.data.get("control_action", {})
         # Invert sign: controller uses (positive=charge, negative=discharge)
         # but sensor convention is (positive=discharge, negative=charge)
-        return round(-action.get("target_power_w", 0.0), 0)
+        # Use abs(0.0) → 0.0 to avoid -0.0 display
+        value = -action.get("target_power_w", 0.0)
+        return round(value, 0) or 0.0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -423,7 +472,8 @@ class BatteryControlModeSensor(BatteryControllerSensor):
 
     _attr_translation_key = "control_mode"
     _attr_name = "Control Mode"
-    _attr_icon = "mdi:tune"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "control_mode")
@@ -440,23 +490,45 @@ class OptimizationStatusSensor(BatteryControllerSensor):
 
     _attr_translation_key = "optimization_status"
     _attr_name = "Optimization Status"
-    _attr_icon = "mdi:chart-line"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "optimization_status")
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> str:
         """Return the native value of the sensor."""
-        if self.coordinator.last_update_success:
-            return "ok"
-        return "failed"
+        if self.coordinator.data is None:
+            return "initializing"
+        if not self.coordinator.optimization_enabled:
+            return "disabled"
+        if not self.coordinator.last_update_success:
+            return "failed"
+        last_success = self.coordinator.last_success_time
+        if last_success is not None:
+            interval = self.coordinator.update_interval or timedelta(minutes=15)
+            age = dt_util.utcnow() - last_success
+            if age > interval * 2.5:
+                return "stale"
+        return "ok"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
+        last_success = self.coordinator.last_success_time
+        interval = self.coordinator.update_interval or timedelta(minutes=15)
+        age_minutes = (
+            round((dt_util.utcnow() - last_success).total_seconds() / 60, 1)
+            if last_success is not None
+            else None
+        )
         attrs: dict[str, Any] = {
             "last_update_success": self.coordinator.last_update_success,
+            "failure_reason": self.coordinator.last_failure_reason,
+            "last_success": str(last_success) if last_success else None,
+            "age_minutes": age_minutes,
+            "update_interval_minutes": interval.total_seconds() / 60,
         }
         if self.coordinator.data is None:
             return attrs
@@ -470,7 +542,50 @@ class OptimizationStatusSensor(BatteryControllerSensor):
                 "baseline_cost": round(result.baseline_cost, 3),
                 "savings": round(result.savings, 3),
                 "current_price": self.coordinator.data.get("current_price", 0.0),
+                "price_forecast_source": self.coordinator.data.get(
+                    "price_forecast_source", "live"
+                ),
                 "timestamp": str(self.coordinator.data.get("timestamp", "")),
             }
         )
         return attrs
+
+
+class SolarIrradianceSensor(BatteryControllerSensor):
+    """Sensor for solar irradiance (GHI) — logged to recorder for price model training."""
+
+    _attr_translation_key = "ghi"
+    _attr_name = "Solar Irradiance"
+    _attr_native_unit_of_measurement = "W/m²"
+    _attr_device_class = SensorDeviceClass.IRRADIANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "ghi")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("current_ghi_wm2")
+
+
+class WindSpeedSensor(BatteryControllerSensor):
+    """Sensor for wind speed — logged to recorder for price model training."""
+
+    _attr_translation_key = "wind_speed_ms"
+    _attr_name = "Wind Speed"
+    _attr_native_unit_of_measurement = "m/s"
+    _attr_device_class = SensorDeviceClass.WIND_SPEED
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "wind_speed_ms")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("current_wind_speed_ms")

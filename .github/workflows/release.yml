@@ -1,0 +1,59 @@
+name: Create Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build ZIP and create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create release ZIP
+        run: |
+          cd custom_components/battery_controller/
+          zip ../../battery_controller.zip -r ./
+
+      - name: Generate changelog
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@v6
+        with:
+          configuration: |
+            {
+              "categories": [
+                { "title": "## ✨ Nieuwe features", "labels": ["enhancement", "feature"] },
+                { "title": "## 🐛 Bug fixes", "labels": ["bug", "fix"] },
+                { "title": "## 📚 Documentatie", "labels": ["documentation"] },
+                { "title": "## 🔧 Overig", "labels": [] }
+              ],
+              "template": "#{{CHANGELOG}}\n\n**Volledige changelog**: #{{RELEASE_DIFF}}"
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: battery_controller.zip
+          body: |
+            ## Installatie via HACS
+            Installeer of update via HACS — de nieuwe versie wordt automatisch aangeboden.
+
+            ## Handmatige installatie
+            Download `battery_controller.zip`, pak uit en kopieer `battery_controller/` naar je `custom_components/` map.
+
+            ${{ steps.changelog.outputs.changelog }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

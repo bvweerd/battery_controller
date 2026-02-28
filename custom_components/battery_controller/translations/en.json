@@ -192,8 +192,17 @@
       "net_grid_forecast": {
         "name": "Net Grid Forecast"
       },
+      "ghi": {
+        "name": "Solar Irradiance"
+      },
+      "wind_speed_ms": {
+        "name": "Wind Speed"
+      },
       "daily_savings": {
         "name": "Estimated Savings"
+      },
+      "shadow_price": {
+        "name": "Shadow Price of Storage"
       },
       "current_grid_power": {
         "name": "Current Grid Power"

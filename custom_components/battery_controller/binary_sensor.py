@@ -16,6 +16,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+PARALLEL_UPDATES = 0
+
 # Battery actual charging power must be at least this fraction of the charge
 # setpoint before we consider the battery "unable to absorb more".
 _ABSORPTION_THRESHOLD = 0.70  # 70 %
@@ -68,7 +70,6 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
     _attr_translation_key = "pv_curtailment"
     _attr_name = "PV Curtailment Suggested"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
-    _attr_icon = "mdi:solar-power-variant-outline"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "pv_curtailment")
@@ -139,7 +140,6 @@ class UseMaxPowerSensor(BatteryControllerBinarySensor):
     _attr_translation_key = "use_max_power"
     _attr_name = "Use Maximum Power Suggested"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
-    _attr_icon = "mdi:lightning-bolt-circle"
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "use_max_power")

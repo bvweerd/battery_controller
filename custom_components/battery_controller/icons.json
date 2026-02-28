@@ -1,0 +1,39 @@
+{
+  "entity": {
+    "sensor": {
+      "optimal_power": { "default": "mdi:battery-charging" },
+      "optimal_mode": { "default": "mdi:battery-sync" },
+      "schedule": { "default": "mdi:calendar-clock" },
+      "soc": { "default": "mdi:battery" },
+      "battery_power": { "default": "mdi:flash" },
+      "pv_forecast": { "default": "mdi:solar-power" },
+      "consumption_forecast": { "default": "mdi:home-lightning-bolt" },
+      "net_grid_forecast": { "default": "mdi:transmission-tower" },
+      "ghi": { "default": "mdi:weather-sunny" },
+      "wind_speed_ms": { "default": "mdi:weather-windy" },
+      "daily_savings": { "default": "mdi:currency-eur" },
+      "shadow_price": { "default": "mdi:battery-arrow-up" },
+      "current_grid_power": { "default": "mdi:transmission-tower" },
+      "battery_setpoint": { "default": "mdi:battery-arrow-up-down" },
+      "control_mode": { "default": "mdi:tune" },
+      "optimization_status": { "default": "mdi:chart-line" }
+    },
+    "number": {
+      "min_soc_percent": { "default": "mdi:battery-low" },
+      "max_soc_percent": { "default": "mdi:battery-high" },
+      "degradation_cost": { "default": "mdi:currency-eur" },
+      "min_price_spread": { "default": "mdi:swap-vertical" },
+      "zero_grid_deadband": { "default": "mdi:sine-wave" }
+    },
+    "select": {
+      "control_mode": { "default": "mdi:tune-variant" }
+    },
+    "switch": {
+      "optimization_enabled": { "default": "mdi:battery-sync-outline" }
+    },
+    "binary_sensor": {
+      "pv_curtailment": { "default": "mdi:solar-power-variant-outline" },
+      "use_max_power": { "default": "mdi:lightning-bolt-circle" }
+    }
+  }
+}
