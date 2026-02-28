@@ -8,48 +8,6 @@
 
 ---
 
-## High-level Description
-
-This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses dynamic programming to calculate the optimal charge/discharge schedule based on electricity price forecasts, PV production forecasts, and your household's energy consumption patterns. By intelligently deciding when to charge from the grid or solar, and when to discharge to power your home or sell back to the grid, it helps you save money and maximize your investment in a home battery and solar panels.
-
-## Installation
-
-### Prerequisites
-- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
-- A battery SoC sensor from your inverter integration.
-- [HACS](https://hacs.xyz/) installed in your Home Assistant.
-
-### Installation via HACS (Recommended)
-1.  Navigate to the HACS section in your Home Assistant.
-2.  Go to "Integrations", and click the three dots in the top right corner and select "Custom repositories".
-3.  Enter `https://github.com/bvweerd/battery_controller` in the "Repository" field, select "Integration" as the category, and click "Add".
-4.  The "Battery Controller" integration will now be shown. Click "Install" and proceed with the installation.
-5.  Restart Home Assistant.
-
-### Manual Installation
-1.  Copy the `custom_components/battery_controller` directory to your Home Assistant's `custom_components` directory.
-2.  Restart Home Assistant.
-
-After installation, the integration can be added and configured through the UI:
-**Settings -> Devices & Services -> Add Integration -> Battery Controller**
-
-## Removal
-
-1.  Go to **Settings -> Devices & Services**.
-2.  Find the "Battery Controller" integration and click the three dots.
-3.  Select "Delete" and confirm.
-4.  To completely remove it, use HACS to uninstall the repository or manually delete the `battery_controller` folder from your `custom_components` directory.
-5.  Restart Home Assistant.
-
-## Supported Devices
-
-This is a calculated integration and does not directly communicate with any specific hardware. It works with any battery inverter and electricity meter as long as they provide the required sensors in Home Assistant.
-
-## Known Limitations
-
-- The optimization is only as good as the forecasts it receives. Inaccurate price, PV, or consumption forecasts will lead to a suboptimal schedule.
-- The household consumption forecast is based on historical data and does not account for future one-off events (e.g., having a party, going on vacation).
-
 ## What is Battery Controller?
 
 This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses **dynamic programming** (backward induction) to calculate the optimal charge/discharge schedule based on:
@@ -58,10 +16,15 @@ This Home Assistant custom integration optimizes your home battery to minimize e
 - **PV production forecasts** (from open-meteo.com solar radiation data)
 - **Household consumption patterns** (learned from historical DSMR energy data)
 - **Battery characteristics** (capacity, power limits, round-trip efficiency, degradation)
+- **Historical price model** (fallback and horizon extension when day-ahead prices are not yet published)
+
+Battery Controller works with any battery inverter and electricity meter — it is a calculated integration that reads sensors and writes setpoints. It does not communicate directly with hardware.
 
 ### Key Features
 
 - **Price arbitrage**: Charge during cheap hours, discharge during expensive hours
+- **Pre-day-ahead price model**: Optimize before day-ahead prices are published (typically before 13:00 CET) using a self-learning historical model that improves over time
+- **Horizon extension**: When live day-ahead prices cover less than 24 hours, the remaining hours are filled with the historical model automatically
 - **PV self-consumption**: Maximize use of solar energy, minimize feed-in
 - **Multi-array PV**: Up to 3 PV arrays with independent orientation/tilt (e.g. south + east + west)
 - **DC-coupled PV support**: Higher efficiency for panels directly on the battery inverter's DC bus (hybrid inverters)
@@ -70,15 +33,46 @@ This Home Assistant custom integration optimizes your home battery to minimize e
 - **Degradation-aware**: Accounts for battery wear in optimization decisions
 - **Multiple control modes**: Zero-grid, follow schedule, hybrid, or manual
 
+---
+
 ## How It Works
 
 ### Architecture
 
 The integration runs three cascading coordinators:
 
-1. **Weather Coordinator** (every 30 min): Fetches solar radiation forecasts from open-meteo.com
+1. **Weather Coordinator** (every 30 min): Fetches solar radiation and wind speed forecasts from open-meteo.com
 2. **Forecast Coordinator** (every 15 min): Calculates PV production and consumption forecasts
 3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller
+
+### Historical Price Model (Pre-Day-Ahead Fallback)
+
+Day-ahead electricity prices (Nordpool, ENTSO-E) are published around 13:00 CET. Before that, the integration uses a **self-learning historical price model** so the optimizer can still run on a reasonable forecast.
+
+The model also **extends the planning horizon** when live prices cover less than 24 hours — for example, if it is 10:00 and today's prices are available but tomorrow's are not yet, the remaining hours are filled with model-predicted prices.
+
+The model builds lookup tables from data already in the HA recorder:
+
+```
+Lookup priority per hour:
+1. (hour, weekday, GHI_bin, wind_bin) → historical average price   [weather-corrected]
+2. (hour, weekday)                     → historical average price   [simple pattern]
+3. overall average                                                   [last resort]
+```
+
+**GHI bins** (solar irradiance): dark/night (<50 W/m²), overcast (50–200), partial cloud (200–500), bright sun (>500)
+
+**Wind bins**: calm (<4 m/s), moderate (4–8 m/s), strong (>8 m/s)
+
+In the Netherlands, wind has a strong correlation with low/negative prices — this correction captures that effect automatically.
+
+**Cold start**: The model only needs historical price data (from your existing price sensor) to provide Niveau 1 forecasts from day 1. The **Solar Irradiance** and **Wind Speed** sensors start logging to the recorder immediately; weather-corrected Niveau 2 forecasts become available after a few weeks.
+
+The `price_forecast_source` attribute on the **Optimization Status** sensor shows which source was used:
+- `live` — real day-ahead forecast from price sensor
+- `live+historical_model` — live forecast extended with historical model for remaining hours
+- `historical_model` — historical model used as full fallback (no live prices available)
+- `current_only` — only current price available (no forecast attributes)
 
 ### Dynamic Programming Optimizer
 
@@ -110,9 +104,25 @@ V[t][s] = min over actions (
 Where:
 - `V[t][s]` = minimum cost from time `t` to end, starting at SoC state `s`
 - `s'` = new SoC after applying `action`
-- Terminal condition: `V[T][s] = 0` for all states
+- Terminal condition: `V[T][s] = -(stored_kwh × feed_in_price_T)` — stored energy at the end of the horizon retains value at the last known feed-in price. This prevents the optimizer from irrationally discharging the battery just before the horizon ends.
 
-**4. Algorithm Steps**
+**4. Shadow Price of Stored Energy**
+
+After the backward pass, the optimizer computes the **shadow price** (marginal value) of stored energy at the current SoC:
+
+```
+λ = -dV[0]/dSoC ≈ (V[0][s-1] - V[0][s+1]) / (2 × ΔSoC)
+```
+
+This answers: *"If I have 1 extra kWh in the battery right now, how much will my future electricity costs decrease?"*
+
+The shadow price is used as an economic threshold for real-time decisions in hybrid mode:
+- **Export/discharge**: worth it when `feed_in × √RTE ≥ λ` (selling captures at least as much value as keeping it)
+- **Charge from grid**: worth it when `buy_price ≤ λ / √RTE` (buying is cheaper than the future saving it will generate)
+
+The **Shadow Price of Storage** sensor exposes this value and its derived thresholds for use in external automations.
+
+**5. Algorithm Steps**
 
 **Backward pass** (planning):
 ```python
@@ -132,7 +142,7 @@ for t in range(0, T):
     current_soc = new_soc_after_action
 ```
 
-**5. Oscillation Prevention**
+**6. Oscillation Prevention**
 
 After the DP optimizer produces the initial schedule, a post-processing filter removes unprofitable charge/discharge oscillations:
 
@@ -150,7 +160,7 @@ if P_discharge - P_charge / RTE < min_spread_required:
 
 This prevents the battery from oscillating (charge → discharge → charge) when price differences are too small to justify the round-trip losses. The **Min Price Spread** number entity lets you adjust this threshold at runtime.
 
-**6. Key Decisions**
+**7. Key Decisions**
 
 The optimizer automatically handles:
 - **Price arbitrage**: Charge during cheap hours (€0.05), discharge during expensive hours (€0.30)
@@ -174,6 +184,42 @@ The optimizer automatically handles:
 - **AC charge path**: PV → Inverter → AC → Charger → Battery (~85% efficient)
 - **Excess DC PV**: Converted to AC through inverter (~96% efficient)
 - Optimizer prefers DC charging when available (higher efficiency = lower cost)
+
+---
+
+## Installation
+
+### Prerequisites
+
+- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
+- A battery SoC sensor from your inverter integration
+- [HACS](https://hacs.xyz/) installed in your Home Assistant (recommended)
+
+### Via HACS (Recommended)
+
+1. Navigate to the HACS section in your Home Assistant.
+2. Go to "Integrations", click the three dots in the top right corner and select "Custom repositories".
+3. Enter `https://github.com/bvweerd/battery_controller` in the "Repository" field, select "Integration" as the category, and click "Add".
+4. The "Battery Controller" integration will now appear. Click "Install" and proceed.
+5. Restart Home Assistant.
+
+### Manual Installation
+
+1. Copy the `custom_components/battery_controller` directory to your Home Assistant's `custom_components` directory.
+2. Restart Home Assistant.
+
+After installation, add the integration through the UI:
+**Settings → Devices & Services → Add Integration → Battery Controller**
+
+### Removal
+
+1. Go to **Settings → Devices & Services**.
+2. Find the "Battery Controller" integration and click the three dots.
+3. Select "Delete" and confirm.
+4. To completely remove it, use HACS to uninstall the repository or manually delete the `battery_controller` folder from your `custom_components` directory.
+5. Restart Home Assistant.
+
+---
 
 ## Configuration
 
@@ -241,24 +287,29 @@ Additional PV arrays with independent orientation and tilt. Use these for east/w
 | Fixed feed-in price (EUR/kWh) | 0.07 | Fallback feed-in price when no sensor configured |
 | Zero-grid enabled | true | Enable zero-grid control mode |
 
+---
+
 ## Entities Created
 
-### Sensors (12)
+### Sensors (16)
 
 | Entity | Unit | Description | Attributes |
 |--------|------|-------------|------------|
-| **Optimal Power** | kW | **Strategy**: Battery power from DP optimizer (15-min planning). Use in `follow_schedule` mode. | `optimal_mode`, `current_price` |
+| **Optimal Power** | W | **Strategy**: Battery power from DP optimizer (15-min planning). Use in `follow_schedule` mode. | `optimal_mode`, `current_price` |
 | Optimal Mode | — | Current mode: `charging`, `discharging`, `idle`, `zero_grid`, `manual` | — |
-| **Schedule** | — | Full optimization schedule (see below) | `power_schedule_kw`, `mode_schedule`, `soc_schedule_kwh`, `price_forecast` |
+| **Schedule** | — | Full optimization schedule (see below) | `power_schedule_kw`, `mode_schedule`, `soc_schedule_kwh`, `price_forecast`, `pv_forecast_kw`, `consumption_forecast_kw` |
 | State of Charge | % | Current battery SoC | `soc_kwh`, `power_kw`, `mode` |
 | Battery Power | kW | Current battery power | — |
 | PV Forecast | kW | Current PV production | `forecast_kw`, `dc_forecast_kw`\*, `current_dc_pv_kw`\* |
 | Consumption Forecast | kW | Current consumption estimate | `forecast_kw` |
 | Net Grid Forecast | kW | Net grid power (positive=import) | `forecast_kw` |
-| Estimated Savings | EUR | **Net financial impact of battery actions** (sum of direct profits/losses per step, including degradation and PV opportunity cost) over the planning horizon. | `baseline_cost`, `optimized_cost`, `step_profit_loss_eur` |
+| **Solar Irradiance** | W/m² | Current solar irradiance (GHI) from open-meteo. Logged to recorder for price model training. | — |
+| **Wind Speed** | m/s | Current wind speed from open-meteo. Logged to recorder for price model training. | — |
+| Estimated Savings | EUR | **Net financial impact of battery actions** (vs. doing nothing) over the planning horizon, including degradation cost. | `baseline_cost`, `optimized_cost` |
+| **Shadow Price of Storage** | EUR/kWh | **Marginal value of 1 kWh stored right now**, derived from the DP value function. Use as a threshold for external automations. | `discharge_threshold_eur_kwh`, `charge_threshold_eur_kwh` |
 | **Grid Setpoint** | W | **Tactics**: Real-time battery power from zero-grid controller (~5s updates). Use in `hybrid`/`zero_grid` modes. | `target_power_w`, `current_grid_w`, `current_battery_w`, `dp_schedule_w`, `mode`, `action_mode`, `soc_kwh`, `soc_percent` |
-| Control Mode | — | Current control mode | — |
-| Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `timestamp` |
+| Control Mode *(diagnostic)* | — | Current control mode | — |
+| Optimization Status | — | Optimizer health (`ok`/`error`/`waiting`) | `n_steps`, `total_cost`, `baseline_cost`, `savings`, `current_price`, `price_forecast_source`, `timestamp` |
 
 \* Only present when DC-coupled PV is configured.
 
@@ -294,11 +345,12 @@ The **Schedule** sensor is the core output of the optimizer. Its state shows a s
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `power_schedule_kw` | `list[float]` | Battery power for each time step. Positive = charge, negative = discharge. Length equals the number of planning steps (e.g. 96 for 24h at 15-min resolution). |
+| `power_schedule_kw` | `list[float]` | Battery power for each time step (kW). Positive = charge, negative = discharge. Length equals the number of planning steps (e.g. 96 for 24h at 15-min resolution). |
 | `mode_schedule` | `list[str]` | Mode per step: `"charging"`, `"discharging"`, or `"idle"`. Same length as `power_schedule_kw`. |
 | `soc_schedule_kwh` | `list[float]` | Predicted state-of-charge (kWh) at the start of each step. |
 | `price_forecast` | `list[float]` | Electricity buy price (EUR/kWh) used for each step. |
-| `step_profit_loss_eur` | `list[float]` | Financial profit or loss (EUR) for each time step, attributable to direct battery actions. |
+| `pv_forecast_kw` | `list[float]` | PV production forecast (kW) used in the optimization. |
+| `consumption_forecast_kw` | `list[float]` | Household consumption forecast (kW) used in the optimization. |
 
 All lists share the same length and time alignment. Step 0 = current time step, step 1 = next time step, etc. The time step duration is configured in Advanced settings (default: 15 minutes).
 
@@ -310,6 +362,9 @@ All lists share the same length and time alignment. Step 0 = current time step, 
 
 # Price in 2 hours (step 8 at 15-min resolution)
 {{ state_attr('sensor.battery_controller_schedule', 'price_forecast')[8] }}
+
+# PV production expected in 1 hour (step 4 at 15-min resolution)
+{{ state_attr('sensor.battery_controller_schedule', 'pv_forecast_kw')[4] }}
 ```
 
 **Example ApexCharts card:**
@@ -363,12 +418,48 @@ series:
 
 > **Tip**: Both sensors expose price and battery data as attributes for use in automations.
 
+### Shadow Price of Storage (detail)
+
+The **Shadow Price of Storage** sensor (`sensor.battery_controller_shadow_price`) exposes the marginal value of 1 kWh stored in the battery right now (EUR/kWh), derived from the DP value function after every optimization run.
+
+**Attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `shadow_price_eur_kwh` | Same as state value |
+| `discharge_threshold_eur_kwh` | `shadow_price × √RTE` — minimum feed-in price at which exporting is worth at least as much as keeping the energy |
+| `charge_threshold_eur_kwh` | `shadow_price / √RTE` — maximum buy price at which charging from the grid is still economically justified |
+
+**Example use cases:**
+
+```yaml
+# External automation: charge an EV or other flexible load
+# when the current buy price is below the charge threshold
+- condition: template
+  value_template: >
+    {{ states('sensor.current_electricity_price') | float <
+       state_attr('sensor.battery_controller_shadow_price', 'charge_threshold_eur_kwh') | float }}
+
+# External automation: trigger export / peak shaving
+# when the feed-in price exceeds the discharge threshold
+- condition: template
+  value_template: >
+    {{ states('sensor.current_feed_in_price') | float >
+       state_attr('sensor.battery_controller_shadow_price', 'discharge_threshold_eur_kwh') | float }}
+```
+
+The shadow price naturally reflects all future price information available to the optimizer. When expensive hours are approaching, the shadow price is high (→ don't sell cheaply now). When prices are flat, the shadow price is close to the feed-in price (→ exporting is fine).
+
+---
+
 ## Control Modes
 
 - **Zero Grid**: Minimize grid exchange in real-time using the battery
 - **Follow Schedule**: Execute the DP-optimized schedule exactly
 - **Hybrid** (recommended): DP schedule for price arbitrage (charge/discharge), zero-grid for self-consumption during idle periods
 - **Manual**: No automatic control
+
+---
 
 ## Controlling Your Battery
 
@@ -593,7 +684,7 @@ automation:
               option: "Auto"
 ```
 
-**Key improvements:**
+**Key points:**
 - ✅ Uses `battery_setpoint` (W) for `hybrid` and `zero_grid` modes (real-time, accurate)
 - ✅ Uses `optimal_power` (kW) for `follow_schedule` mode (follows DP schedule)
 - ✅ Triggers on both sensors to catch all updates
@@ -697,12 +788,7 @@ Check your inverter's Home Assistant integration documentation for the correct e
 
 > **Tip**: Set `select.battery_controller_control_mode` to `manual` to temporarily disable the automation and take manual control of your inverter.
 
-> **Note**: If your inverter requires separate entities for charge and discharge power, you may need to split the charge/discharge sequences to set the appropriate entity.
-
-## Prerequisites
-
-- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
-- A battery SoC sensor from your inverter integration
+---
 
 ## Troubleshooting
 
@@ -715,6 +801,16 @@ logger:
     custom_components.battery_controller: debug
 ```
 
+---
+
+## Known Limitations
+
+- The optimization is only as good as the forecasts it receives. Inaccurate price, PV, or consumption forecasts will lead to a suboptimal schedule.
+- The household consumption forecast is based on historical data and does not account for future one-off events (e.g., having a party, going on vacation).
+- The historical price model (used before day-ahead prices are published) only becomes useful after a few weeks of running, when enough price and weather data has accumulated in the HA recorder.
+
+---
+
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.

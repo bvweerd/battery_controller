@@ -30,6 +30,12 @@ class OptimizationResult:
     optimal_power_kw: float
     optimal_mode: str
 
+    # Shadow price: marginal value of 1 kWh stored right now (EUR/kWh).
+    # Represents how much future costs decrease per additional kWh in the battery.
+    # Use as a threshold: charge when buy_price < shadow_price / sqrt(RTE),
+    # and discharge/export when feed_in_price > shadow_price * sqrt(RTE).
+    shadow_price_eur_kwh: float
+
     # Metadata
     price_forecast: list[float]
     pv_forecast: list[float]
@@ -202,9 +208,14 @@ def optimize_battery_schedule(
     V = [[INF] * n_soc_states for _ in range(n_steps + 1)]
     policy = [[0.0] * n_soc_states for _ in range(n_steps)]
 
-    # Terminal condition: no cost at end
-    for s in range(n_soc_states):
-        V[n_steps][s] = 0.0
+    # Terminal condition: value of stored energy at end of horizon.
+    # Energy above min_soc can be sold at (approximately) the last known
+    # feed-in price. A non-zero terminal value prevents the optimizer from
+    # irrationally discharging the battery just before the horizon ends.
+    terminal_price = feed_in_forecast[-1] if feed_in_forecast else 0.0
+    for s_idx, soc_wh in enumerate(soc_states):
+        stored_kwh = (soc_wh - min_soc_wh) / 1000.0
+        V[n_steps][s_idx] = -stored_kwh * terminal_price
 
     # Power action space (discretized in W)
     max_charge_w = battery_config.max_charge_power_kw * 1000
@@ -281,9 +292,26 @@ def optimize_battery_schedule(
             V[t][s_idx] = best_cost
             policy[t][s_idx] = best_action
 
-    # Forward pass: extract optimal schedule
+    # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
+    # Computed as the numerical derivative of V[0] with respect to SoC:
+    #   λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC_kwh)
+    # Because V is cost (lower is better) and more energy lowers cost,
+    # the gradient is negative → shadow price is positive.
     current_soc_wh = int(current_soc_kwh * 1000)
     current_soc_idx = _find_nearest_soc_idx(current_soc_wh, soc_states)
+    step_kwh = SOC_RESOLUTION_WH / 1000.0
+    shadow_price_eur_kwh = 0.0
+    if n_soc_states >= 3 and 0 < current_soc_idx < n_soc_states - 1:
+        shadow_price_eur_kwh = (
+            V[0][current_soc_idx - 1] - V[0][current_soc_idx + 1]
+        ) / (2 * step_kwh)
+    elif n_soc_states >= 2:
+        if current_soc_idx == 0:
+            shadow_price_eur_kwh = (V[0][0] - V[0][1]) / step_kwh
+        else:
+            shadow_price_eur_kwh = (V[0][-2] - V[0][-1]) / step_kwh
+
+    # Forward pass: extract optimal schedule
 
     power_schedule_kw = []
     mode_schedule = []
@@ -327,9 +355,9 @@ def optimize_battery_schedule(
         max_soc_kwh=battery_config.max_soc_kwh,
         pv_forecast=pv_forecast[:n_steps],
         consumption_forecast=consumption_forecast[:n_steps],
-        feed_in_forecast=feed_in_forecast[:n_steps]
-        if feed_in_forecast
-        else price_forecast[:n_steps],
+        feed_in_forecast=(
+            feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps]
+        ),
     )
 
     # Calculate costs
@@ -359,7 +387,14 @@ def optimize_battery_schedule(
         else:
             baseline_cost -= energy_kwh * feed_in_price
 
-    savings = baseline_cost - total_cost
+    # Savings = value added by battery ACTIONS only.
+    # total_cost already contains the terminal value of stored energy at horizon end.
+    # baseline_cost does not include any terminal value.
+    # Subtracting the terminal value of the *initial* SoC makes savings = 0 when the
+    # battery is idle, regardless of how much energy is already stored.
+    initial_stored_kwh = max(0.0, (soc_states[current_soc_idx] - min_soc_wh) / 1000.0)
+    initial_terminal_value = initial_stored_kwh * terminal_price
+    savings = baseline_cost - initial_terminal_value - total_cost
 
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,
@@ -370,6 +405,7 @@ def optimize_battery_schedule(
         savings=savings,
         optimal_power_kw=power_schedule_kw[0] if power_schedule_kw else 0.0,
         optimal_mode=mode_schedule[0] if mode_schedule else "idle",
+        shadow_price_eur_kwh=shadow_price_eur_kwh,
         price_forecast=list(price_forecast[:n_steps]),
         pv_forecast=list(pv_forecast[:n_steps]),
         consumption_forecast=list(consumption_forecast[:n_steps]),
@@ -524,6 +560,7 @@ def _empty_result(
         savings=0.0,
         optimal_power_kw=0.0,
         optimal_mode="idle",
+        shadow_price_eur_kwh=0.0,
         price_forecast=[],
         pv_forecast=[],
         consumption_forecast=[],

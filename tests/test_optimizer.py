@@ -270,6 +270,40 @@ class TestOptimizeBatterySchedule:
         # (charging then discharging at same price loses RTE + degradation)
         assert result.savings == pytest.approx(0.0, abs=0.01)
 
+    def test_idle_battery_with_soc_above_min_savings_zero(self, battery_config):
+        """Savings must be 0 when battery is idle, regardless of initial SoC.
+
+        Regression: previously the terminal value of pre-stored energy leaked
+        into the savings figure (e.g. showing €0.07 for 1 kWh at feed_in=0.07
+        even though the battery did nothing).
+
+        Setup: buy price = feed_in price = terminal_price = 0.07 so that any
+        action loses money due to round-trip efficiency losses and degradation.
+        Battery is forced idle, and savings must be 0.
+        """
+        # prices = feed_in = terminal_price: neither charging nor discharging is
+        # profitable (efficiency losses + degradation always outweigh the spread)
+        prices = [0.07] * 8
+        feed_in = [0.07] * 8
+        pv = [0.0] * 8
+        consumption = [0.5] * 8
+        # Start well above min_soc so there IS pre-existing terminal value
+        mid_soc = (battery_config.min_soc_kwh + battery_config.max_soc_kwh) / 2.0
+
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=mid_soc,
+            price_forecast=prices,
+            feed_in_forecast=feed_in,
+            pv_forecast=pv,
+            consumption_forecast=consumption,
+            time_step_minutes=15,
+            degradation_cost_per_kwh=0.03,
+        )
+
+        # Battery idle throughout → savings must be 0, not a positive phantom value
+        assert result.savings == pytest.approx(0.0, abs=0.01)
+
     def test_soc_stays_in_bounds(self, battery_config):
         """SoC should never exceed configured bounds."""
         prices = [0.05] * 4 + [0.30] * 4
@@ -569,24 +603,29 @@ class TestOscillationFilterFormula:
         # Use a spread just below the threshold
         low_price = 0.20
         high_price = low_price + threshold * 0.5  # well below threshold
+        # Use a low fixed feed-in price so the terminal condition does not
+        # create spurious arbitrage incentive (terminal_price = feed_in[-1]).
+        feed_in = [0.07] * 8
 
         result = optimize_battery_schedule(
             battery_config=battery_config,
             current_soc_kwh=5.0,
             price_forecast=[low_price] * 4 + [high_price] * 4,
-            feed_in_forecast=None,
+            feed_in_forecast=feed_in,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
             time_step_minutes=15,
             degradation_cost_per_kwh=deg,
             min_price_spread=min_spread,
         )
+        n = len(result.mode_schedule)
         has_charge_then_discharge = any(
             result.mode_schedule[i] == "charging"
             and any(
-                result.mode_schedule[j] == "discharging" for j in range(i + 1, i + 8)
+                result.mode_schedule[j] == "discharging"
+                for j in range(i + 1, min(i + 8, n))
             )
-            for i in range(len(result.mode_schedule))
+            for i in range(n)
         )
         assert not has_charge_then_discharge, "Should not arbitrage with tiny spread"
 

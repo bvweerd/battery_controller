@@ -8,11 +8,12 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-
 _LOGGER = logging.getLogger(__name__)
+
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
@@ -38,7 +39,7 @@ class BatteryOptimizationSwitch(SwitchEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "optimization_enabled"
     _attr_name = "Optimization Enabled"
-    _attr_icon = "mdi:battery-sync-outline"
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
@@ -61,30 +62,16 @@ class BatteryOptimizationSwitch(SwitchEntity):
         return self._is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable optimization."""
+        """Enable optimization and immediately run a fresh cycle."""
         _LOGGER.info("Enabling battery optimization")
         self._is_on = True
-
-        # Resume optimization updates
-        self._optimization_coordinator.update_interval = (
-            self._optimization_coordinator._original_interval
-            if hasattr(self._optimization_coordinator, "_original_interval")
-            else self._optimization_coordinator.update_interval
-        )
-
+        self._optimization_coordinator.optimization_enabled = True
         await self._optimization_coordinator.async_request_refresh()
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable optimization."""
+        """Disable optimization. The 15-min scheduler keeps running in the background."""
         _LOGGER.info("Disabling battery optimization")
         self._is_on = False
-
-        # Store original interval and stop updates
-        if not hasattr(self._optimization_coordinator, "_original_interval"):
-            self._optimization_coordinator._original_interval = (
-                self._optimization_coordinator.update_interval
-            )
-        self._optimization_coordinator.update_interval = None
-
+        self._optimization_coordinator.optimization_enabled = False
         self.async_write_ha_state()
