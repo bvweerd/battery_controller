@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -114,7 +113,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 if resp.status != 200:
                     raise UpdateFailed(f"API returned status {resp.status}")
                 data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        except (aiohttp.ClientError, TimeoutError) as err:
             raise UpdateFailed(f"Error fetching weather data: {err}")
 
         # Extract hourly forecasts
