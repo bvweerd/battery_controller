@@ -45,13 +45,21 @@ async def async_setup_entry(
     )
 
 
-class BatteryControllerBinarySensor(CoordinatorEntity[OptimizationCoordinator], BinarySensorEntity):
+class BatteryControllerBinarySensor(
+    CoordinatorEntity[OptimizationCoordinator], BinarySensorEntity
+):
     """Base class for Battery Controller binary sensors."""
 
     _attr_has_entity_name = True
     coordinator: OptimizationCoordinator
 
-    def __init__(self, coordinator: OptimizationCoordinator, device: DeviceInfo, entry: ConfigEntry, key: str):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        key: str,
+    ):
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device

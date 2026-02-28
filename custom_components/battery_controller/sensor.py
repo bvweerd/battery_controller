@@ -74,7 +74,13 @@ class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], Sensor
     _attr_has_entity_name = True
     coordinator: OptimizationCoordinator
 
-    def __init__(self, coordinator: OptimizationCoordinator, device: DeviceInfo, entry: ConfigEntry, key: str):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        key: str,
+    ):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device
