@@ -572,7 +572,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             self._last_price = new_price
             await self.async_request_refresh()
-        elif self._last_price != 0:
+        elif self._last_price is not None and self._last_price != 0:
             change_pct = abs(new_price - self._last_price) / abs(self._last_price)
             if change_pct >= 0.10:
                 _LOGGER.debug(
@@ -878,6 +878,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         if sensor_ok:
+            assert price_state is not None
             price_forecast, price_interval = extract_price_forecast_with_interval(
                 price_state
             )
@@ -897,7 +898,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     "Using historical price model as fallback (price sensor %s)",
                     "unavailable" if not sensor_ok else "has no forecast",
                 )
-            elif sensor_ok:
+            elif sensor_ok and price_state is not None:
                 # No model data yet; fall back to current price as single value
                 try:
                     price_forecast = [float(price_state.state)]

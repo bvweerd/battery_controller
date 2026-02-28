@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -132,7 +133,7 @@ class ConsumptionForecastModel:
 
             # Normalise a stat entry to (ts_key, value) regardless of whether
             # the recorder returns the "start" field as a string or datetime.
-            def _ts_and_value(stat: dict, field: str) -> tuple[str, float] | None:
+            def _ts_and_value(stat: Any, field: str) -> tuple[str, float] | None:
                 value = stat.get(field)
                 if value is None:
                     return None
@@ -412,7 +413,7 @@ class PriceForecastModel:
                 {"mean"},
             )
 
-            def _ts_key(stat: dict) -> str | None:
+            def _ts_key(stat: Any) -> str | None:
                 start = stat.get("start")
                 if start is None:
                     return None
