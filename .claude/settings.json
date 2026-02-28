@@ -1,0 +1,30 @@
+{
+  "model": "sonnet",
+  "respectGitignore": true,
+  "permissions": {
+    "allow": [
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git status*)",
+      "Bash(git show*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(python -m pytest*)",
+      "Bash(python -m mypy*)",
+      "Bash(python3 -m py_compile*)",
+      "Bash(python3*)",
+      "Bash(python*)",
+      "Bash(pip install*)",
+      "Bash(pip show*)",
+      "Bash(pre-commit run*)",
+      "Bash(gh release*)",
+      "Bash(gh run*)",
+      "Bash(gh issue*)",
+      "Bash(gh pr*)",
+      "WebFetch(domain:developers.home-assistant.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

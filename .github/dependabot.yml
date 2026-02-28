@@ -11,7 +11,7 @@ updates:
 
   # Update GitHub Actions workflows as well
   - package-ecosystem: "github-actions"
-    directory: "/"              
+    directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

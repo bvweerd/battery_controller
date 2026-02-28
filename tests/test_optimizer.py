@@ -406,9 +406,9 @@ class TestOptimizeBatterySchedule:
         )
         # Should charge during low price
         has_charging = any(p > 0.1 for p in result_charge.power_schedule_kw)
-        assert (
-            has_charging
-        ), f"Should have charging mode. Schedule: {result_charge.power_schedule_kw}"
+        assert has_charging, (
+            f"Should have charging mode. Schedule: {result_charge.power_schedule_kw}"
+        )
 
         # Scenario 2: Flat prices, start at min SoC -> should stay idle
         result_idle = optimize_battery_schedule(
@@ -424,9 +424,9 @@ class TestOptimizeBatterySchedule:
         )
         # Should stay idle (no arbitrage opportunity)
         has_idle = any(abs(p) < 0.01 for p in result_idle.power_schedule_kw)
-        assert (
-            has_idle
-        ), f"Should have idle mode. Schedule: {result_idle.power_schedule_kw}"
+        assert has_idle, (
+            f"Should have idle mode. Schedule: {result_idle.power_schedule_kw}"
+        )
 
         # Scenario 3: Very high price followed by low -> should discharge
         result_discharge = optimize_battery_schedule(
@@ -442,7 +442,9 @@ class TestOptimizeBatterySchedule:
         )
         # Should discharge during high price
         has_discharging = any(p < -0.1 for p in result_discharge.power_schedule_kw)
-        assert has_discharging, f"Should have discharging mode. Schedule: {result_discharge.power_schedule_kw}"
+        assert has_discharging, (
+            f"Should have discharging mode. Schedule: {result_discharge.power_schedule_kw}"
+        )
 
     def test_dc_pv_forecast_used(self, dc_battery_config):
         """DC PV forecast should be accepted and used."""
@@ -589,9 +591,9 @@ class TestOscillationFilterFormula:
             min_price_spread=min_spread,
         )
         # Price spread = 0.20 > expected_threshold ≈ 0.116 → arbitrage expected
-        assert any(
-            m == "charging" for m in result.mode_schedule[:4]
-        ), f"Expected charging; threshold={expected_threshold:.3f}, spread=0.20"
+        assert any(m == "charging" for m in result.mode_schedule[:4]), (
+            f"Expected charging; threshold={expected_threshold:.3f}, spread=0.20"
+        )
 
     def test_spread_below_threshold_no_arbitrage(self, battery_config):
         """Price spread below corrected threshold should produce no arbitrage."""
