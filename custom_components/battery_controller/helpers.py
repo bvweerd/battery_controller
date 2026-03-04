@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.core import State
@@ -97,7 +98,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
                     start_dt = dt_util.parse_datetime(start)
                     if start_dt is not None:
                         start_dt = dt_util.as_utc(start_dt)
-                        if start_dt < now:
+                        if start_dt + timedelta(minutes=detected_interval) <= now:
                             continue
 
             price = _normalize_price_value(entry)
@@ -124,7 +125,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
             return forecast, 60
 
     # Try raw_today/raw_tomorrow
-    hour = now.hour
+    hour = dt_util.now().hour  # Local time, not UTC
     forecast = []
 
     raw_today = state.attributes.get("raw_today")

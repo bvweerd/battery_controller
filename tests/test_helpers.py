@@ -241,11 +241,17 @@ class TestExtractPriceForecast:
         today_prices = [float(i) * 0.01 for i in range(24)]
         state = self._make_state(attributes={"today": today_prices})
 
-        # Simulate that it is currently 10:00
+        # Simulate that it is currently 10:00 local time
         fake_now = dt_util.utcnow().replace(hour=10, minute=5, second=0, microsecond=0)
-        with patch(
-            "custom_components.battery_controller.helpers.dt_util.utcnow",
-            return_value=fake_now,
+        with (
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.utcnow",
+                return_value=fake_now,
+            ),
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.now",
+                return_value=fake_now,
+            ),
         ):
             prices, interval = extract_price_forecast_with_interval(state)
 
@@ -265,9 +271,15 @@ class TestExtractPriceForecast:
         )
 
         fake_now = dt_util.utcnow().replace(hour=20, minute=0, second=0, microsecond=0)
-        with patch(
-            "custom_components.battery_controller.helpers.dt_util.utcnow",
-            return_value=fake_now,
+        with (
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.utcnow",
+                return_value=fake_now,
+            ),
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.now",
+                return_value=fake_now,
+            ),
         ):
             prices, interval = extract_price_forecast_with_interval(state)
 
