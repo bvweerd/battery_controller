@@ -57,6 +57,7 @@ from .const import (
     DEFAULT_TIME_STEP_MINUTES,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
+    MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_MANUAL,
     MODE_ZERO_GRID,
@@ -680,10 +681,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         if effective_mode == "zero_grid":
             return "zero_grid"
-        deadband_w = self.zero_grid_controller.config.deadband_w
+        # Upgrade idle → zero_grid only in zero_grid/hybrid modes (not follow_schedule
+        # or manual, where idle must mean truly stop). Only when grid is actually
+        # exporting (negative), i.e. real PV surplus — not just near-zero import noise.
         if (
             effective_mode == "idle"
-            and current_grid_w < deadband_w
+            and self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
+            and current_grid_w < 0
             and has_power_sensors
         ):
             return "zero_grid"
