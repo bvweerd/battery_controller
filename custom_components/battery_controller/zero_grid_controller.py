@@ -251,6 +251,7 @@ class ZeroGridController:
         raw_target_w = self.calculate_battery_setpoint(
             current_grid_w,
             current_soc_kwh,
+            current_battery_w,
             dp_schedule_w,
             mode,
         )
