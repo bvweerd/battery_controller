@@ -50,7 +50,6 @@ class ZeroGridController:
         self,
         current_grid_w: float,
         current_soc_kwh: float,
-        current_battery_w: float,
         dp_schedule_w: float,
         mode: str,
     ) -> float:
@@ -59,7 +58,6 @@ class ZeroGridController:
         Args:
             current_grid_w: Current grid power in W (positive = import)
             current_soc_kwh: Current battery SoC in kWh
-            current_battery_w: Current battery power in W (positive = charge)
             dp_schedule_w: What the DP optimizer recommends in W
             mode: Control mode ('zero_grid', 'follow_schedule', 'hybrid')
 
@@ -67,36 +65,35 @@ class ZeroGridController:
             Desired battery power in W (positive = charge, negative = discharge)
         """
         if mode == "zero_grid":
-            return self._calculate_zero_grid(
-                current_grid_w, current_battery_w, current_soc_kwh
-            )
+            return self._calculate_zero_grid(current_grid_w, current_soc_kwh)
         elif mode == "idle":
-            return self._calculate_idle(
-                current_grid_w, current_battery_w, current_soc_kwh
-            )
+            return self._calculate_idle(current_grid_w, current_soc_kwh)
         elif mode == "follow_schedule":
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
-        elif mode == "hybrid":
-            return self._calculate_hybrid(
-                current_grid_w, current_battery_w, dp_schedule_w, current_soc_kwh
-            )
         else:
+            # Manual mode - return 0 (no automatic control)
             return 0.0
 
     def _calculate_zero_grid(
         self,
         current_grid_w: float,
-        current_battery_w: float,
         current_soc_kwh: float,
     ) -> float:
         """Pure zero-grid mode: compensate grid exchange fully.
 
-        Uses feedback from actual battery power to remain stable.
-        target = current_battery_w - current_grid_w
+        Args:
+            current_grid_w: Current grid power in W (positive = import)
+            current_soc_kwh: Current battery SoC in kWh
+
+        Returns:
+            Battery power setpoint in W
         """
-        # If importing (grid > 0), we need more discharge (more negative)
-        # If exporting (grid < 0), we need more charge (more positive)
-        target_battery_w = current_battery_w - current_grid_w
+        # Use previous target rather than actual battery power to avoid oscillation.
+        # Formula: target = last_target - grid_error
+        # This is equivalent to target = -(load - pv) = pv - load, but
+        # remains stable because it does not include the actual battery power
+        # reading (which would cancel itself out each cycle via the grid meter).
+        target_battery_w = self._last_target_w - current_grid_w
 
         # Apply battery limits
         target_battery_w = clamp(
@@ -105,52 +102,27 @@ class ZeroGridController:
             self.config.max_charge_w,
         )
 
-        return self._apply_soc_limits(target_battery_w, current_soc_kwh)
+        # Apply SoC limits
+        target_battery_w = self._apply_soc_limits(target_battery_w, current_soc_kwh)
+
+        return target_battery_w
 
     def _calculate_idle(
         self,
         current_grid_w: float,
-        current_battery_w: float,
         current_soc_kwh: float,
     ) -> float:
-        """Smart idle: don't discharge, but capture PV surplus if exporting."""
-        if current_grid_w < -50:  # Exporting more than deadband
-            # Try to capture the export by charging
-            return self._calculate_zero_grid(
-                current_grid_w, current_battery_w, current_soc_kwh
-            )
+        """Idle mode: preserve battery capacity completely.
 
+        Used when the optimizer wants to preserve battery for upcoming
+        expensive periods. Does nothing - no charge, no discharge.
+        The optimizer already accounts for PV in its planning; if
+        significant PV surplus exists it recommends 'charging' not 'idle'.
+
+        Returns:
+            Battery power setpoint in W (always 0)
+        """
         return 0.0
-
-    def _calculate_hybrid(
-        self,
-        current_grid_w: float,
-        current_battery_w: float,
-        dp_schedule_w: float,
-        current_soc_kwh: float,
-    ) -> float:
-        """Hybrid mode: follow schedule but correct for real-time grid error."""
-        # Use schedule as baseline, but add grid correction
-        # This allows capturing unexpected PV peaks even when scheduled for idle/low charge.
-        target_battery_w = current_battery_w - current_grid_w
-
-        # In hybrid mode, we don't want to discharge unless the schedule says so
-        # but we DO want to charge more if there is PV surplus.
-        if dp_schedule_w >= 0:
-            # We are charging or idle. Allow more charge but no discharge beyond 0.
-            target_battery_w = max(dp_schedule_w, target_battery_w)
-        else:
-            # We are scheduled to discharge. Allow more discharge or less discharge
-            # depending on grid, but keep within a reasonable range of the schedule.
-            # (No extra charging from grid unless schedule says so)
-            pass
-
-        target_battery_w = clamp(
-            target_battery_w,
-            -self.config.max_discharge_w,
-            self.config.max_charge_w,
-        )
-        return self._apply_soc_limits(target_battery_w, current_soc_kwh)
 
     def _calculate_follow_schedule(
         self,
