@@ -124,49 +124,41 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         if forecast:
             return forecast, 60
 
-    # Try raw_today/raw_tomorrow (common in Nordpool/EnergyZero)
+    # Try raw_today/raw_tomorrow
+    hour = dt_util.now().hour  # Local time, not UTC
     forecast = []
-    now_utc = dt_util.utcnow()
-    # Start of current hour in UTC
-    current_hour_utc = now_utc.replace(minute=0, second=0, microsecond=0)
 
-    def _extract_from_list(entries: Any, is_tomorrow: bool = False) -> None:
-        if not isinstance(entries, list):
-            return
-
-        for i, entry in enumerate(entries):
-            # If entry is a dict with time, use it for precise filtering
-            if isinstance(entry, dict):
-                start = entry.get("start") or entry.get("from") or entry.get("time")
-                if isinstance(start, str):
-                    start_dt = dt_util.parse_datetime(start)
-                    if start_dt is not None:
-                        start_dt = dt_util.as_utc(start_dt)
-                        # Skip if this hour is already in the past
-                        if start_dt < current_hour_utc:
-                            continue
-            elif not is_tomorrow:
-                # If it's a list of floats without timestamps (like 'today' attribute),
-                # we must fallback to indexing. We use local time for the index
-                # because these attributes are typically aligned to the local day.
-                local_hour = dt_util.as_local(now_utc).hour
-                if i < local_hour:
-                    continue
-
+    raw_today = state.attributes.get("raw_today")
+    if isinstance(raw_today, list):
+        for entry in raw_today[hour:]:
             price = _normalize_price_value(entry)
             if price is not None:
                 forecast.append(price)
 
-    _extract_from_list(state.attributes.get("raw_today"))
-    _extract_from_list(state.attributes.get("raw_tomorrow"), is_tomorrow=True)
+    raw_tomorrow = state.attributes.get("raw_tomorrow")
+    if isinstance(raw_tomorrow, list):
+        for entry in raw_tomorrow:
+            price = _normalize_price_value(entry)
+            if price is not None:
+                forecast.append(price)
 
     if forecast:
         return forecast, 60
 
-    # Try today/tomorrow attributes
-    forecast = []
-    _extract_from_list(state.attributes.get("today"))
-    _extract_from_list(state.attributes.get("tomorrow"), is_tomorrow=True)
+    # Try today/tomorrow
+    # Skip past hours from today (one entry per hour, starting at midnight)
+    combined: list[Any] = []
+    today_attr = state.attributes.get("today")
+    if isinstance(today_attr, list):
+        combined.extend(today_attr[hour:])
+    tomorrow_attr = state.attributes.get("tomorrow")
+    if isinstance(tomorrow_attr, list):
+        combined.extend(tomorrow_attr)
+
+    for entry in combined:
+        price = _normalize_price_value(entry)
+        if price is not None:
+            forecast.append(price)
 
     if forecast:
         return forecast, 60

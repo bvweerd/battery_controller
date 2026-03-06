@@ -263,7 +263,6 @@ class TestAsyncUpdatePattern:
     async def test_datetime_start_field_handled_consumption(self):
         """_ts_and_value handles datetime objects (not just strings) as start."""
         from datetime import datetime, timezone
-        from homeassistant.util import dt as dt_util
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -281,11 +280,8 @@ class TestAsyncUpdatePattern:
         ):
             await model.async_update_pattern()
 
-        # Get expected local hour/dow from UTC start time
-        local_dt = dt_util.as_local(dt_start)
-        expected_key = (local_dt.hour, local_dt.weekday())
-        assert expected_key in model._hourly_pattern
-        assert model._hourly_pattern[expected_key] == pytest.approx(3.0)
+        assert (10, 0) in model._hourly_pattern
+        assert model._hourly_pattern[(10, 0)] == pytest.approx(3.0)
 
 
 class TestPriceForecastModelBins:
@@ -359,8 +355,6 @@ class TestPriceForecastModelPatternUpdate:
         assert model.has_data() is False
 
     async def test_price_only_builds_simple_pattern(self):
-        from homeassistant.util import dt as dt_util
-
         hass = MagicMock()
         model = PriceForecastModel(
             hass=hass, price_sensor_id="sensor.price", entry_id=None
@@ -377,16 +371,11 @@ class TestPriceForecastModelPatternUpdate:
             await model.async_update_pattern()
 
         assert model.has_data() is True
-        # Get expected local hour/dow from UTC timestamp
-        local_dt = dt_util.as_local(dt_util.parse_datetime(self._TS))
-        expected_key = (local_dt.hour, local_dt.weekday())
-        assert expected_key in model._simple_pattern
-        assert 0.25 in model._simple_pattern[expected_key]
+        assert (10, 0) in model._simple_pattern
+        assert 0.25 in model._simple_pattern[(10, 0)]
         assert model._overall_avg == pytest.approx(0.25)
 
     async def test_price_with_weather_builds_weather_pattern(self):
-        from homeassistant.util import dt as dt_util
-
         hass = MagicMock()
         model = PriceForecastModel(
             hass=hass, price_sensor_id="sensor.price", entry_id="eid"
@@ -421,15 +410,11 @@ class TestPriceForecastModelPatternUpdate:
             await model.async_update_pattern()
 
         assert model.has_data() is True
-        # Get expected local hour/dow from UTC timestamp
-        local_dt = dt_util.as_local(dt_util.parse_datetime(self._TS))
-        expected_key = (local_dt.hour, local_dt.weekday(), 3, 2)
-        assert expected_key in model._weather_pattern
-        assert 0.15 in model._weather_pattern[expected_key]
+        # Weather key: (hour=10, dow=0, ghi_bin=3, wind_bin=2)
+        assert (10, 0, 3, 2) in model._weather_pattern
+        assert 0.15 in model._weather_pattern[(10, 0, 3, 2)]
 
     async def test_datetime_start_field_handled(self):
-        from homeassistant.util import dt as dt_util
-
         hass = MagicMock()
         model = PriceForecastModel(
             hass=hass, price_sensor_id="sensor.price", entry_id=None
@@ -444,11 +429,8 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
-        # Get expected local hour/dow from UTC datetime object
-        local_dt = dt_util.as_local(self._DT)
-        expected_key = (local_dt.hour, local_dt.weekday())
-        assert expected_key in model._simple_pattern
-        assert 0.18 in model._simple_pattern[expected_key]
+        assert (10, 0) in model._simple_pattern
+        assert 0.18 in model._simple_pattern[(10, 0)]
 
     async def test_recorder_import_error_handled_gracefully(self):
         hass = MagicMock()
@@ -469,21 +451,12 @@ class TestPriceForecastModelForecast:
 
     def _model_with_data(self) -> PriceForecastModel:
         """Return a model with injected simple and weather patterns."""
-        from homeassistant.util import dt as dt_util
-
         hass = MagicMock()
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
-
-        # Get local hour/dow for 10:00 UTC
-        dt_10_utc = datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
-        local_dt = dt_util.as_local(dt_10_utc)
-        l_hour = local_dt.hour
-        l_dow = local_dt.weekday()
-
-        # Populate simple pattern with local keys
-        model._simple_pattern = {(l_hour, l_dow): [0.28, 0.32]}
-        # Weather pattern with local keys
-        model._weather_pattern = {(l_hour, l_dow, 3, 2): [0.08, 0.12]}
+        # Populate simple pattern: hour=10, dow=0 → avg 0.30
+        model._simple_pattern = {(10, 0): [0.28, 0.32]}
+        # Weather pattern: hour=10, dow=0, ghi_bin=3, wind_bin=2 → avg 0.10 (windy+sunny = cheap)
+        model._weather_pattern = {(10, 0, 3, 2): [0.08, 0.12]}
         model._overall_avg = 0.25
         return model
 

@@ -264,10 +264,8 @@ def optimize_battery_schedule(
                 else:
                     new_soc_wh = soc_wh
 
-                # Interpolate future cost for better resolution at small time steps.
-                # This prevents the "infinite energy" bug where small actions
-                # don't trigger a state change in nearest-neighbor lookup.
-                future_cost = _interpolate_v(new_soc_wh, soc_states, V[t + 1])
+                # Find nearest SoC state for next step
+                new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
 
                 # Calculate immediate cost
                 step_cost = calculate_step_cost(
@@ -285,7 +283,7 @@ def optimize_battery_schedule(
                 )
 
                 # Total cost = immediate + future
-                total_cost = step_cost + future_cost
+                total_cost = step_cost + V[t + 1][new_soc_idx]
 
                 if total_cost < best_cost:
                     best_cost = total_cost
@@ -322,10 +320,8 @@ def optimize_battery_schedule(
     current_soc = float(soc_states[current_soc_idx])
 
     for t in range(n_steps):
-        # Interpolate the optimal action from the policy table.
-        # This prevents the battery from getting "stuck" in a discrete
-        # policy state when using very small time steps.
-        action_w = _interpolate_policy(current_soc, soc_states, policy[t])
+        soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
+        action_w = policy[t][soc_idx]
 
         power_kw = action_w / 1000
         power_schedule_kw.append(power_kw)
@@ -535,61 +531,6 @@ def _filter_oscillations(
         filtered_soc.append(current_soc_kwh)
 
     return filtered_power, filtered_mode, filtered_soc
-
-
-def _interpolate_policy(
-    soc_wh: float, soc_states: list[int], policy_at_t: list[float]
-) -> float:
-    """Linearly interpolate optimal action between discrete SoC states.
-
-    Since policy is discrete (100W steps), simple linear interpolation
-    works well to smooth out transitions.
-    """
-    if len(soc_states) <= 1:
-        return policy_at_t[0]
-
-    step = soc_states[1] - soc_states[0]
-    f_idx = (soc_wh - soc_states[0]) / step
-
-    idx_low = int(math.floor(f_idx))
-    idx_high = int(math.ceil(f_idx))
-
-    idx_low = max(0, min(idx_low, len(soc_states) - 1))
-    idx_high = max(0, min(idx_high, len(soc_states) - 1))
-
-    if idx_low == idx_high:
-        return policy_at_t[idx_low]
-
-    weight = f_idx - idx_low
-    return (1 - weight) * policy_at_t[idx_low] + weight * policy_at_t[idx_high]
-
-
-def _interpolate_v(soc_wh: float, soc_states: list[int], v_at_t: list[float]) -> float:
-    """Linearly interpolate value function between discrete SoC states.
-
-    Since soc_states is a uniform grid, we can find the bounding indices
-    and the interpolation weight in O(1).
-    """
-    if len(soc_states) <= 1:
-        return v_at_t[0]
-
-    step = soc_states[1] - soc_states[0]
-    # Calculate fractional index
-    f_idx = (soc_wh - soc_states[0]) / step
-
-    idx_low = int(math.floor(f_idx))
-    idx_high = int(math.ceil(f_idx))
-
-    # Clamp to valid range
-    idx_low = max(0, min(idx_low, len(soc_states) - 1))
-    idx_high = max(0, min(idx_high, len(soc_states) - 1))
-
-    if idx_low == idx_high:
-        return v_at_t[idx_low]
-
-    # Interpolate
-    weight = f_idx - idx_low
-    return (1 - weight) * v_at_t[idx_low] + weight * v_at_t[idx_high]
 
 
 def _find_nearest_soc_idx(soc_wh: float, soc_states: list[int]) -> int:

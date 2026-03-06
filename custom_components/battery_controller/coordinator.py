@@ -127,7 +127,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No forecast data in API response")
 
         # Find current hour index
-        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         start_idx = 0
         for i, ts in enumerate(times):
             try:
@@ -982,18 +982,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             steps_needed = min_horizon_steps - len(resampled_prices)
             hours_already = len(resampled_prices) * time_step / 60
             hours_for_model = (steps_needed * time_step + 59) // 60  # ceiling division
-            # Calculate extension start time in UTC
-            extension_start_utc = dt_util.utcnow().replace(
+            extension_start = dt_util.now().replace(
                 minute=0, second=0, microsecond=0
             ) + timedelta(hours=int(hours_already))
-
             weather_raw = self.weather_coordinator.data or {}
             ghi_raw = weather_raw.get("radiation_forecast", [])
             wind_raw = weather_raw.get("wind_speed_forecast", [])
             offset = int(hours_already)
             model_extension = self._price_model.forecast(
                 hours=hours_for_model,
-                start_time=extension_start_utc,
+                start_time=extension_start,
                 ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
                 wind_forecast=wind_raw[offset:] if wind_raw else None,
             )
