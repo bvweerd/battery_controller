@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -21,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState
 from .const import (
+    DC_TO_AC_INVERTER_EFFICIENCY,
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_CONTROL_MODE,
@@ -127,13 +128,13 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No forecast data in API response")
 
         # Find current hour index
-        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
         start_idx = 0
         for i, ts in enumerate(times):
             try:
                 t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 if t.tzinfo is None:
-                    t = t.replace(tzinfo=timezone.utc)
+                    t = t.replace(tzinfo=dt_util.UTC)
             except ValueError:
                 continue
             if t >= now:
@@ -279,9 +280,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
         if forecast_start and radiation_forecast:
-            current_hour = datetime.now(timezone.utc).replace(
-                minute=0, second=0, microsecond=0
-            )
+            current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
             hours_elapsed = max(
                 0, int((current_hour - forecast_start).total_seconds() / 3600)
             )
@@ -1082,7 +1081,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             current_pv_kw = forecast_data.get("current_pv_kw", 0.0)
             current_dc_pv_kw = forecast_data.get("current_dc_pv_kw", 0.0)
             current_consumption_kw = forecast_data.get("current_consumption_kw", 0.0)
-            dc_pv_to_ac_kw = current_dc_pv_kw * 0.96
+            dc_pv_to_ac_kw = current_dc_pv_kw * DC_TO_AC_INVERTER_EFFICIENCY
             total_pv_kw = current_pv_kw + dc_pv_to_ac_kw
             current_grid = (
                 current_consumption_kw - total_pv_kw + battery_state.power_kw

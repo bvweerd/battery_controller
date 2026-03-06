@@ -114,24 +114,16 @@ DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
 DEFAULT_ZERO_GRID_PRIORITY = "schedule"
 
 # Default values - Fixed prices
-DEFAULT_FIXED_FEED_IN_PRICE = 0.07  # EUR/kWh
+DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+)
 
 # Default values - Control mode
 DEFAULT_CONTROL_MODE = "hybrid"
 
-# Battery degradation model constants
-# Typical Li-ion battery: ~6000 cycles at 80% DoD
-# Replacement cost: ~500 EUR/kWh
-# Cost per cycle: 500 / 6000 = 0.083 EUR/kWh capacity
-# Cost per kWh throughput: 0.083 / (2 * 0.8) = 0.052 EUR/kWh
-BATTERY_LIFECYCLE_CYCLES = 6000
-BATTERY_REPLACEMENT_COST_PER_KWH = 500  # EUR
-BATTERY_DOD_FACTOR = 0.8
+# DP resolution constants
+# power_step_w × time_step_hours must equal the SoC resolution used in the optimizer.
+# SOC_RESOLUTION_WH is the minimum (floor) used only as a reference; the optimizer
+# calculates the effective resolution dynamically as max(1, power_step_w × dt_h).
+POWER_STEP_W = 100  # Battery power action granularity in W
 
-# SoC discretization for DP (in Wh steps)
-SOC_RESOLUTION_WH = 25  # 25 Wh steps → aligns with 100W×0.25h per action
-
-# Time constants
-HOURS_PER_DAY = 24
-MINUTES_PER_HOUR = 60
-SECONDS_PER_MINUTE = 60
+# DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
+DC_TO_AC_INVERTER_EFFICIENCY = 0.96

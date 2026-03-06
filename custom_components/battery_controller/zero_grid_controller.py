@@ -233,10 +233,10 @@ class ZeroGridController:
         # Update last target for next deadband calculation
         self._last_target_w = final_target_w
 
-        # Determine action mode
-        if final_target_w > 50:
+        # Determine action mode: use deadband as the idle threshold
+        if final_target_w > self.config.deadband_w:
             action_mode = "charging"
-        elif final_target_w < -50:
+        elif final_target_w < -self.config.deadband_w:
             action_mode = "discharging"
         else:
             action_mode = "idle"

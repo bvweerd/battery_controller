@@ -236,13 +236,16 @@ class ConsumptionForecastModel:
                     "with your inverter's total energy sensor(s) to fix this."
                 )
 
-            # Group by (hour, day_of_week) and average
+            # Group by (hour, day_of_week) and average.
+            # Convert to local time so the pattern aligns with the local-time
+            # forecast generated in ConsumptionForecastModel.forecast().
             hourly_values: dict[tuple[int, int], list[float]] = {}
             for ts_key, net_kwh in hourly_net.items():
                 dt = dt_util.parse_datetime(ts_key)
                 if dt is None:
                     continue
-                key = (dt.hour, dt.weekday())
+                dt_local = dt_util.as_local(dt)
+                key = (dt_local.hour, dt_local.weekday())
                 hourly_values.setdefault(key, []).append(max(0.0, net_kwh))
 
             for key, values in hourly_values.items():
@@ -470,8 +473,11 @@ class PriceForecastModel:
                 dt_obj = dt_util.parse_datetime(ts)
                 if dt_obj is None:
                     continue
-                hour = dt_obj.hour
-                dow = dt_obj.weekday()
+                # Convert to local time so the pattern aligns with the local-time
+                # forecast generated in PriceForecastModel.forecast().
+                dt_local = dt_util.as_local(dt_obj)
+                hour = dt_local.hour
+                dow = dt_local.weekday()
                 all_prices.append(price)
                 simple_raw.setdefault((hour, dow), []).append(price)
                 if ts in ghi_hourly and ts in wind_hourly:

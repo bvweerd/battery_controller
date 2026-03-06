@@ -261,8 +261,14 @@ class TestAsyncUpdatePattern:
         assert "double-counting" not in caplog.text
 
     async def test_datetime_start_field_handled_consumption(self):
-        """_ts_and_value handles datetime objects (not just strings) as start."""
+        """_ts_and_value handles datetime objects (not just strings) as start.
+
+        Patterns are stored in local time so they align with the local-time
+        forecast generated in ConsumptionForecastModel.forecast().
+        """
         from datetime import datetime, timezone
+
+        from homeassistant.util import dt as dt_util
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -270,6 +276,9 @@ class TestAsyncUpdatePattern:
             consumption_sensors=["sensor.consumption"],
         )
         dt_start = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+        expected_local = dt_util.as_local(dt_start)
+        expected_key = (expected_local.hour, expected_local.weekday())
+
         base_stats = {"sensor.consumption": [{"start": dt_start, "change": 3.0}]}
         mock_instance = MagicMock()
         mock_instance.async_add_executor_job = AsyncMock(return_value=base_stats)
@@ -280,8 +289,8 @@ class TestAsyncUpdatePattern:
         ):
             await model.async_update_pattern()
 
-        assert (10, 0) in model._hourly_pattern
-        assert model._hourly_pattern[(10, 0)] == pytest.approx(3.0)
+        assert expected_key in model._hourly_pattern
+        assert model._hourly_pattern[expected_key] == pytest.approx(3.0)
 
 
 class TestPriceForecastModelBins:
@@ -332,8 +341,9 @@ class TestPriceForecastModelInit:
 class TestPriceForecastModelPatternUpdate:
     """Tests for PriceForecastModel.async_update_pattern."""
 
-    # 2024-01-01 is a Monday (weekday=0), hour=10 → key=(10, 0)
-    _TS = "2024-01-01T10:00:00"
+    # 2024-01-01 10:00 UTC (Monday).  Tests compute the local-time key dynamically
+    # so they pass regardless of the test-runner's timezone.
+    _TS = "2024-01-01T10:00:00+00:00"
     _DT = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
 
     def _make_price_stats(self, price: float, ts=None) -> dict:
@@ -370,9 +380,14 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
+        from homeassistant.util import dt as dt_util
+
+        expected_local = dt_util.as_local(self._DT)
+        expected_key = (expected_local.hour, expected_local.weekday())
+
         assert model.has_data() is True
-        assert (10, 0) in model._simple_pattern
-        assert 0.25 in model._simple_pattern[(10, 0)]
+        assert expected_key in model._simple_pattern
+        assert 0.25 in model._simple_pattern[expected_key]
         assert model._overall_avg == pytest.approx(0.25)
 
     async def test_price_with_weather_builds_weather_pattern(self):
@@ -409,10 +424,14 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
+        from homeassistant.util import dt as dt_util
+
+        expected_local = dt_util.as_local(self._DT)
+        expected_key = (expected_local.hour, expected_local.weekday(), 3, 2)
+
         assert model.has_data() is True
-        # Weather key: (hour=10, dow=0, ghi_bin=3, wind_bin=2)
-        assert (10, 0, 3, 2) in model._weather_pattern
-        assert 0.15 in model._weather_pattern[(10, 0, 3, 2)]
+        assert expected_key in model._weather_pattern
+        assert 0.15 in model._weather_pattern[expected_key]
 
     async def test_datetime_start_field_handled(self):
         hass = MagicMock()
@@ -429,8 +448,12 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
-        assert (10, 0) in model._simple_pattern
-        assert 0.18 in model._simple_pattern[(10, 0)]
+        from homeassistant.util import dt as dt_util
+
+        expected_local = dt_util.as_local(self._DT)
+        expected_key = (expected_local.hour, expected_local.weekday())
+        assert expected_key in model._simple_pattern
+        assert 0.18 in model._simple_pattern[expected_key]
 
     async def test_recorder_import_error_handled_gracefully(self):
         hass = MagicMock()

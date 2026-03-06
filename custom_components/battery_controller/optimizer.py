@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 
 from .battery_model import BatteryConfig
-from .const import SOC_RESOLUTION_WH
+from .const import DC_TO_AC_INVERTER_EFFICIENCY, POWER_STEP_W
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,7 +127,9 @@ def calculate_step_cost(
             grid_to_battery_w = 0.0
 
     # DC PV excess converted to AC (through inverter, ~96% efficiency)
-    dc_pv_to_ac_w = dc_pv_excess_w * 0.96 if dc_pv_excess_w > 0 else 0.0
+    dc_pv_to_ac_w = (
+        dc_pv_excess_w * DC_TO_AC_INVERTER_EFFICIENCY if dc_pv_excess_w > 0 else 0.0
+    )
 
     # Total AC-side PV = external AC PV + DC PV excess converted to AC
     total_ac_pv_w = pv_production_w + dc_pv_to_ac_w
@@ -194,11 +196,17 @@ def optimize_battery_schedule(
 
     time_step_hours = time_step_minutes / 60.0
 
-    # Discretize SoC space
+    # Discretize SoC space.
+    # Resolution is derived from the power step and time step so that exactly one
+    # power-step at minimum non-zero power moves at least one SoC state.
+    # e.g. 15-min: max(1, 100W × 0.25h) = 25 Wh
+    #       1-min: max(1, 100W × 1/60h) = 1 Wh  (prevents state collapse)
+    power_step_w = POWER_STEP_W
+    soc_resolution_wh = max(1, int(power_step_w * time_step_hours))
     min_soc_wh = int(battery_config.min_soc_kwh * 1000)
     max_soc_wh = int(battery_config.max_soc_kwh * 1000)
     soc_states = list(
-        range(min_soc_wh, max_soc_wh + SOC_RESOLUTION_WH, SOC_RESOLUTION_WH)
+        range(min_soc_wh, max_soc_wh + soc_resolution_wh, soc_resolution_wh)
     )
     n_soc_states = len(soc_states)
 
@@ -220,7 +228,6 @@ def optimize_battery_schedule(
     # Power action space (discretized in W)
     max_charge_w = battery_config.max_charge_power_kw * 1000
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
-    power_step_w = 100  # 100W resolution
 
     # Generate actions up to (but never exceeding) the rated max power.
     # Using integer division ensures the last step stays within limits.
@@ -299,7 +306,7 @@ def optimize_battery_schedule(
     # the gradient is negative → shadow price is positive.
     current_soc_wh = int(current_soc_kwh * 1000)
     current_soc_idx = _find_nearest_soc_idx(current_soc_wh, soc_states)
-    step_kwh = SOC_RESOLUTION_WH / 1000.0
+    step_kwh = soc_resolution_wh / 1000.0
     shadow_price_eur_kwh = 0.0
     if n_soc_states >= 3 and 0 < current_soc_idx < n_soc_states - 1:
         shadow_price_eur_kwh = (
@@ -376,7 +383,7 @@ def optimize_battery_schedule(
         )
 
         # Without battery: DC PV excess goes to AC (through inverter)
-        dc_pv_to_ac_w = pv_dc_w * 0.96 if pv_dc_w > 0 else 0
+        dc_pv_to_ac_w = pv_dc_w * DC_TO_AC_INVERTER_EFFICIENCY if pv_dc_w > 0 else 0
         total_pv_w = pv_w + dc_pv_to_ac_w
 
         net_grid_w = consumption_w - total_pv_w
@@ -481,12 +488,15 @@ def _filter_oscillations(
         # Otherwise charging from grid
         return price_forecast[timestep]
 
+    # 2-hour lookahead window, independent of time step size
+    lookahead_steps = max(1, round(2.0 / time_step_hours))
+
     # Look for rapid charge/discharge oscillations
     i = 0
     while i < len(filtered_mode) - 1:
         if filtered_mode[i] == "charging":
             # Look ahead for quick discharge
-            for j in range(i + 1, min(i + 8, len(filtered_mode))):  # 2 hours lookahead
+            for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
                 if filtered_mode[j] == "discharging":
                     # Found charge followed by discharge - check if profitable
                     charge_cost = get_charge_cost(i)  # May be feed-in opportunity cost
@@ -500,7 +510,7 @@ def _filter_oscillations(
                         break
         elif filtered_mode[i] == "discharging":
             # Look ahead for quick charge
-            for j in range(i + 1, min(i + 8, len(filtered_mode))):
+            for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
                 if filtered_mode[j] == "charging":
                     # Found discharge followed by charge - check if profitable
                     discharge_price = price_forecast[i]
