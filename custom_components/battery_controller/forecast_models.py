@@ -242,9 +242,7 @@ class ConsumptionForecastModel:
                 dt = dt_util.parse_datetime(ts_key)
                 if dt is None:
                     continue
-                # Use local time for patterns (e.g. 18:00 is dinner time locally)
-                local_dt = dt_util.as_local(dt)
-                key = (local_dt.hour, local_dt.weekday())
+                key = (dt.hour, dt.weekday())
                 hourly_values.setdefault(key, []).append(max(0.0, net_kwh))
 
             for key, values in hourly_values.items():
@@ -277,15 +275,13 @@ class ConsumptionForecastModel:
             Consumption forecast in kW
         """
         if start_time is None:
-            start_time = dt_util.utcnow()
+            start_time = dt_util.now()
 
         forecast = []
         for h in range(hours):
             dt = start_time + timedelta(hours=h)
-            # Use local hour/dow for pattern lookup (social peak alignment)
-            local_time = dt_util.as_local(dt)
-            hour = local_time.hour
-            dow = local_time.weekday()
+            hour = dt.hour
+            dow = dt.weekday()
 
             # Use historical pattern if available
             key = (hour, dow)
@@ -474,10 +470,8 @@ class PriceForecastModel:
                 dt_obj = dt_util.parse_datetime(ts)
                 if dt_obj is None:
                     continue
-                # Use local time for patterns
-                local_dt = dt_util.as_local(dt_obj)
-                hour = local_dt.hour
-                dow = local_dt.weekday()
+                hour = dt_obj.hour
+                dow = dt_obj.weekday()
                 all_prices.append(price)
                 simple_raw.setdefault((hour, dow), []).append(price)
                 if ts in ghi_hourly and ts in wind_hourly:
@@ -537,17 +531,13 @@ class PriceForecastModel:
             Hourly price forecast list in EUR/kWh.
         """
         if start_time is None:
-            # Default to current hour in UTC
-            start_time = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+            start_time = dt_util.now().replace(minute=0, second=0, microsecond=0)
 
         result = []
         for h in range(hours):
             step_time = start_time + timedelta(hours=h)
-            # Use local hour/dow for pattern lookup as consumption/price peaks
-            # are usually aligned with local social patterns (8:00 morning peak, etc)
-            local_time = dt_util.as_local(step_time)
-            hour = local_time.hour
-            dow = local_time.weekday()
+            hour = step_time.hour
+            dow = step_time.weekday()
             price: float | None = None
 
             # 1. Weather-corrected lookup

@@ -255,9 +255,8 @@ class TestExtractPriceForecast:
         ):
             prices, interval = extract_price_forecast_with_interval(state)
 
-        # Prices from expected local hour onwards
-        local_hour = dt_util.as_local(fake_now).hour
-        assert prices == today_prices[local_hour:]
+        # Prices from hour 10 onwards (index 10..23 = 14 entries)
+        assert prices == today_prices[10:]
         assert interval == 60
 
     def test_today_and_tomorrow_combined(self):
@@ -284,6 +283,5 @@ class TestExtractPriceForecast:
         ):
             prices, interval = extract_price_forecast_with_interval(state)
 
-        local_hour = dt_util.as_local(fake_now).hour
-        expected = today_prices[local_hour:] + tomorrow_prices
+        expected = today_prices[20:] + tomorrow_prices
         assert prices == expected
