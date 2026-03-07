@@ -244,21 +244,35 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
     advanced_schema = vol.Schema(
         {
-            vol.Optional(
+            vol.Required(
                 CONF_TIME_STEP_MINUTES,
                 default=d.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES),
-                description={"suggested_value": d.get(CONF_TIME_STEP_MINUTES)},
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
-            vol.Optional(
+            ): selector(
+                {
+                    "number": {
+                        "min": 1,
+                        "max": 60,
+                        "mode": "box",
+                        "unit_of_measurement": "min",
+                    }
+                }
+            ),
+            vol.Required(
                 CONF_OPTIMIZATION_INTERVAL_MINUTES,
                 default=d.get(
                     CONF_OPTIMIZATION_INTERVAL_MINUTES,
                     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
                 ),
-                description={
-                    "suggested_value": d.get(CONF_OPTIMIZATION_INTERVAL_MINUTES)
-                },
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+            ): selector(
+                {
+                    "number": {
+                        "min": 1,
+                        "max": 60,
+                        "mode": "box",
+                        "unit_of_measurement": "min",
+                    }
+                }
+            ),
             vol.Optional(
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),

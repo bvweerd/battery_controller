@@ -198,17 +198,16 @@ def optimize_battery_schedule(
 
     # Discretize SoC space.
     # Resolution is derived from the power step and time step so that exactly one
-    # power-step at minimum non-zero power moves at least one SoC state.
-    # e.g. 15-min: max(1, 100W × 0.25h) = 25 Wh
-    #       1-min: max(1, 100W × 1/60h) = 1 Wh  (prevents state collapse)
+    # power-step at minimum non-zero power moves exactly one SoC state.
+    # e.g. 15-min: 100W × 0.25h = 25 Wh
+    #       5-min: 100W × 1/12h = 8.333 Wh
     power_step_w = POWER_STEP_W
-    soc_resolution_wh = max(1, int(power_step_w * time_step_hours))
-    min_soc_wh = int(battery_config.min_soc_kwh * 1000)
-    max_soc_wh = int(battery_config.max_soc_kwh * 1000)
-    soc_states = list(
-        range(min_soc_wh, max_soc_wh + soc_resolution_wh, soc_resolution_wh)
-    )
-    n_soc_states = len(soc_states)
+    soc_resolution_wh = max(0.1, power_step_w * time_step_hours)
+    min_soc_wh = battery_config.min_soc_kwh * 1000
+    max_soc_wh = battery_config.max_soc_kwh * 1000
+
+    n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
+    soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     # Initialize value function (cost-to-go)
     # V[t][s] = minimum cost from time t to end, starting at SoC state s
@@ -524,12 +523,13 @@ def _filter_oscillations(
                         break
         i += 1
 
-    # Recalculate SoC schedule after filtering
+    # Recalculate SoC schedule and update power values to match actual SoC changes
     current_soc_kwh = soc_schedule_kwh[0]
     filtered_soc = [current_soc_kwh]
 
     for t in range(len(filtered_power)):
         power_kw = filtered_power[t]
+        prev_soc = current_soc_kwh
         if power_kw > 0:  # Charging
             current_soc_kwh = min(
                 current_soc_kwh + power_kw * time_step_hours, max_soc_kwh
@@ -538,6 +538,15 @@ def _filter_oscillations(
             current_soc_kwh = max(
                 current_soc_kwh + power_kw * time_step_hours, min_soc_kwh
             )
+
+        # Update power to match actual SoC change (e.g. if battery was full/empty)
+        actual_power_kw = (current_soc_kwh - prev_soc) / time_step_hours
+        filtered_power[t] = actual_power_kw
+
+        # Update mode if power changed to 0
+        if abs(actual_power_kw) < 0.001:
+            filtered_mode[t] = "idle"
+
         filtered_soc.append(current_soc_kwh)
 
     return filtered_power, filtered_mode, filtered_soc

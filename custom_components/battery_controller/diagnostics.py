@@ -26,11 +26,11 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
 
-    entry_data = entry.runtime_data if hasattr(entry, "runtime_data") else {}
+    entry_data = entry.runtime_data if hasattr(entry, "runtime_data") else None
 
-    weather_coord = entry_data.get("weather_coordinator")
-    forecast_coord = entry_data.get("forecast_coordinator")
-    optimization_coord = entry_data.get("optimization_coordinator")
+    weather_coord = getattr(entry_data, "weather_coordinator", None)
+    forecast_coord = getattr(entry_data, "forecast_coordinator", None)
+    optimization_coord = getattr(entry_data, "optimization_coordinator", None)
 
     # Battery configuration (derived values are useful for debugging)
     battery_config = {}
@@ -85,9 +85,11 @@ async def async_get_config_entry_diagnostics(
         if hasattr(forecast_coord, "consumption_model"):
             model = forecast_coord.consumption_model
             if hasattr(model, "_hourly_pattern"):
-                forecast_data["consumption_hourly_pattern"] = [
-                    round(v, 3) for v in model._hourly_pattern
-                ]
+                # Convert (hour, dow) dict keys to string representation for JSON
+                forecast_data["consumption_hourly_pattern"] = {
+                    f"{h:02d}_{d}": round(v, 3)
+                    for (h, d), v in model._hourly_pattern.items()
+                }
 
     # Optimization coordinator data
     optimization_data = {}
