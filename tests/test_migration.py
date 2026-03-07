@@ -1,4 +1,4 @@
-"""Tests for Battery Controller config entry migration (v2 → v3)."""
+"""Tests for Battery Controller config entry migration (v2 → v3 → v4)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ import pytest
 from homeassistant import config_entries, setup
 from homeassistant.core import HomeAssistant
 
-from custom_components.battery_controller.const import DOMAIN, PV_SUBENTRY_TYPE
+from custom_components.battery_controller.const import (
+    BATTERY_SUBENTRY_TYPE,
+    DOMAIN,
+    PV_SUBENTRY_TYPE,
+)
 from custom_components.battery_controller import async_migrate_entry
 
 
@@ -323,14 +327,18 @@ async def test_migrate_v2_non_pv_data_preserved(hass: HomeAssistant) -> None:
     assert entry.version == 3
 
 
-async def test_migrate_v3_no_op(hass: HomeAssistant) -> None:
-    """A v3 entry is not touched by async_migrate_entry."""
+def _make_v3_entry(
+    hass: HomeAssistant,
+    data: dict | None = None,
+    options: dict | None = None,
+) -> config_entries.ConfigEntry:
+    """Create a VERSION=3 config entry and register it in hass."""
     entry = config_entries.ConfigEntry(
         entry_id="v3_entry",
         domain=DOMAIN,
         title="Battery Controller",
-        data={**_BASE_BATTERY, **_BASE_SENSORS},
-        options={},
+        data={**_BASE_BATTERY, **_BASE_SENSORS, **(data or {})},
+        options=options or {},
         source="user",
         version=3,
         minor_version=1,
@@ -339,7 +347,90 @@ async def test_migrate_v3_no_op(hass: HomeAssistant) -> None:
         subentries_data=None,
     )
     hass.config_entries._entries[entry.entry_id] = entry
+    return entry
+
+
+async def test_migrate_v3_to_v4_creates_battery_subentry(
+    hass: HomeAssistant,
+) -> None:
+    """v3 entry migrates to v4: battery subentry is created from main config data."""
+    entry = _make_v3_entry(hass)
     result = await async_migrate_entry(hass, entry)
     assert result is True
-    assert entry.version == 3
+    assert entry.version == 4
+
+    battery_subs = [
+        s for s in entry.subentries.values() if s.subentry_type == BATTERY_SUBENTRY_TYPE
+    ]
+    assert len(battery_subs) == 1
+    sub = battery_subs[0]
+    assert sub.data["capacity_kwh"] == 10.0
+    assert sub.data["round_trip_efficiency"] == 0.9
+    assert sub.data["battery_soc_sensor"] == "sensor.soc"
+
+
+async def test_migrate_v3_to_v4_battery_keys_removed_from_data(
+    hass: HomeAssistant,
+) -> None:
+    """After v3→v4, battery spec keys are removed from entry.data."""
+    entry = _make_v3_entry(hass)
+    await async_migrate_entry(hass, entry)
+
+    for key in (
+        "capacity_kwh",
+        "max_charge_power_kw",
+        "max_discharge_power_kw",
+        "round_trip_efficiency",
+        "battery_soc_sensor",
+    ):
+        assert key not in entry.data, f"Expected {key!r} removed from entry.data"
+
+
+async def test_migrate_v3_to_v4_options_battery_keys_removed(
+    hass: HomeAssistant,
+) -> None:
+    """After v3→v4, battery spec keys in options are also removed."""
+    entry = _make_v3_entry(
+        hass,
+        options={"capacity_kwh": 12.0, "min_price_spread": 0.05},
+    )
+    await async_migrate_entry(hass, entry)
+
+    assert "capacity_kwh" not in entry.options
+    assert entry.options.get("min_price_spread") == 0.05
+
+
+async def test_migrate_v3_to_v4_non_battery_data_preserved(
+    hass: HomeAssistant,
+) -> None:
+    """Non-battery keys (price sensor, timing) survive v3→v4 migration."""
+    entry = _make_v3_entry(
+        hass,
+        data={"time_step_minutes": 15},
+    )
+    await async_migrate_entry(hass, entry)
+
+    assert entry.data["price_sensor"] == "sensor.nordpool"
+    assert entry.data["time_step_minutes"] == 15
+
+
+async def test_migrate_v4_no_op(hass: HomeAssistant) -> None:
+    """A v4 entry is not touched by async_migrate_entry."""
+    entry = config_entries.ConfigEntry(
+        entry_id="v4_entry",
+        domain=DOMAIN,
+        title="Battery Controller",
+        data={"price_sensor": "sensor.nordpool"},
+        options={},
+        source="user",
+        version=4,
+        minor_version=1,
+        unique_id=DOMAIN,
+        discovery_keys=set(),
+        subentries_data=None,
+    )
+    hass.config_entries._entries[entry.entry_id] = entry
+    result = await async_migrate_entry(hass, entry)
+    assert result is True
+    assert entry.version == 4
     assert len(entry.subentries) == 0

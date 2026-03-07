@@ -12,6 +12,7 @@ from homeassistant.helpers.selector import selector
 import voluptuous as vol
 
 from .const import (
+    BATTERY_SUBENTRY_TYPE,
     CONF_BATTERY_POWER_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
@@ -40,6 +41,8 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MAX_CHARGE_POWER_KW,
     DEFAULT_MAX_DISCHARGE_POWER_KW,
+    DEFAULT_MAX_SOC_PERCENT,
+    DEFAULT_MIN_SOC_PERCENT,
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
     DEFAULT_PV_DC_EFFICIENCY,
     DEFAULT_ROUND_TRIP_EFFICIENCY,
@@ -49,6 +52,101 @@ from .const import (
     DOMAIN,
     PV_SUBENTRY_TYPE,
 )
+
+
+def _build_battery_subentry_schema(
+    defaults: dict[str, Any] | None = None,
+) -> vol.Schema:
+    """Build schema for a single battery subentry (add or edit)."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_CAPACITY_KWH,
+                default=d.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH),
+                description={"suggested_value": d.get(CONF_CAPACITY_KWH)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
+            vol.Required(
+                CONF_MAX_CHARGE_POWER_KW,
+                default=d.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW),
+                description={"suggested_value": d.get(CONF_MAX_CHARGE_POWER_KW)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
+            vol.Required(
+                CONF_MAX_DISCHARGE_POWER_KW,
+                default=d.get(
+                    CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
+                ),
+                description={"suggested_value": d.get(CONF_MAX_DISCHARGE_POWER_KW)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
+            vol.Required(
+                CONF_ROUND_TRIP_EFFICIENCY,
+                default=d.get(
+                    CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY
+                ),
+                description={"suggested_value": d.get(CONF_ROUND_TRIP_EFFICIENCY)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=1.0)),
+            vol.Required(
+                CONF_MIN_SOC_PERCENT,
+                default=d.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT),
+                description={"suggested_value": d.get(CONF_MIN_SOC_PERCENT)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+            vol.Required(
+                CONF_MAX_SOC_PERCENT,
+                default=d.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT),
+                description={"suggested_value": d.get(CONF_MAX_SOC_PERCENT)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=50.0, max=100.0)),
+            vol.Required(
+                CONF_BATTERY_SOC_SENSOR,
+                description={"suggested_value": d.get(CONF_BATTERY_SOC_SENSOR)},
+            ): selector(
+                {
+                    "entity": {
+                        "filter": [
+                            {"domain": "sensor", "device_class": "battery"},
+                            {"domain": "sensor", "device_class": "energy"},
+                            {"domain": "number"},
+                        ]
+                    }
+                }
+            ),
+            vol.Optional(
+                CONF_BATTERY_POWER_SENSOR,
+                description={"suggested_value": d.get(CONF_BATTERY_POWER_SENSOR)},
+            ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
+            vol.Optional(
+                CONF_PV_DC_EFFICIENCY,
+                default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
+                description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=1.0)),
+        }
+    )
+
+
+def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalise battery subentry user input."""
+    schema = _build_battery_subentry_schema()
+    validated = schema(user_input)
+    result = {
+        CONF_CAPACITY_KWH: float(validated[CONF_CAPACITY_KWH]),
+        CONF_MAX_CHARGE_POWER_KW: float(validated[CONF_MAX_CHARGE_POWER_KW]),
+        CONF_MAX_DISCHARGE_POWER_KW: float(validated[CONF_MAX_DISCHARGE_POWER_KW]),
+        CONF_ROUND_TRIP_EFFICIENCY: float(validated[CONF_ROUND_TRIP_EFFICIENCY]),
+        CONF_MIN_SOC_PERCENT: float(validated[CONF_MIN_SOC_PERCENT]),
+        CONF_MAX_SOC_PERCENT: float(validated[CONF_MAX_SOC_PERCENT]),
+        CONF_BATTERY_SOC_SENSOR: validated[CONF_BATTERY_SOC_SENSOR],
+        CONF_PV_DC_EFFICIENCY: float(
+            validated.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+        ),
+    }
+    if validated.get(CONF_BATTERY_POWER_SENSOR):
+        result[CONF_BATTERY_POWER_SENSOR] = validated[CONF_BATTERY_POWER_SENSOR]
+    return result
+
+
+def _battery_subentry_title(data: dict[str, Any]) -> str:
+    """Generate a display title for a battery subentry."""
+    kwh = data.get(CONF_CAPACITY_KWH, 0)
+    return f"{kwh} kWh"
 
 
 def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
@@ -88,44 +186,11 @@ def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Sch
 def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     """Build the main config form schema.
 
-    When ``defaults`` is provided (options flow), current values are pre-filled.
-    When ``defaults`` is None (initial config), sensible defaults are used.
+    Battery hardware specs and sensors (SoC, power) are configured per-battery
+    via battery subentries.  The main form only covers price/consumption sensors
+    and advanced scheduling settings.
     """
     d = defaults or {}
-
-    battery_schema = vol.Schema(
-        {
-            vol.Required(
-                CONF_CAPACITY_KWH,
-                default=d.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH),
-                description={"suggested_value": d.get(CONF_CAPACITY_KWH)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
-            vol.Required(
-                CONF_MAX_CHARGE_POWER_KW,
-                default=d.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW),
-                description={"suggested_value": d.get(CONF_MAX_CHARGE_POWER_KW)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
-            vol.Required(
-                CONF_MAX_DISCHARGE_POWER_KW,
-                default=d.get(
-                    CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
-                ),
-                description={"suggested_value": d.get(CONF_MAX_DISCHARGE_POWER_KW)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
-            vol.Required(
-                CONF_ROUND_TRIP_EFFICIENCY,
-                default=d.get(
-                    CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY
-                ),
-                description={"suggested_value": d.get(CONF_ROUND_TRIP_EFFICIENCY)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=1.0)),
-            vol.Optional(
-                CONF_PV_DC_EFFICIENCY,
-                default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
-                description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=1.0)),
-        }
-    )
 
     sensors_schema = vol.Schema(
         {
@@ -133,20 +198,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_PRICE_SENSOR,
                 description={"suggested_value": d.get(CONF_PRICE_SENSOR)},
             ): selector({"entity": {"domain": "sensor"}}),
-            vol.Required(
-                CONF_BATTERY_SOC_SENSOR,
-                description={"suggested_value": d.get(CONF_BATTERY_SOC_SENSOR)},
-            ): selector(
-                {
-                    "entity": {
-                        "filter": [
-                            {"domain": "sensor", "device_class": "battery"},
-                            {"domain": "sensor", "device_class": "energy"},
-                            {"domain": "number"},
-                        ]
-                    }
-                }
-            ),
         }
     )
 
@@ -164,10 +215,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_FEED_IN_PRICE_SENSOR,
                 description={"suggested_value": d.get(CONF_FEED_IN_PRICE_SENSOR)},
             ): selector({"entity": {"domain": "sensor"}}),
-            vol.Optional(
-                CONF_BATTERY_POWER_SENSOR,
-                description={"suggested_value": d.get(CONF_BATTERY_POWER_SENSOR)},
-            ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
             vol.Optional(
                 CONF_POWER_CONSUMPTION_SENSORS,
                 description={"suggested_value": d.get(CONF_POWER_CONSUMPTION_SENSORS)},
@@ -234,7 +281,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
     return vol.Schema(
         {
-            vol.Required("battery"): section(battery_schema, {"collapsed": False}),
             vol.Required("sensors"): section(sensors_schema, {"collapsed": False}),
             vol.Optional("optional_sensors"): section(
                 optional_sensors_schema, {"collapsed": True}
@@ -245,8 +291,11 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
 
 def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
-    """Flatten nested section data into a flat config dict."""
-    battery = user_input.get("battery", {})
+    """Flatten nested section data into a flat config dict.
+
+    Battery hardware specs and SoC/power sensors are now in battery subentries,
+    not in the main config.
+    """
     sensors = user_input.get("sensors", {})
     opt = user_input.get("optional_sensors", {})
     adv = user_input.get("advanced", {})
@@ -256,26 +305,10 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         return sect.get(key, user_input.get(key, default))
 
     return {
-        # Battery
-        CONF_CAPACITY_KWH: float(_g(battery, CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
-        CONF_MAX_CHARGE_POWER_KW: float(
-            _g(battery, CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
-        ),
-        CONF_MAX_DISCHARGE_POWER_KW: float(
-            _g(battery, CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
-        ),
-        CONF_ROUND_TRIP_EFFICIENCY: float(
-            _g(battery, CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
-        ),
-        CONF_PV_DC_EFFICIENCY: float(
-            _g(battery, CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
-        ),
         # Required sensors
         CONF_PRICE_SENSOR: _g(sensors, CONF_PRICE_SENSOR),
-        CONF_BATTERY_SOC_SENSOR: _g(sensors, CONF_BATTERY_SOC_SENSOR),
         # Optional sensors
         CONF_FEED_IN_PRICE_SENSOR: _g(opt, CONF_FEED_IN_PRICE_SENSOR),
-        CONF_BATTERY_POWER_SENSOR: _g(opt, CONF_BATTERY_POWER_SENSOR),
         CONF_POWER_CONSUMPTION_SENSORS: _g(opt, CONF_POWER_CONSUMPTION_SENSORS, []),
         CONF_POWER_PRODUCTION_SENSORS: _g(opt, CONF_POWER_PRODUCTION_SENSORS, []),
         CONF_ELECTRICITY_CONSUMPTION_SENSORS: _g(
@@ -306,6 +339,58 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
             _g(adv, CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S)
         ),
     }
+
+
+class BatteryControllerBatterySubentryFlow(config_entries.ConfigSubentryFlow):
+    """Flow for adding or editing a battery subentry."""
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle adding a new battery."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                data = _validate_battery_subentry(user_input)
+            except vol.Invalid:
+                errors["base"] = "invalid_battery_input"
+            else:
+                return self.async_create_entry(
+                    title=_battery_subentry_title(data),
+                    data=data,
+                )
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_build_battery_subentry_schema(),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle editing an existing battery."""
+        errors: dict[str, str] = {}
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        current_data = dict(subentry.data)
+
+        if user_input is not None:
+            try:
+                data = _validate_battery_subentry(user_input)
+            except vol.Invalid:
+                errors["base"] = "invalid_battery_input"
+            else:
+                return self.async_update_and_abort(
+                    entry,
+                    subentry,
+                    title=_battery_subentry_title(data),
+                    data=data,
+                )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_build_battery_subentry_schema(current_data),
+            errors=errors,
+        )
 
 
 class BatteryControllerPVSubentryFlow(config_entries.ConfigSubentryFlow):
@@ -380,7 +465,7 @@ def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle a config flow for Battery Controller."""
 
-    VERSION = 3
+    VERSION = 4
 
     @classmethod
     @callback
@@ -388,7 +473,10 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         cls, config_entry: config_entries.ConfigEntry
     ) -> dict[str, type[config_entries.ConfigSubentryFlow]]:
         """Return supported subentry types."""
-        return {PV_SUBENTRY_TYPE: BatteryControllerPVSubentryFlow}
+        return {
+            BATTERY_SUBENTRY_TYPE: BatteryControllerBatterySubentryFlow,
+            PV_SUBENTRY_TYPE: BatteryControllerPVSubentryFlow,
+        }
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -400,7 +488,7 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _extract_main_data(user_input)
-            if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
+            if not data.get(CONF_PRICE_SENSOR):
                 errors["base"] = "missing_required"
             else:
                 return self.async_create_entry(title="Battery Controller", data=data)
@@ -430,13 +518,11 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _extract_main_data(user_input)
-            if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
+            if not data.get(CONF_PRICE_SENSOR):
                 errors["base"] = "missing_required"
             else:
                 # Preserve number entity values managed outside the config flow
                 for key in (
-                    CONF_MIN_SOC_PERCENT,
-                    CONF_MAX_SOC_PERCENT,
                     CONF_DEGRADATION_COST_PER_KWH,
                     CONF_MIN_PRICE_SPREAD,
                     CONF_ZERO_GRID_DEADBAND_W,

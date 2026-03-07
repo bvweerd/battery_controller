@@ -20,7 +20,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from .battery_model import BatteryConfig, BatteryState
+from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     CONF_BATTERY_SOC_SENSOR,
@@ -353,8 +353,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.forecast_coordinator = forecast_coordinator
         self.config = config
 
-        # Battery configuration
-        self.battery_config = BatteryConfig.from_config(config)
+        # Battery subentries: list of (subentry_id, subentry_data_dict)
+        self._battery_subentries: list[tuple[str, dict[str, Any]]] = config.get(
+            "battery_subentries", []
+        )
+
+        # Build per-battery configs and aggregate for optimizer
+        self._individual_battery_configs: list[tuple[str, BatteryConfig]] = [
+            (sid, BatteryConfig.from_subentry(d)) for sid, d in self._battery_subentries
+        ]
+        self.battery_config = aggregate_battery_configs(
+            [cfg for _, cfg in self._individual_battery_configs]
+        )
+
+        # Per-battery state cache (updated by get_current_battery_state)
+        self._per_battery_states: dict[str, BatteryState] = {}
 
         # Zero-grid controller
         self.zero_grid_controller = create_zero_grid_controller(
@@ -369,12 +382,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_price: Any | None = None
         self._last_price: float | None = None
 
-        # Real-time sensors for zero_grid control
-        self._battery_power_sensor = config.get(CONF_BATTERY_POWER_SENSOR)
-        self._battery_soc_sensor = config.get(CONF_BATTERY_SOC_SENSOR)
+        # Real-time sensors for zero_grid control (grid power only; battery sensors in subentries)
         self._power_consumption_sensors = config.get(CONF_POWER_CONSUMPTION_SENSORS, [])
         self._power_production_sensors = config.get(CONF_POWER_PRODUCTION_SENSORS, [])
         self._unsub_realtime: Any | None = None
+
+        # First SoC sensor from any battery subentry (used for availability tracking)
+        self._battery_soc_sensor: str | None = (
+            self._battery_subentries[0][1].get(CONF_BATTERY_SOC_SENSOR)
+            if self._battery_subentries
+            else None
+        )
 
         # Last optimization result and effective mode (persists between real-time updates)
         self._last_result: OptimizationResult | None = None
@@ -632,12 +650,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if prev_target is not None and abs(new_target - prev_target) < 0.010:
             return  # Change < 10 W — skip recorder write
 
+        # Split setpoint across individual batteries
+        battery_setpoints = self._split_setpoint(control_action["target_power_kw"])
+
         # Update coordinator data with new control action (triggers sensor updates)
         self.async_set_updated_data(
             {
                 **self.data,
                 "control_action": control_action,
                 "battery_state": battery_state,
+                "per_battery_states": dict(self._per_battery_states),
+                "battery_setpoints": battery_setpoints,
                 "optimal_power_kw": control_action["target_power_kw"],
                 "optimal_mode": control_action["action_mode"],
             }
@@ -776,41 +799,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._unsub_realtime()
             self._unsub_realtime = None
 
-    def get_current_battery_state(self) -> BatteryState:
-        """Get current battery state from sensors."""
-        soc_sensor = self.config.get(CONF_BATTERY_SOC_SENSOR)
-        power_sensor = self.config.get(CONF_BATTERY_POWER_SENSOR)
+    def _read_battery_state(
+        self,
+        subentry_data: dict[str, Any],
+        battery_config: BatteryConfig,
+        fallback_soc_percent: float = 50.0,
+    ) -> BatteryState:
+        """Read state for one battery subentry."""
+        soc_sensor = subentry_data.get(CONF_BATTERY_SOC_SENSOR)
+        power_sensor = subentry_data.get(CONF_BATTERY_POWER_SENSOR)
 
-        # Determine a smarter default for soc_value: last known SoC, otherwise 50.0
-        smarter_soc_default = 50.0
-        if self.data and self.data.get("battery_state"):
-            smarter_soc_default = self.data["battery_state"].soc_percent
-        soc_value = get_sensor_value(self.hass, soc_sensor, smarter_soc_default)
+        soc_value = get_sensor_value(self.hass, soc_sensor, fallback_soc_percent)
         power_value = get_sensor_value(self.hass, power_sensor, 0.0)
 
-        # Determine if SoC is in percent or kWh
         if soc_sensor:
             state = self.hass.states.get(soc_sensor)
             if state and state.state not in ("unknown", "unavailable"):
                 unit = state.attributes.get("unit_of_measurement", "")
                 if unit == "kWh":
                     soc_kwh = soc_value
-                    soc_percent = (soc_kwh / self.battery_config.capacity_kwh) * 100
+                    soc_percent = (soc_kwh / battery_config.capacity_kwh) * 100
                 else:
                     soc_percent = soc_value
-                    soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
+                    soc_kwh = (soc_percent / 100) * battery_config.capacity_kwh
             else:
-                # Sensor unavailable/not yet loaded — use default
-                soc_percent = smarter_soc_default
-                soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
-                _LOGGER.debug(
-                    "SoC sensor unavailable, using fallback SoC=%.1f%%", soc_percent
-                )
+                soc_percent = fallback_soc_percent
+                soc_kwh = (soc_percent / 100) * battery_config.capacity_kwh
         else:
             soc_percent = soc_value
-            soc_kwh = (soc_percent / 100) * self.battery_config.capacity_kwh
+            soc_kwh = (soc_percent / 100) * battery_config.capacity_kwh
 
-        # Convert power to kW (check unit, default to W)
         power_kw = power_value
         if power_sensor:
             state = self.hass.states.get(power_sensor)
@@ -818,9 +836,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 unit = state.attributes.get("unit_of_measurement", "W")
                 if unit == "W":
                     power_kw = power_value / 1000
-                # else: already in kW
 
-        # Determine mode from power (in W for comparison)
         power_w = power_kw * 1000
         if power_w > 50:
             mode = "charging"
@@ -830,24 +846,128 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             mode = "idle"
 
         return BatteryState(
-            soc_kwh=soc_kwh,
-            soc_percent=soc_percent,
-            power_kw=power_kw,
+            soc_kwh=soc_kwh, soc_percent=soc_percent, power_kw=power_kw, mode=mode
+        )
+
+    def get_current_battery_state(self) -> BatteryState:
+        """Get combined battery state from all battery subentries.
+
+        Also caches per-battery states in self._per_battery_states for setpoint splitting.
+        """
+        if not self._individual_battery_configs:
+            # No battery subentries — return safe default
+            return BatteryState(
+                soc_kwh=0.0, soc_percent=50.0, power_kw=0.0, mode="idle"
+            )
+
+        per_battery: dict[str, BatteryState] = {}
+        total_soc_kwh = 0.0
+        total_power_kw = 0.0
+        total_capacity_kwh = 0.0
+
+        for (sid, battery_config), (_, subentry_data) in zip(
+            self._individual_battery_configs, self._battery_subentries
+        ):
+            # Use cached state as fallback SoC
+            cached = self._per_battery_states.get(sid)
+            fallback = cached.soc_percent if cached else 50.0
+
+            state = self._read_battery_state(subentry_data, battery_config, fallback)
+            per_battery[sid] = state
+            total_soc_kwh += state.soc_kwh
+            total_power_kw += state.power_kw
+            total_capacity_kwh += battery_config.capacity_kwh
+
+        self._per_battery_states = per_battery
+
+        combined_soc_percent = (
+            (total_soc_kwh / total_capacity_kwh) * 100.0
+            if total_capacity_kwh > 0
+            else 50.0
+        )
+        power_w = total_power_kw * 1000
+        if power_w > 50:
+            mode = "charging"
+        elif power_w < -50:
+            mode = "discharging"
+        else:
+            mode = "idle"
+
+        return BatteryState(
+            soc_kwh=total_soc_kwh,
+            soc_percent=combined_soc_percent,
+            power_kw=total_power_kw,
             mode=mode,
         )
 
-    def _refresh_battery_config(self) -> None:
-        """Re-read BatteryConfig from live entry options.
+    def _split_setpoint(self, total_kw: float) -> dict[str, float]:
+        """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
 
-        Called at the start of each optimization run so that min/max SoC
-        changes made via the number entities take effect without a reload.
+        Distributes proportionally to available headroom (charging) or available
+        energy (discharging).  Each battery is clamped to its individual power limit.
+        """
+        if not self._individual_battery_configs:
+            return {}
+
+        result: dict[str, float] = {}
+
+        if total_kw > 0:  # charging
+            headrooms = {
+                sid: max(0.0, cfg.max_soc_kwh - self._per_battery_states[sid].soc_kwh)
+                if sid in self._per_battery_states
+                else cfg.max_soc_kwh * 0.5
+                for sid, cfg in self._individual_battery_configs
+            }
+            total_headroom = sum(headrooms.values())
+            for sid, cfg in self._individual_battery_configs:
+                if total_headroom > 0:
+                    raw = total_kw * headrooms[sid] / total_headroom
+                else:
+                    raw = 0.0
+                result[sid] = min(raw, cfg.max_charge_power_kw)
+
+        elif total_kw < 0:  # discharging
+            availables = {
+                sid: max(0.0, self._per_battery_states[sid].soc_kwh - cfg.min_soc_kwh)
+                if sid in self._per_battery_states
+                else cfg.capacity_kwh * 0.4
+                for sid, cfg in self._individual_battery_configs
+            }
+            total_available = sum(availables.values())
+            for sid, cfg in self._individual_battery_configs:
+                if total_available > 0:
+                    raw = total_kw * availables[sid] / total_available
+                else:
+                    raw = 0.0
+                result[sid] = max(raw, -cfg.max_discharge_power_kw)
+
+        else:
+            result = {sid: 0.0 for sid, _ in self._individual_battery_configs}
+
+        return result
+
+    def _refresh_battery_config(self) -> None:
+        """Re-read BatteryConfigs from live battery subentry data.
+
+        Called at the start of each optimization run so that SoC limit changes
+        made in the subentry config flow take effect without a full reload.
         """
         entry_id = self.config.get("entry_id", "")
         entry = self.hass.config_entries.async_get_known_entry(entry_id)
         if entry is None:
             return
-        live_config = {**self.config, **entry.options}
-        self.battery_config = BatteryConfig.from_config(live_config)
+
+        self._individual_battery_configs = [
+            (sid, BatteryConfig.from_subentry(dict(s.data)))
+            for sid, s in (
+                (sid, entry.subentries[sid])
+                for sid, _ in self._battery_subentries
+                if sid in entry.subentries
+            )
+        ]
+        self.battery_config = aggregate_battery_configs(
+            [cfg for _, cfg in self._individual_battery_configs]
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Run battery optimization."""
@@ -1259,10 +1379,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._last_failure_reason = None
         self._last_success_time = dt_util.utcnow()
 
+        # Split combined setpoint across individual batteries
+        combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
+        battery_setpoints = self._split_setpoint(combined_setpoint_kw)
+
         return {
             "optimization_result": result,
             "battery_state": battery_state,
+            "per_battery_states": dict(self._per_battery_states),
             "control_action": control_action,
+            "battery_setpoints": battery_setpoints,
             "control_mode": self._control_mode,
             "optimal_power_kw": effective_power,
             "optimal_mode": effective_mode,

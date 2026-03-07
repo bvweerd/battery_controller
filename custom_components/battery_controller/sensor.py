@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .const import BATTERY_SUBENTRY_TYPE
 from .coordinator import ForecastCoordinator, OptimizationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,19 @@ async def async_setup_entry(
         # Diagnostics
         OptimizationStatusSensor(optimization_coordinator, device, entry),
     ]
+
+    # Per-battery setpoint sensors (one per battery subentry)
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == BATTERY_SUBENTRY_TYPE:
+            sensors.append(
+                BatterySubentrySetpointSensor(
+                    optimization_coordinator,
+                    device,
+                    entry,
+                    subentry.subentry_id,
+                    subentry.title,
+                )
+            )
 
     async_add_entities(sensors)
 
@@ -530,6 +544,53 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return {}
         return self.coordinator.data.get("control_action", {})
+
+
+class BatterySubentrySetpointSensor(BatteryControllerSensor):
+    """Per-battery setpoint sensor based on headroom-split of the combined setpoint.
+
+    Positive = discharge, Negative = charge (sensor convention).
+    """
+
+    _attr_native_unit_of_measurement = "W"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        battery_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"setpoint_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"Battery Setpoint {battery_title}"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        setpoints = self.coordinator.data.get("battery_setpoints", {})
+        kw = setpoints.get(self._subentry_id, 0.0)
+        # Invert sign: controller positive=charge → sensor positive=discharge
+        return round(-kw * 1000, 0) or 0.0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        per_states = self.coordinator.data.get("per_battery_states", {})
+        state = per_states.get(self._subentry_id)
+        if state is None:
+            return {}
+        return {
+            "soc_percent": round(state.soc_percent, 1),
+            "soc_kwh": round(state.soc_kwh, 3),
+            "power_kw": round(state.power_kw, 3),
+            "mode": state.mode,
+        }
 
 
 class BatteryControlModeSensor(BatteryControllerSensor):

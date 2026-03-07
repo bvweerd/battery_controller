@@ -52,6 +52,48 @@ class BatteryConfig:
         self.max_soc_kwh = self.capacity_kwh * self.max_soc_percent / 100.0
 
     @classmethod
+    def from_subentry(cls, data: dict[str, Any]) -> BatteryConfig:
+        """Create BatteryConfig from a battery subentry data dict."""
+        from .const import (
+            CONF_CAPACITY_KWH,
+            CONF_MAX_CHARGE_POWER_KW,
+            CONF_MAX_DISCHARGE_POWER_KW,
+            CONF_ROUND_TRIP_EFFICIENCY,
+            CONF_MIN_SOC_PERCENT,
+            CONF_MAX_SOC_PERCENT,
+            CONF_PV_DC_EFFICIENCY,
+            DEFAULT_CAPACITY_KWH,
+            DEFAULT_MAX_CHARGE_POWER_KW,
+            DEFAULT_MAX_DISCHARGE_POWER_KW,
+            DEFAULT_ROUND_TRIP_EFFICIENCY,
+            DEFAULT_MIN_SOC_PERCENT,
+            DEFAULT_MAX_SOC_PERCENT,
+            DEFAULT_PV_DC_EFFICIENCY,
+        )
+
+        return cls(
+            capacity_kwh=float(data.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
+            max_charge_power_kw=float(
+                data.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
+            ),
+            max_discharge_power_kw=float(
+                data.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
+            ),
+            round_trip_efficiency=float(
+                data.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
+            ),
+            min_soc_percent=float(
+                data.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
+            ),
+            max_soc_percent=float(
+                data.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
+            ),
+            pv_dc_efficiency=float(
+                data.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+            ),
+        )
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> BatteryConfig:
         """Create BatteryConfig from Home Assistant config dict."""
         from .const import (
@@ -102,6 +144,52 @@ class BatteryConfig:
                 config.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
             ),
         )
+
+
+def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
+    """Aggregate multiple BatteryConfigs into one combined config for the optimizer.
+
+    Capacity and power limits are summed.  RTE and SoC limits are
+    capacity-weighted averages so the aggregate SoC constraints (in kWh)
+    equal the sum of the individual ones.
+    """
+    if not configs:
+        return BatteryConfig()
+    if len(configs) == 1:
+        return configs[0]
+
+    total_cap = sum(c.capacity_kwh for c in configs)
+    # Capacity-weighted RTE
+    weighted_rte = (
+        sum(c.round_trip_efficiency * c.capacity_kwh for c in configs) / total_cap
+    )
+    # SoC limits: sum of kWh limits, expressed back as % of combined capacity
+    total_min_kwh = sum(c.min_soc_kwh for c in configs)
+    total_max_kwh = sum(c.max_soc_kwh for c in configs)
+    combined_min_pct = total_min_kwh / total_cap * 100.0
+    combined_max_pct = total_max_kwh / total_cap * 100.0
+    # DC PV: aggregate across all batteries
+    dc_configs = [c for c in configs if c.pv_dc_coupled]
+    pv_dc_coupled = bool(dc_configs)
+    pv_dc_peak = sum(c.pv_dc_peak_power_kwp for c in configs)
+    pv_dc_eff = (
+        sum(c.pv_dc_efficiency * c.pv_dc_peak_power_kwp for c in dc_configs)
+        / sum(c.pv_dc_peak_power_kwp for c in dc_configs)
+        if dc_configs and sum(c.pv_dc_peak_power_kwp for c in dc_configs) > 0
+        else 0.97
+    )
+
+    return BatteryConfig(
+        capacity_kwh=total_cap,
+        max_charge_power_kw=sum(c.max_charge_power_kw for c in configs),
+        max_discharge_power_kw=sum(c.max_discharge_power_kw for c in configs),
+        round_trip_efficiency=weighted_rte,
+        min_soc_percent=combined_min_pct,
+        max_soc_percent=combined_max_pct,
+        pv_dc_coupled=pv_dc_coupled,
+        pv_dc_peak_power_kwp=pv_dc_peak,
+        pv_dc_efficiency=pv_dc_eff,
+    )
 
 
 @dataclass

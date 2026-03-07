@@ -15,15 +15,30 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import (
+    BATTERY_SUBENTRY_TYPE,
+    CONF_BATTERY_POWER_SENSOR,
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_CAPACITY_KWH,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_KWH,
     CONF_MANUAL_POWER_SETPOINT_W,
+    CONF_MAX_CHARGE_POWER_KW,
+    CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MAX_SOC_PERCENT,
     CONF_MIN_SOC_PERCENT,
     CONF_MIN_PRICE_SPREAD,
     CONF_PV_DC_COUPLED,
+    CONF_PV_DC_EFFICIENCY,
     CONF_PV_DC_PEAK_POWER_KWP,
+    CONF_ROUND_TRIP_EFFICIENCY,
     CONF_ZERO_GRID_DEADBAND_W,
+    DEFAULT_CAPACITY_KWH,
+    DEFAULT_MAX_CHARGE_POWER_KW,
+    DEFAULT_MAX_DISCHARGE_POWER_KW,
+    DEFAULT_MIN_SOC_PERCENT,
+    DEFAULT_MAX_SOC_PERCENT,
+    DEFAULT_PV_DC_EFFICIENCY,
+    DEFAULT_ROUND_TRIP_EFFICIENCY,
     DOMAIN,
     PLATFORMS,
     PV_SUBENTRY_TYPE,
@@ -49,8 +64,6 @@ _MANIFEST: dict[str, Any] = json.loads(
 # the coordinators are re-initialised with the new structural configuration.
 _NO_RELOAD_KEYS = frozenset(
     {
-        CONF_MIN_SOC_PERCENT,
-        CONF_MAX_SOC_PERCENT,
         CONF_DEGRADATION_COST_PER_KWH,
         CONF_MIN_PRICE_SPREAD,
         CONF_ZERO_GRID_DEADBAND_W,
@@ -58,6 +71,20 @@ _NO_RELOAD_KEYS = frozenset(
         CONF_CONTROL_MODE,
     }
 )
+
+# Battery spec keys that live in main config for legacy entries (pre-v4).
+# Used only in migration.
+_BATTERY_SPEC_KEYS = {
+    CONF_CAPACITY_KWH,
+    CONF_MAX_CHARGE_POWER_KW,
+    CONF_MAX_DISCHARGE_POWER_KW,
+    CONF_ROUND_TRIP_EFFICIENCY,
+    CONF_MIN_SOC_PERCENT,
+    CONF_MAX_SOC_PERCENT,
+    CONF_PV_DC_EFFICIENCY,
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_BATTERY_POWER_SENSOR,
+}
 
 
 @dataclass
@@ -76,6 +103,63 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     _LOGGER.info(
         "Migrating Battery Controller entry from version %s", config_entry.version
     )
+
+    if config_entry.version == 3:
+        # v3 → v4: move battery specs + SoC/power sensors to a battery subentry.
+        # Read from data first, then options (options take precedence for runtime values).
+        merged = {**config_entry.data, **config_entry.options}
+
+        battery_data: dict[str, Any] = {
+            CONF_CAPACITY_KWH: float(
+                merged.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)
+            ),
+            CONF_MAX_CHARGE_POWER_KW: float(
+                merged.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
+            ),
+            CONF_MAX_DISCHARGE_POWER_KW: float(
+                merged.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
+            ),
+            CONF_ROUND_TRIP_EFFICIENCY: float(
+                merged.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
+            ),
+            CONF_MIN_SOC_PERCENT: float(
+                merged.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
+            ),
+            CONF_MAX_SOC_PERCENT: float(
+                merged.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
+            ),
+            CONF_PV_DC_EFFICIENCY: float(
+                merged.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+            ),
+        }
+        soc_sensor = merged.get(CONF_BATTERY_SOC_SENSOR)
+        if soc_sensor:
+            battery_data[CONF_BATTERY_SOC_SENSOR] = soc_sensor
+        power_sensor = merged.get(CONF_BATTERY_POWER_SENSOR)
+        if power_sensor:
+            battery_data[CONF_BATTERY_POWER_SENSOR] = power_sensor
+
+        cap = battery_data[CONF_CAPACITY_KWH]
+        battery_subentry = ConfigSubentry(
+            subentry_type=BATTERY_SUBENTRY_TYPE,
+            title=f"{cap} kWh",
+            data=MappingProxyType(battery_data),
+            unique_id=None,
+        )
+        hass.config_entries.async_add_subentry(config_entry, battery_subentry)
+
+        # Strip battery keys from main data and options
+        new_data = {
+            k: v for k, v in config_entry.data.items() if k not in _BATTERY_SPEC_KEYS
+        }
+        new_options = {
+            k: v for k, v in config_entry.options.items() if k not in _BATTERY_SPEC_KEYS
+        }
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, options=new_options, version=4
+        )
+        _LOGGER.info("Migration to v4 complete: battery subentry created (%s kWh)", cap)
+        return True
 
     if config_entry.version < 3:
         old_data = {**config_entry.data}
@@ -170,13 +254,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry by forwarding to sensor & number platforms."""
     _LOGGER.info("Setting up entry %s", entry.entry_id)
 
-    # Collect PV arrays from subentries and derive DC-coupling summary
+    # Collect subentries by type
     pv_arrays = [
         s.data for s in entry.subentries.values() if s.subentry_type == PV_SUBENTRY_TYPE
     ]
+    battery_subentries = [
+        (s.subentry_id, dict(s.data))
+        for s in entry.subentries.values()
+        if s.subentry_type == BATTERY_SUBENTRY_TYPE
+    ]
+
+    # Derive DC-coupling summary from PV arrays
     pv_dc_coupled = any(bool(a.get("dc_coupled")) for a in pv_arrays)
     pv_dc_total_kwp = sum(
         float(a.get("peak_power_kwp", 0)) for a in pv_arrays if a.get("dc_coupled")
+    )
+
+    # Derive combined battery limits for number entity ranges
+    combined_max_charge_kw = (
+        sum(
+            float(d.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW))
+            for _, d in battery_subentries
+        )
+        or DEFAULT_MAX_CHARGE_POWER_KW
+    )
+    combined_max_discharge_kw = (
+        sum(
+            float(d.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW))
+            for _, d in battery_subentries
+        )
+        or DEFAULT_MAX_DISCHARGE_POWER_KW
     )
 
     # Merge options and data for configuration; include entry_id for sensor lookups
@@ -185,8 +292,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         **entry.options,
         "entry_id": entry.entry_id,
         "pv_arrays": pv_arrays,
+        "battery_subentries": battery_subentries,
         CONF_PV_DC_COUPLED: pv_dc_coupled,
         CONF_PV_DC_PEAK_POWER_KWP: pv_dc_total_kwp,
+        CONF_MAX_CHARGE_POWER_KW: combined_max_charge_kw,
+        CONF_MAX_DISCHARGE_POWER_KW: combined_max_discharge_kw,
     }
 
     _LOGGER.debug("Initializing coordinators for entry %s", entry.entry_id)

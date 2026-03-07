@@ -38,8 +38,9 @@ CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
 CONF_MIN_SOC_PERCENT = "min_soc_percent"
 CONF_MAX_SOC_PERCENT = "max_soc_percent"
 
-# Subentry type for PV arrays
+# Subentry types
 PV_SUBENTRY_TYPE = "pv_array"
+BATTERY_SUBENTRY_TYPE = "battery"
 
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the

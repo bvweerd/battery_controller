@@ -3,30 +3,18 @@
     "step": {
       "user": {
         "title": "Battery Controller",
-        "description": "Configure your home battery for cost optimization. Battery and Sensors are required. Expand the other sections as needed. Add PV arrays via the integration page after setup.",
+        "description": "Configure your home battery for cost optimization. Add battery systems and PV arrays via the integration page after setup.",
         "sections": {
-          "battery": {
-            "name": "Battery Specifications",
-            "data": {
-              "capacity_kwh": "Capacity (kWh)",
-              "max_charge_power_kw": "Max charge power (kW)",
-              "max_discharge_power_kw": "Max discharge power (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)",
-              "pv_dc_efficiency": "DC coupling efficiency (0-1, for DC-coupled PV on battery inverter)"
-            }
-          },
           "sensors": {
             "name": "Required Sensors",
             "data": {
-              "price_sensor": "Electricity price sensor",
-              "battery_soc_sensor": "Battery SoC sensor"
+              "price_sensor": "Electricity price sensor"
             }
           },
           "optional_sensors": {
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "battery_power_sensor": "Battery power sensor (improves state detection)",
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
@@ -48,7 +36,7 @@
       }
     },
     "error": {
-      "missing_required": "Please configure required sensors (electricity price + battery SoC)."
+      "missing_required": "Please configure the electricity price sensor."
     },
     "abort": {
       "already_configured": "Battery Controller is already configured."
@@ -58,30 +46,18 @@
     "step": {
       "init": {
         "title": "Battery Controller",
-        "description": "Reconfigure your battery controller settings. Manage PV arrays via the integration page.",
+        "description": "Reconfigure your battery controller settings. Manage battery systems and PV arrays via the integration page.",
         "sections": {
-          "battery": {
-            "name": "Battery Specifications",
-            "data": {
-              "capacity_kwh": "Capacity (kWh)",
-              "max_charge_power_kw": "Max charge power (kW)",
-              "max_discharge_power_kw": "Max discharge power (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)",
-              "pv_dc_efficiency": "DC coupling efficiency (0-1, for DC-coupled PV on battery inverter)"
-            }
-          },
           "sensors": {
             "name": "Required Sensors",
             "data": {
-              "price_sensor": "Electricity price sensor",
-              "battery_soc_sensor": "Battery SoC sensor"
+              "price_sensor": "Electricity price sensor"
             }
           },
           "optional_sensors": {
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "battery_power_sensor": "Battery power sensor (improves state detection)",
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
@@ -103,10 +79,48 @@
       }
     },
     "error": {
-      "missing_required": "Please configure required sensors (electricity price + battery SoC)."
+      "missing_required": "Please configure the electricity price sensor."
     }
   },
   "config_subentries": {
+    "battery": {
+      "flow_title": "Battery",
+      "step": {
+        "user": {
+          "title": "Add Battery",
+          "description": "Configure a battery system. Battery SoC sensor is required. Power sensor improves real-time state detection.",
+          "data": {
+            "capacity_kwh": "Capacity (kWh)",
+            "max_charge_power_kw": "Max charge power (kW)",
+            "max_discharge_power_kw": "Max discharge power (kW)",
+            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Battery SoC sensor",
+            "battery_power_sensor": "Battery power sensor (optional)",
+            "pv_dc_efficiency": "DC coupling efficiency (0–1, for DC-coupled PV on this inverter)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit Battery",
+          "description": "Update the configuration for this battery.",
+          "data": {
+            "capacity_kwh": "Capacity (kWh)",
+            "max_charge_power_kw": "Max charge power (kW)",
+            "max_discharge_power_kw": "Max discharge power (kW)",
+            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Battery SoC sensor",
+            "battery_power_sensor": "Battery power sensor (optional)",
+            "pv_dc_efficiency": "DC coupling efficiency (0–1)"
+          }
+        }
+      },
+      "error": {
+        "invalid_battery_input": "Invalid battery configuration. Check capacity, power limits, and efficiency values."
+      }
+    },
     "pv_array": {
       "flow_title": "PV Array",
       "step": {
@@ -194,12 +208,6 @@
       }
     },
     "number": {
-      "min_soc_percent": {
-        "name": "Minimum SoC"
-      },
-      "max_soc_percent": {
-        "name": "Maximum SoC"
-      },
       "degradation_cost": {
         "name": "Degradation Cost"
       },
