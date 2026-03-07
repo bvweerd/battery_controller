@@ -12,15 +12,13 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-
 from homeassistant.core import HomeAssistant
-
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
-from .coordinator import OptimizationCoordinator
 from homeassistant.util import dt as dt_util
+
+from .coordinator import ForecastCoordinator, OptimizationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,9 +33,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller sensors from a config entry."""
     data = entry.runtime_data
-    optimization_coordinator = data["optimization_coordinator"]
-    forecast_coordinator = data["forecast_coordinator"]
-    device = data["device"]
+    optimization_coordinator = data.optimization_coordinator
+    forecast_coordinator = data.forecast_coordinator
+    device = data.device
 
     sensors: list[SensorEntity] = [
         # Optimization output sensors
@@ -47,7 +45,7 @@ async def async_setup_entry(
         # Battery state sensors
         BatterySoCSensor(optimization_coordinator, device, entry),
         BatteryPowerSensor(optimization_coordinator, device, entry),
-        # Forecast sensors
+        # Forecast sensors (use ForecastCoordinator)
         PVForecastSensor(forecast_coordinator, device, entry),
         ConsumptionForecastSensor(forecast_coordinator, device, entry),
         NetGridForecastSensor(forecast_coordinator, device, entry),
@@ -69,7 +67,7 @@ async def async_setup_entry(
 
 
 class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], SensorEntity):
-    """Base class for Battery Controller sensors."""
+    """Base class for Battery Controller sensors backed by OptimizationCoordinator."""
 
     _attr_has_entity_name = True
     coordinator: OptimizationCoordinator
@@ -85,7 +83,6 @@ class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], Sensor
         super().__init__(coordinator)
         self._attr_device_info = device
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._entry_id = entry.entry_id
         self._key = key
 
     def _get_optimization_result(self):
@@ -93,6 +90,26 @@ class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], Sensor
         if self.coordinator and self.coordinator.data:
             return self.coordinator.data.get("optimization_result")
         return None
+
+
+class BatteryForecastSensor(CoordinatorEntity[ForecastCoordinator], SensorEntity):
+    """Base class for Battery Controller sensors backed by ForecastCoordinator."""
+
+    _attr_has_entity_name = True
+    coordinator: ForecastCoordinator
+
+    def __init__(
+        self,
+        coordinator: ForecastCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        key: str,
+    ):
+        """Initialize the forecast sensor."""
+        super().__init__(coordinator)
+        self._attr_device_info = device
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._key = key
 
 
 class BatteryOptimalPowerSensor(BatteryControllerSensor):
@@ -151,6 +168,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
 
     _attr_translation_key = "schedule"
     _attr_name = "Schedule"
+    # Large list attributes (96-step schedules); disable by default to reduce
+    # recorder load. Users who need these can enable them explicitly.
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "schedule")
@@ -239,7 +259,7 @@ class BatteryPowerSensor(BatteryControllerSensor):
         return None
 
 
-class PVForecastSensor(BatteryControllerSensor):
+class PVForecastSensor(BatteryForecastSensor):
     """Sensor for PV production forecast."""
 
     _attr_translation_key = "pv_forecast"
@@ -273,7 +293,7 @@ class PVForecastSensor(BatteryControllerSensor):
         return attrs
 
 
-class ConsumptionForecastSensor(BatteryControllerSensor):
+class ConsumptionForecastSensor(BatteryForecastSensor):
     """Sensor for consumption forecast."""
 
     _attr_translation_key = "consumption_forecast"
@@ -298,7 +318,7 @@ class ConsumptionForecastSensor(BatteryControllerSensor):
         return {"forecast_kw": self.coordinator.data.get("consumption_forecast_kw", [])}
 
 
-class NetGridForecastSensor(BatteryControllerSensor):
+class NetGridForecastSensor(BatteryForecastSensor):
     """Sensor for net grid power forecast (without battery = consumption - PV)."""
 
     _attr_translation_key = "net_grid_forecast"
@@ -323,6 +343,46 @@ class NetGridForecastSensor(BatteryControllerSensor):
         return {"forecast_kw": self.coordinator.data.get("net_load_forecast_kw", [])}
 
 
+class SolarIrradianceSensor(BatteryForecastSensor):
+    """Sensor for solar irradiance (GHI) — logged to recorder for price model training."""
+
+    _attr_translation_key = "ghi"
+    _attr_name = "Solar Irradiance"
+    _attr_native_unit_of_measurement = "W/m²"
+    _attr_device_class = SensorDeviceClass.IRRADIANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "ghi")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("current_ghi_wm2")
+
+
+class WindSpeedSensor(BatteryForecastSensor):
+    """Sensor for wind speed — logged to recorder for price model training."""
+
+    _attr_translation_key = "wind_speed_ms"
+    _attr_name = "Wind Speed"
+    _attr_native_unit_of_measurement = "m/s"
+    _attr_device_class = SensorDeviceClass.WIND_SPEED
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device, entry):
+        super().__init__(coordinator, device, entry, "wind_speed_ms")
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("current_wind_speed_ms")
+
+
 class BatteryDailySavingsSensor(BatteryControllerSensor):
     """Sensor for daily savings from battery optimization."""
 
@@ -330,7 +390,8 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
+    # MEASUREMENT: value resets each optimizer run; not a cumulative total.
+    _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "daily_savings")
@@ -381,12 +442,7 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return {}
         shadow_price = self.coordinator.data.get("shadow_price_eur_kwh", 0.0)
-        # Compute discharge and charge thresholds from battery config
-        rte = (
-            self.coordinator.battery_config.round_trip_efficiency
-            if hasattr(self.coordinator, "battery_config")
-            else 0.9
-        )
+        rte = self.coordinator.battery_config.round_trip_efficiency
         sqrt_rte_val = rte**0.5
         return {
             "shadow_price_eur_kwh": shadow_price,
@@ -465,7 +521,7 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
         action = self.coordinator.data.get("control_action", {})
         # Invert sign: controller uses (positive=charge, negative=discharge)
         # but sensor convention is (positive=discharge, negative=charge)
-        # Use abs(0.0) → 0.0 to avoid -0.0 display
+        # Use `or 0.0` to avoid -0.0 display
         value = -action.get("target_power_w", 0.0)
         return round(value, 0) or 0.0
 
@@ -558,43 +614,3 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             }
         )
         return attrs
-
-
-class SolarIrradianceSensor(BatteryControllerSensor):
-    """Sensor for solar irradiance (GHI) — logged to recorder for price model training."""
-
-    _attr_translation_key = "ghi"
-    _attr_name = "Solar Irradiance"
-    _attr_native_unit_of_measurement = "W/m²"
-    _attr_device_class = SensorDeviceClass.IRRADIANCE
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, device, entry):
-        super().__init__(coordinator, device, entry, "ghi")
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("current_ghi_wm2")
-
-
-class WindSpeedSensor(BatteryControllerSensor):
-    """Sensor for wind speed — logged to recorder for price model training."""
-
-    _attr_translation_key = "wind_speed_ms"
-    _attr_name = "Wind Speed"
-    _attr_native_unit_of_measurement = "m/s"
-    _attr_device_class = SensorDeviceClass.WIND_SPEED
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, device, entry):
-        super().__init__(coordinator, device, entry, "wind_speed_ms")
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("current_wind_speed_ms")

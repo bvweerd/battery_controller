@@ -9,10 +9,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_CONTROL_MODE,
     CONTROL_MODES,
 )
+from .coordinator import OptimizationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,8 +29,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller select entities from a config entry."""
     data = entry.runtime_data
-    device = data["device"]
-    optimization_coordinator = data["optimization_coordinator"]
+    device = data.device
+    optimization_coordinator = data.optimization_coordinator
 
     entities = [
         BatteryControlModeSelect(hass, entry, device, optimization_coordinator),
@@ -36,7 +39,9 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class BatteryControlModeSelect(SelectEntity):
+class BatteryControlModeSelect(
+    CoordinatorEntity[OptimizationCoordinator], SelectEntity
+):
     """Select entity for battery control mode."""
 
     _attr_has_entity_name = True
@@ -50,19 +55,19 @@ class BatteryControlModeSelect(SelectEntity):
         hass: HomeAssistant,
         entry: ConfigEntry,
         device: DeviceInfo,
-        optimization_coordinator,
+        optimization_coordinator: OptimizationCoordinator,
     ):
         """Initialize the select entity."""
+        super().__init__(optimization_coordinator)
         self.hass = hass
         self._entry = entry
         self._attr_device_info = device
         self._attr_unique_id = f"{entry.entry_id}_control_mode"
-        self._optimization_coordinator = optimization_coordinator
 
     @property
     def current_option(self) -> str:
         """Return the current control mode."""
-        return self._optimization_coordinator.control_mode
+        return self.coordinator.control_mode
 
     async def async_select_option(self, option: str) -> None:
         """Set the control mode."""
@@ -71,18 +76,14 @@ class BatteryControlModeSelect(SelectEntity):
             return
 
         _LOGGER.info("Setting control mode to: %s", option)
-        self._optimization_coordinator.control_mode = option
+        self.coordinator.control_mode = option
 
-        # Persist control mode to config entry
-        from .const import CONF_CONTROL_MODE
-
-        new_data = {
-            **self._entry.data,
-            **self._entry.options,
-            CONF_CONTROL_MODE: option,
-        }
-        self.hass.config_entries.async_update_entry(self._entry, options=new_data)
+        # Persist control mode to config entry options only
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            options={**self._entry.options, CONF_CONTROL_MODE: option},
+        )
 
         # Trigger re-optimization with new mode
-        await self._optimization_coordinator.async_request_refresh()
+        await self.coordinator.async_request_refresh()
         self.async_write_ha_state()

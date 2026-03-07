@@ -34,8 +34,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller binary sensors from a config entry."""
     data = entry.runtime_data
-    optimization_coordinator = data["optimization_coordinator"]
-    device = data["device"]
+    optimization_coordinator = data.optimization_coordinator
+    device = data.device
 
     async_add_entities(
         [

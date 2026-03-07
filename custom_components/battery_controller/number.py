@@ -13,11 +13,17 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_DEGRADATION_COST_PER_KWH,
+    CONF_MANUAL_POWER_SETPOINT_W,
+    CONF_MAX_CHARGE_POWER_KW,
+    CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MIN_PRICE_SPREAD,
     CONF_MIN_SOC_PERCENT,
     CONF_MAX_SOC_PERCENT,
     CONF_ZERO_GRID_DEADBAND_W,
     DEFAULT_DEGRADATION_COST_PER_KWH,
+    DEFAULT_MANUAL_POWER_SETPOINT_W,
+    DEFAULT_MAX_CHARGE_POWER_KW,
+    DEFAULT_MAX_DISCHARGE_POWER_KW,
     DEFAULT_MIN_PRICE_SPREAD,
     DEFAULT_MIN_SOC_PERCENT,
     DEFAULT_MAX_SOC_PERCENT,
@@ -37,8 +43,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller number entities from a config entry."""
     data = entry.runtime_data
-    config = data["config"]
-    device = data["device"]
+    config = data.config
+    device = data.device
 
     entities = [
         BatteryMinSoCNumber(hass, entry, device, config),
@@ -46,6 +52,7 @@ async def async_setup_entry(
         DegradationCostNumber(hass, entry, device, config),
         MinPriceSpreadNumber(hass, entry, device, config),
         ZeroGridDeadbandNumber(hass, entry, device, config),
+        ManualPowerSetpointNumber(hass, entry, device, config),
     ]
 
     async_add_entities(entities)
@@ -200,4 +207,48 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._set_runtime_value(CONF_ZERO_GRID_DEADBAND_W, value)
+        self.async_write_ha_state()
+
+
+class ManualPowerSetpointNumber(BatteryControllerNumber):
+    """Number entity for the manual battery power setpoint.
+
+    Active only in 'manual' control mode. Positive = discharge, negative = charge.
+    Matches the sensor convention: the battery setpoint sensor mirrors this value.
+    SoC limits and power limits are still respected.
+    """
+
+    _attr_translation_key = "manual_power_setpoint"
+    _attr_name = "Manual Power Setpoint"
+    _attr_native_step = 100.0
+    _attr_native_unit_of_measurement = "W"
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, hass, entry, device, config):
+        super().__init__(hass, entry, device, config, "manual_power_setpoint")
+
+    @property
+    def native_min_value(self) -> float:
+        max_charge_kw = float(
+            self._config.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
+        )
+        return -max_charge_kw * 1000
+
+    @property
+    def native_max_value(self) -> float:
+        max_discharge_kw = float(
+            self._config.get(
+                CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
+            )
+        )
+        return max_discharge_kw * 1000
+
+    @property
+    def native_value(self) -> float:
+        return self._get_runtime_value(
+            CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
+        )
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_runtime_value(CONF_MANUAL_POWER_SETPOINT_W, value)
         self.async_write_ha_state()

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
+from urllib.parse import urlencode
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
@@ -30,31 +31,20 @@ from .const import (
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_FIXED_FEED_IN_PRICE,
+    CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MIN_PRICE_SPREAD,
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
-    CONF_PV_DC_COUPLED,
-    CONF_PV_DC_PEAK_POWER_KWP,
-    CONF_PV_EFFICIENCY_FACTOR,
-    CONF_PV_EXTRA_ARRAYS,
-    CONF_PV_ORIENTATION,
-    CONF_PV_PEAK_POWER_KWP,
-    CONF_PV_TILT,
     CONF_TIME_STEP_MINUTES,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DEGRADATION_COST_PER_KWH,
     DEFAULT_FIXED_FEED_IN_PRICE,
+    DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-    DEFAULT_PV_DC_COUPLED,
-    DEFAULT_PV_DC_PEAK_POWER_KWP,
-    DEFAULT_PV_EFFICIENCY_FACTOR,
-    DEFAULT_PV_ORIENTATION,
-    DEFAULT_PV_PEAK_POWER_KWP,
-    DEFAULT_PV_TILT,
     DEFAULT_TIME_STEP_MINUTES,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
@@ -101,11 +91,16 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             "Fetching weather data for %.4f, %.4f", self.latitude, self.longitude
         )
 
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={self.latitude}&longitude={self.longitude}"
-            "&hourly=temperature_2m,shortwave_radiation,wind_speed_10m"
-            "&wind_speed_unit=ms&current_weather=true&timezone=UTC&forecast_days=2"
+        url = "https://api.open-meteo.com/v1/forecast?" + urlencode(
+            {
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+                "hourly": "temperature_2m,shortwave_radiation,wind_speed_10m",
+                "wind_speed_unit": "ms",
+                "current_weather": "true",
+                "timezone": "UTC",
+                "forecast_days": "2",
+            }
         )
 
         try:
@@ -163,6 +158,12 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
 
         return result
 
+    async def async_shutdown(self) -> None:
+        """Cancel the periodic update timer."""
+        # DataUpdateCoordinator does not expose a public shutdown; unsubscribe
+        # our own listeners and let the GC clean up the rest.
+        pass
+
 
 class ForecastCoordinator(DataUpdateCoordinator):
     """Coordinator for PV and consumption forecasts."""
@@ -183,67 +184,41 @@ class ForecastCoordinator(DataUpdateCoordinator):
         self.weather_coordinator = weather_coordinator
         self.config = config
 
-        # Initialize forecast models - AC PV arrays
-        efficiency = float(
-            config.get(CONF_PV_EFFICIENCY_FACTOR, DEFAULT_PV_EFFICIENCY_FACTOR)
-        )
-
-        # Primary AC PV array
-        self.pv_model = PVForecastModel(
-            peak_power_kwp=float(
-                config.get(CONF_PV_PEAK_POWER_KWP, DEFAULT_PV_PEAK_POWER_KWP)
-            ),
-            orientation_deg=float(
-                config.get(CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION)
-            ),
-            tilt_deg=float(config.get(CONF_PV_TILT, DEFAULT_PV_TILT)),
-            efficiency_factor=efficiency,
-        )
-
-        # Additional PV arrays from dynamic list (AC and DC-coupled)
-        self.pv_extra_models: list[PVForecastModel] = []
-        self.pv_extra_dc_models: list[PVForecastModel] = []
-        for arr in config.get(CONF_PV_EXTRA_ARRAYS, []):
+        # Build AC and DC PV forecast models from subentry data.
+        # config["pv_arrays"] is a list of subentry data dicts injected by async_setup_entry.
+        self.pv_ac_models: list[PVForecastModel] = []
+        self.pv_dc_models: list[PVForecastModel] = []
+        for arr in config.get("pv_arrays", []):
             kwp = float(arr.get("peak_power_kwp", 0))
             if kwp <= 0:
                 continue
-            orientation = float(arr.get("orientation", 180))
-            tilt = float(arr.get("tilt", 35))
+            orientation = float(arr.get("orientation", 180.0))
+            tilt = float(arr.get("tilt", 35.0))
+            efficiency_factor = float(arr.get("efficiency_factor", 0.85))
             dc_coupled = bool(arr.get("dc_coupled", False))
             if dc_coupled:
-                self.pv_extra_dc_models.append(
+                # DC PV: raw panel output; DC coupling efficiency handled by battery model
+                self.pv_dc_models.append(
                     PVForecastModel(
                         peak_power_kwp=kwp,
                         orientation_deg=orientation,
                         tilt_deg=tilt,
-                        # DC PV uses raw panel efficiency (no inverter loss)
                         efficiency_factor=1.0,
                     )
                 )
             else:
-                self.pv_extra_models.append(
+                self.pv_ac_models.append(
                     PVForecastModel(
                         peak_power_kwp=kwp,
                         orientation_deg=orientation,
                         tilt_deg=tilt,
-                        efficiency_factor=efficiency,
+                        efficiency_factor=efficiency_factor,
                     )
                 )
 
-        # DC-coupled PV model for primary array (panels on battery inverter)
-        # Uses same orientation/tilt as primary but different peak power and efficiency
-        self.pv_dc_coupled = bool(config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED))
-        self.pv_dc_model = PVForecastModel(
-            peak_power_kwp=float(
-                config.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
-            ),
-            orientation_deg=float(
-                config.get(CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION)
-            ),
-            tilt_deg=float(config.get(CONF_PV_TILT, DEFAULT_PV_TILT)),
-            # DC PV uses raw panel efficiency (no inverter loss on PV side)
-            # The DC coupling efficiency is handled in the battery model
-            efficiency_factor=1.0,
+        # Dummy zero-power PV model for NetLoadForecast (consumption only)
+        _dummy_pv = PVForecastModel(
+            peak_power_kwp=0.0, orientation_deg=180, tilt_deg=35, efficiency_factor=1.0
         )
 
         self.consumption_model = ConsumptionForecastModel(
@@ -257,7 +232,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         )
 
         self.net_load_model = NetLoadForecast(
-            pv_model=self.pv_model,
+            pv_model=_dummy_pv,
             consumption_model=self.consumption_model,
         )
 
@@ -294,34 +269,25 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     hours_elapsed,
                 )
 
-        # Generate AC PV and consumption forecasts (primary array)
-        pv_forecast, consumption_forecast, net_load_forecast = (
-            self.net_load_model.forecast(radiation_forecast)
-        )
+        # Consumption forecast via net_load_model (dummy PV so result = pure consumption)
+        _, consumption_forecast, _ = self.net_load_model.forecast(radiation_forecast)
+        n = len(consumption_forecast)
 
-        # Add production from extra PV arrays
-        for extra_model in self.pv_extra_models:
-            extra_forecast = extra_model.forecast_from_radiation(radiation_forecast)
-            for i in range(min(len(pv_forecast), len(extra_forecast))):
-                pv_forecast[i] += extra_forecast[i]
-                net_load_forecast[i] -= extra_forecast[i]
+        # Sum AC PV forecast across all AC subentry models
+        pv_forecast = [0.0] * n
+        for model in self.pv_ac_models:
+            extra = model.forecast_from_radiation(radiation_forecast)
+            for i in range(min(n, len(extra))):
+                pv_forecast[i] += extra[i]
 
-        # Generate DC-coupled PV forecast (primary DC + extra DC arrays)
-        pv_dc_forecast = [0.0] * len(pv_forecast)
-        current_dc_pv = 0.0
-        has_dc = self.pv_dc_coupled and self.pv_dc_model.peak_power_kwp > 0
-        if has_dc:
-            pv_dc_forecast = self.pv_dc_model.forecast_from_radiation(
-                radiation_forecast
-            )
-            while len(pv_dc_forecast) < len(pv_forecast):
-                pv_dc_forecast.append(0.0)
+        net_load_forecast = [consumption_forecast[i] - pv_forecast[i] for i in range(n)]
 
-        # Add production from extra DC-coupled arrays
-        for dc_model in self.pv_extra_dc_models:
-            has_dc = True
+        # Sum DC PV forecast across all DC subentry models
+        has_dc = bool(self.pv_dc_models)
+        pv_dc_forecast = [0.0] * n
+        for dc_model in self.pv_dc_models:
             extra_dc = dc_model.forecast_from_radiation(radiation_forecast)
-            for i in range(min(len(pv_dc_forecast), len(extra_dc))):
+            for i in range(min(n, len(extra_dc))):
                 pv_dc_forecast[i] += extra_dc[i]
 
         # Derive current values from forecast (first element = current hour)
@@ -437,6 +403,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # is trivial to re-enable without manual intervention.
         self._optimization_enabled: bool = True
 
+        # Guard against concurrent optimizer runs (e.g. price change + timer overlap).
+        self._optimization_running: bool = False
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -540,7 +509,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._power_consumption_sensors + self._power_production_sensors,
             )
 
-    async def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
+    @callback
+    def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle price sensor state changes.
 
         Triggers optimization when:
@@ -571,7 +541,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 new_price,
             )
             self._last_price = new_price
-            await self.async_request_refresh()
+            self.hass.async_create_task(self.async_request_refresh())
         elif self._last_price is not None and self._last_price != 0:
             change_pct = abs(new_price - self._last_price) / abs(self._last_price)
             if change_pct >= 0.10:
@@ -579,7 +549,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     "Significant price change: %.2f%%, triggering optimization",
                     change_pct * 100,
                 )
-                await self.async_request_refresh()
+                self.hass.async_create_task(self.async_request_refresh())
             self._last_price = new_price
 
     async def _handle_optimization_interval(self, now: datetime) -> None:
@@ -593,7 +563,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Optimization interval timer fired at %s", now)
         await self.async_request_refresh()
 
-    async def _handle_soc_available(self, event: Event[EventStateChangedData]) -> None:
+    @callback
+    def _handle_soc_available(self, event: Event[EventStateChangedData]) -> None:
         """Trigger refresh when SoC sensor transitions from unavailable to available."""
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
@@ -610,7 +581,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "SoC sensor '%s' became available, triggering optimization",
                 self._battery_soc_sensor,
             )
-            await self.async_request_refresh()
+            self.hass.async_create_task(self.async_request_refresh())
 
     async def _handle_realtime_update(self, now: datetime) -> None:
         """Periodic real-time update for zero_grid control.
@@ -635,14 +606,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._effective_mode, current_grid_w
         )
 
+        # In manual mode read the setpoint fresh so user changes take effect immediately
+        dp_schedule_w = (
+            self._get_manual_setpoint_w()
+            if self._effective_mode == "manual"
+            else self._dp_schedule_w
+        )
+
         # Recalculate zero_grid setpoint with actual sensor data
         control_action = self.zero_grid_controller.get_control_action(
             current_grid_w=current_grid_w,
             current_soc_kwh=battery_state.soc_kwh,
             current_battery_w=battery_state.power_kw * 1000,
-            dp_schedule_w=self._dp_schedule_w,
+            dp_schedule_w=dp_schedule_w,
             mode=controller_mode,
         )
+
+        # Only push an update if something material changed (avoids flooding recorder)
+        prev_target = (
+            self.data.get("control_action", {}).get("target_power_kw")
+            if self.data
+            else None
+        )
+        new_target = control_action["target_power_kw"]
+        if prev_target is not None and abs(new_target - prev_target) < 0.010:
+            return  # Change < 10 W — skip recorder write
 
         # Update coordinator data with new control action (triggers sensor updates)
         self.async_set_updated_data(
@@ -654,6 +642,28 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "optimal_mode": control_action["action_mode"],
             }
         )
+
+    def _get_manual_setpoint_w(self) -> float:
+        """Read the live manual power setpoint from entry options.
+
+        Reads from the live config entry so changes made via the number entity
+        take effect immediately without waiting for the next optimizer run.
+
+        The number entity uses the sensor convention (positive = discharge, negative =
+        charge). We negate here to match the internal controller convention
+        (positive = charge, negative = discharge).
+        """
+        entry_id = self.config.get("entry_id", "")
+        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        if entry is None:
+            return DEFAULT_MANUAL_POWER_SETPOINT_W
+        stored = float(
+            entry.options.get(
+                CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
+            )
+        )
+        # Negate: user enters positive=discharge, controller expects positive=charge
+        return -stored
 
     def _resolve_controller_mode(
         self, effective_mode: str, current_grid_w: float
@@ -826,9 +836,32 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             mode=mode,
         )
 
+    def _refresh_battery_config(self) -> None:
+        """Re-read BatteryConfig from live entry options.
+
+        Called at the start of each optimization run so that min/max SoC
+        changes made via the number entities take effect without a reload.
+        """
+        entry_id = self.config.get("entry_id", "")
+        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        if entry is None:
+            return
+        live_config = {**self.config, **entry.options}
+        self.battery_config = BatteryConfig.from_config(live_config)
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Run battery optimization."""
         _LOGGER.debug("OptimizationCoordinator: _async_update_data started.")
+
+        # Guard against concurrent optimizer runs (timer + price-change overlap)
+        if self._optimization_running:
+            _LOGGER.debug(
+                "OptimizationCoordinator: previous run still in progress, skipping."
+            )
+            if self.data is not None:
+                return self.data
+            raise UpdateFailed("Optimization already in progress")
+
         # When disabled via switch, skip re-running the optimizer but keep the
         # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
         if not self._optimization_enabled:
@@ -837,6 +870,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             if self.data is not None:
                 return self.data
+
+        self._optimization_running = True
+        try:
+            return await self._run_optimization()
+        finally:
+            self._optimization_running = False
+
+    async def _run_optimization(self) -> dict[str, Any]:
+        """Inner optimization logic (called only when not already running)."""
+        # Re-read SoC limits and other hardware parameters from live options
+        self._refresh_battery_config()
 
         # First run before any data exists: fall through to normal path so we
         # get valid initial data even when starting in the disabled state.
@@ -880,8 +924,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             sensor_ok,
         )
 
-        if sensor_ok:
-            assert price_state is not None
+        if sensor_ok and price_state is not None:
             price_forecast, price_interval = extract_price_forecast_with_interval(
                 price_state
             )
@@ -959,17 +1002,26 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             feed_in_forecast = [fixed_price] * len(price_forecast)
 
-        # Get optimization parameters
+        # Get optimization parameters — read runtime-tunable values from live options
         time_step = int(
             self.config.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES)
         )
+        entry_id = self.config.get("entry_id", "")
+        live_entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        live_options = live_entry.options if live_entry is not None else {}
         degradation_cost = float(
-            self.config.get(
-                CONF_DEGRADATION_COST_PER_KWH, DEFAULT_DEGRADATION_COST_PER_KWH
+            live_options.get(
+                CONF_DEGRADATION_COST_PER_KWH,
+                self.config.get(
+                    CONF_DEGRADATION_COST_PER_KWH, DEFAULT_DEGRADATION_COST_PER_KWH
+                ),
             )
         )
         min_spread = float(
-            self.config.get(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD)
+            live_options.get(
+                CONF_MIN_PRICE_SPREAD,
+                self.config.get(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD),
+            )
         )
 
         # Resample all forecasts to time step resolution
@@ -1094,8 +1146,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_mode = "zero_grid"
             effective_power = 0.0
         elif self._control_mode == MODE_MANUAL:
+            manual_w = self._get_manual_setpoint_w()
             effective_mode = "manual"
-            effective_power = 0.0
+            effective_power = manual_w / 1000  # kW for output sensors
+            dp_schedule_w = manual_w
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
             if result.optimal_mode == "idle":

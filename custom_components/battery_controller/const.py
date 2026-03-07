@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from homeassistant.const import Platform
+
 # Domain of the integration
 DOMAIN = "battery_controller"
-DOMAIN_ABBREVIATION = "BC"
 
 # Supported platforms for this integration
-PLATFORMS = ["sensor", "number", "select", "switch", "binary_sensor"]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SWITCH,
+    Platform.BINARY_SENSOR,
+]
 
 # Control modes
 MODE_ZERO_GRID = "zero_grid"
@@ -31,15 +38,8 @@ CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
 CONF_MIN_SOC_PERCENT = "min_soc_percent"
 CONF_MAX_SOC_PERCENT = "max_soc_percent"
 
-# Configuration keys - PV system (array 1)
-CONF_PV_PEAK_POWER_KWP = "pv_peak_power_kwp"
-CONF_PV_ORIENTATION = "pv_orientation"
-CONF_PV_TILT = "pv_tilt"
-CONF_PV_EFFICIENCY_FACTOR = "pv_efficiency_factor"
-
-# Configuration keys - Extra PV arrays (dynamic list of dicts)
-# Each dict has: peak_power_kwp, orientation, tilt
-CONF_PV_EXTRA_ARRAYS = "pv_extra_arrays"
+# Subentry type for PV arrays
+PV_SUBENTRY_TYPE = "pv_array"
 
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
@@ -67,6 +67,9 @@ CONF_OPTIMIZATION_INTERVAL_MINUTES = "optimization_interval_minutes"
 CONF_DEGRADATION_COST_PER_KWH = "degradation_cost_per_kwh"
 CONF_MIN_PRICE_SPREAD = "min_price_spread"
 
+# Configuration keys - Manual control
+CONF_MANUAL_POWER_SETPOINT_W = "manual_power_setpoint_w"
+
 # Configuration keys - Zero grid control
 CONF_ZERO_GRID_ENABLED = "zero_grid_enabled"
 CONF_ZERO_GRID_DEADBAND_W = "zero_grid_deadband_w"
@@ -87,13 +90,6 @@ DEFAULT_ROUND_TRIP_EFFICIENCY = 0.90
 DEFAULT_MIN_SOC_PERCENT = 10.0
 DEFAULT_MAX_SOC_PERCENT = 90.0
 
-# Default values - PV system (array 1)
-DEFAULT_PV_PEAK_POWER_KWP = 0.0
-DEFAULT_PV_ORIENTATION = 180  # South
-DEFAULT_PV_TILT = 35  # Typical for Netherlands
-DEFAULT_PV_EFFICIENCY_FACTOR = 0.85
-
-
 # Default values - DC-coupled PV
 DEFAULT_PV_DC_COUPLED = False
 DEFAULT_PV_DC_PEAK_POWER_KWP = 0.0
@@ -106,6 +102,9 @@ DEFAULT_TIME_STEP_MINUTES = 15
 DEFAULT_OPTIMIZATION_INTERVAL_MINUTES = 15
 DEFAULT_DEGRADATION_COST_PER_KWH = 0.03  # EUR/kWh throughput
 DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
+
+# Default values - Manual control
+DEFAULT_MANUAL_POWER_SETPOINT_W = 0.0
 
 # Default values - Zero grid control
 DEFAULT_ZERO_GRID_ENABLED = True

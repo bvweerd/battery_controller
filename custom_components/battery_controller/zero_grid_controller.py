@@ -70,8 +70,11 @@ class ZeroGridController:
             return self._calculate_idle(current_grid_w, current_soc_kwh)
         elif mode == "follow_schedule":
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
+        elif mode == "manual":
+            # Manual mode: follow user-supplied setpoint with SoC/power limits
+            return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
         else:
-            # Manual mode - return 0 (no automatic control)
+            # Unknown mode - safe fallback: no battery action
             return 0.0
 
     def _calculate_zero_grid(

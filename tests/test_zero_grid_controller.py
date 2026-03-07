@@ -135,7 +135,7 @@ class TestFollowScheduleMode:
 
 
 class TestUnknownMode:
-    """Unknown mode falls through to manual (returns 0)."""
+    """Unknown mode is a safe fallback (returns 0)."""
 
     def test_unknown_mode_returns_zero(self, controller):
         target = controller.calculate_battery_setpoint(
@@ -194,14 +194,39 @@ class TestIdleMode:
 class TestManualMode:
     """Tests for manual control mode."""
 
-    def test_manual_returns_zero(self, controller):
+    def test_manual_charge_setpoint(self, controller):
+        """Manual charge setpoint (negative from user = positive internal = charge)."""
+        # coordinator._get_manual_setpoint_w() negates user value before passing here
+        # so dp_schedule_w=3000 means "charge at 3000W" internally
         target = controller.calculate_battery_setpoint(
-            current_grid_w=5000,
+            current_grid_w=0,
             current_soc_kwh=5.0,
-            dp_schedule_w=3000,
+            dp_schedule_w=3000,  # internal: positive = charge
             mode="manual",
         )
-        assert target == 0.0
+        assert target == 3000.0
+
+    def test_manual_discharge_setpoint(self, controller):
+        """Manual discharge setpoint (positive from user = negative internal = discharge)."""
+        # coordinator._get_manual_setpoint_w() negates user value before passing here
+        # so dp_schedule_w=-2000 means "discharge at 2000W" internally
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=-2000,  # internal: negative = discharge
+            mode="manual",
+        )
+        assert target == -2000.0
+
+    def test_manual_respects_soc_limits(self, controller):
+        """Manual mode still respects SoC limits."""
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=0,
+            current_soc_kwh=1.0,  # At min SoC (10% of 10 kWh)
+            dp_schedule_w=-3000,  # internal: discharge → blocked
+            mode="manual",
+        )
+        assert target == 0.0  # Blocked by SoC limit
 
 
 class TestDeadband:

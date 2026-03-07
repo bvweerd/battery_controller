@@ -5,20 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant import config_entries
-
-try:
-    from homeassistant.config_entries import ConfigFlowResult
-except ImportError:
-    ConfigFlowResult = dict[str, Any]  # type: ignore
-
+from homeassistant.config_entries import ConfigFlowResult, SubentryFlowResult
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.selector import selector
 import voluptuous as vol
-
-try:
-    from homeassistant.data_entry_flow import section
-except ImportError:
-    section = None  # type: ignore[assignment,misc]
 
 from .const import (
     CONF_BATTERY_POWER_SENSOR,
@@ -39,14 +30,7 @@ from .const import (
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
-    CONF_PV_DC_COUPLED,
     CONF_PV_DC_EFFICIENCY,
-    CONF_PV_DC_PEAK_POWER_KWP,
-    CONF_PV_EFFICIENCY_FACTOR,
-    CONF_PV_EXTRA_ARRAYS,
-    CONF_PV_ORIENTATION,
-    CONF_PV_PEAK_POWER_KWP,
-    CONF_PV_TILT,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_TIME_STEP_MINUTES,
     CONF_ZERO_GRID_DEADBAND_W,
@@ -57,23 +41,52 @@ from .const import (
     DEFAULT_MAX_CHARGE_POWER_KW,
     DEFAULT_MAX_DISCHARGE_POWER_KW,
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-    DEFAULT_PV_DC_COUPLED,
     DEFAULT_PV_DC_EFFICIENCY,
-    DEFAULT_PV_DC_PEAK_POWER_KWP,
-    DEFAULT_PV_EFFICIENCY_FACTOR,
-    DEFAULT_PV_ORIENTATION,
-    DEFAULT_PV_PEAK_POWER_KWP,
-    DEFAULT_PV_TILT,
     DEFAULT_ROUND_TRIP_EFFICIENCY,
     DEFAULT_TIME_STEP_MINUTES,
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
+    PV_SUBENTRY_TYPE,
 )
 
 
+def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Build schema for a single PV array subentry (add or edit)."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Required(
+                "peak_power_kwp",
+                default=d.get("peak_power_kwp", 1.0),
+                description={"suggested_value": d.get("peak_power_kwp")},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.01)),
+            vol.Required(
+                "orientation",
+                default=d.get("orientation", 180.0),
+                description={"suggested_value": d.get("orientation")},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=360)),
+            vol.Required(
+                "tilt",
+                default=d.get("tilt", 35.0),
+                description={"suggested_value": d.get("tilt")},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=90)),
+            vol.Optional(
+                "efficiency_factor",
+                default=d.get("efficiency_factor", 0.85),
+                description={"suggested_value": d.get("efficiency_factor")},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=1.0)),
+            vol.Optional(
+                "dc_coupled",
+                default=d.get("dc_coupled", False),
+                description={"suggested_value": d.get("dc_coupled")},
+            ): bool,
+        }
+    )
+
+
 def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
-    """Build the main config form schema (without extra PV arrays).
+    """Build the main config form schema.
 
     When ``defaults`` is provided (options flow), current values are pre-filled.
     When ``defaults`` is None (initial config), sensible defaults are used.
@@ -86,26 +99,31 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_CAPACITY_KWH,
                 default=d.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH),
                 description={"suggested_value": d.get(CONF_CAPACITY_KWH)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
             vol.Required(
                 CONF_MAX_CHARGE_POWER_KW,
                 default=d.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW),
                 description={"suggested_value": d.get(CONF_MAX_CHARGE_POWER_KW)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
             vol.Required(
                 CONF_MAX_DISCHARGE_POWER_KW,
                 default=d.get(
                     CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
                 ),
                 description={"suggested_value": d.get(CONF_MAX_DISCHARGE_POWER_KW)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
             vol.Required(
                 CONF_ROUND_TRIP_EFFICIENCY,
                 default=d.get(
                     CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY
                 ),
                 description={"suggested_value": d.get(CONF_ROUND_TRIP_EFFICIENCY)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=1.0)),
+            vol.Optional(
+                CONF_PV_DC_EFFICIENCY,
+                default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
+                description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=1.0)),
         }
     )
 
@@ -129,46 +147,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     }
                 }
             ),
-        }
-    )
-
-    pv_schema = vol.Schema(
-        {
-            vol.Optional(
-                CONF_PV_PEAK_POWER_KWP,
-                default=d.get(CONF_PV_PEAK_POWER_KWP, DEFAULT_PV_PEAK_POWER_KWP),
-                description={"suggested_value": d.get(CONF_PV_PEAK_POWER_KWP)},
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_PV_ORIENTATION,
-                default=d.get(CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION),
-                description={"suggested_value": d.get(CONF_PV_ORIENTATION)},
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_PV_TILT,
-                default=d.get(CONF_PV_TILT, DEFAULT_PV_TILT),
-                description={"suggested_value": d.get(CONF_PV_TILT)},
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_PV_EFFICIENCY_FACTOR,
-                default=d.get(CONF_PV_EFFICIENCY_FACTOR, DEFAULT_PV_EFFICIENCY_FACTOR),
-                description={"suggested_value": d.get(CONF_PV_EFFICIENCY_FACTOR)},
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_PV_DC_COUPLED,
-                default=d.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED),
-                description={"suggested_value": d.get(CONF_PV_DC_COUPLED)},
-            ): bool,
-            vol.Optional(
-                CONF_PV_DC_PEAK_POWER_KWP,
-                default=d.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP),
-                description={"suggested_value": d.get(CONF_PV_DC_PEAK_POWER_KWP)},
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_PV_DC_EFFICIENCY,
-                default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
-                description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
-            ): vol.Coerce(float),
         }
     )
 
@@ -223,7 +201,7 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_TIME_STEP_MINUTES,
                 default=d.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES),
                 description={"suggested_value": d.get(CONF_TIME_STEP_MINUTES)},
-            ): vol.Coerce(int),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
             vol.Optional(
                 CONF_OPTIMIZATION_INTERVAL_MINUTES,
                 default=d.get(
@@ -233,7 +211,7 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 description={
                     "suggested_value": d.get(CONF_OPTIMIZATION_INTERVAL_MINUTES)
                 },
-            ): vol.Coerce(int),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
             vol.Optional(
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),
@@ -250,69 +228,26 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
                 ),
                 description={"suggested_value": d.get(CONF_ZERO_GRID_RESPONSE_TIME_S)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=300.0)),
         }
     )
 
-    if section is not None:
-        fields: dict[Any, Any] = {
+    return vol.Schema(
+        {
             vol.Required("battery"): section(battery_schema, {"collapsed": False}),
             vol.Required("sensors"): section(sensors_schema, {"collapsed": False}),
-            vol.Optional("pv"): section(pv_schema, {"collapsed": True}),
             vol.Optional("optional_sensors"): section(
                 optional_sensors_schema, {"collapsed": True}
             ),
             vol.Optional("advanced"): section(advanced_schema, {"collapsed": True}),
         }
-    else:
-        # Fallback for older HA: flatten all fields into one form
-        fields = {}
-        for sub in [
-            battery_schema,
-            sensors_schema,
-            pv_schema,
-            optional_sensors_schema,
-            advanced_schema,
-        ]:
-            fields.update(sub.schema)
-
-    return vol.Schema(fields)
-
-
-def _build_pv_array_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
-    """Build schema for adding/editing a single extra PV array."""
-    d = defaults or {}
-    return vol.Schema(
-        {
-            vol.Required(
-                "peak_power_kwp",
-                default=d.get("peak_power_kwp", 0.0),
-                description={"suggested_value": d.get("peak_power_kwp")},
-            ): vol.Coerce(float),
-            vol.Required(
-                "orientation",
-                default=d.get("orientation", 180),
-                description={"suggested_value": d.get("orientation")},
-            ): vol.Coerce(float),
-            vol.Required(
-                "tilt",
-                default=d.get("tilt", 35),
-                description={"suggested_value": d.get("tilt")},
-            ): vol.Coerce(float),
-            vol.Optional(
-                "dc_coupled",
-                default=d.get("dc_coupled", False),
-                description={"suggested_value": d.get("dc_coupled")},
-            ): bool,
-        }
     )
 
 
 def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
-    """Flatten nested section data into a flat config dict (without extra PV arrays)."""
+    """Flatten nested section data into a flat config dict."""
     battery = user_input.get("battery", {})
     sensors = user_input.get("sensors", {})
-    pv = user_input.get("pv", {})
     opt = user_input.get("optional_sensors", {})
     adv = user_input.get("advanced", {})
 
@@ -332,21 +267,8 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_ROUND_TRIP_EFFICIENCY: float(
             _g(battery, CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
         ),
-        # PV (primary)
-        CONF_PV_PEAK_POWER_KWP: float(
-            _g(pv, CONF_PV_PEAK_POWER_KWP, DEFAULT_PV_PEAK_POWER_KWP)
-        ),
-        CONF_PV_ORIENTATION: float(_g(pv, CONF_PV_ORIENTATION, DEFAULT_PV_ORIENTATION)),
-        CONF_PV_TILT: float(_g(pv, CONF_PV_TILT, DEFAULT_PV_TILT)),
-        CONF_PV_EFFICIENCY_FACTOR: float(
-            _g(pv, CONF_PV_EFFICIENCY_FACTOR, DEFAULT_PV_EFFICIENCY_FACTOR)
-        ),
-        CONF_PV_DC_COUPLED: bool(_g(pv, CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)),
-        CONF_PV_DC_PEAK_POWER_KWP: float(
-            _g(pv, CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
-        ),
         CONF_PV_DC_EFFICIENCY: float(
-            _g(pv, CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+            _g(battery, CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
         ),
         # Required sensors
         CONF_PRICE_SENSOR: _g(sensors, CONF_PRICE_SENSOR),
@@ -386,30 +308,94 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pv_array_description(arr: dict[str, Any], index: int) -> str:
-    """Build a human-readable description for a PV array."""
-    kwp = arr.get("peak_power_kwp", 0)
-    orient = arr.get("orientation", 180)
-    return f"PV Array {index} ({kwp} kWp, {orient}°)"
+class BatteryControllerPVSubentryFlow(config_entries.ConfigSubentryFlow):
+    """Flow for adding or editing a PV array subentry."""
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle adding a new PV array."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                data = _validate_pv_subentry(user_input)
+            except vol.Invalid:
+                errors["base"] = "invalid_pv_input"
+            else:
+                kwp = data["peak_power_kwp"]
+                coupling = "DC" if data["dc_coupled"] else "AC"
+                return self.async_create_entry(
+                    title=f"{kwp} kWp {coupling}",
+                    data=data,
+                )
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_build_pv_subentry_schema(),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle editing an existing PV array."""
+        errors: dict[str, str] = {}
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        current_data = dict(subentry.data)
+
+        if user_input is not None:
+            try:
+                data = _validate_pv_subentry(user_input)
+            except vol.Invalid:
+                errors["base"] = "invalid_pv_input"
+            else:
+                kwp = data["peak_power_kwp"]
+                coupling = "DC" if data["dc_coupled"] else "AC"
+                return self.async_update_and_abort(
+                    entry,
+                    subentry,
+                    title=f"{kwp} kWp {coupling}",
+                    data=data,
+                )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_build_pv_subentry_schema(current_data),
+            errors=errors,
+        )
+
+
+def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalise PV subentry user input."""
+    schema = _build_pv_subentry_schema()
+    validated = schema(user_input)
+    return {
+        "peak_power_kwp": float(validated["peak_power_kwp"]),
+        "orientation": float(validated["orientation"]),
+        "tilt": float(validated["tilt"]),
+        "efficiency_factor": float(validated.get("efficiency_factor", 0.85)),
+        "dc_coupled": bool(validated.get("dc_coupled", False)),
+    }
 
 
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle a config flow for Battery Controller."""
 
-    VERSION = 2
+    VERSION = 3
 
-    def __init__(self) -> None:
-        """Initialize config flow."""
-        self._data: dict[str, Any] = {}
-        self._pv_extra_arrays: list[dict[str, Any]] = []
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: config_entries.ConfigEntry
+    ) -> dict[str, type[config_entries.ConfigSubentryFlow]]:
+        """Return supported subentry types."""
+        return {PV_SUBENTRY_TYPE: BatteryControllerPVSubentryFlow}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle the initial setup - main form with sections."""
+        """Handle the initial setup."""
         await self.async_set_unique_id(DOMAIN)
-        if self._async_current_entries():
-            return self.async_abort(reason="already_configured")
+        self._abort_if_unique_id_configured()
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -417,69 +403,13 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                self._data = data
-                self._pv_extra_arrays = []
-                return await self.async_step_pv_menu()
+                return self.async_create_entry(title="Battery Controller", data=data)
 
         return self.async_show_form(
             step_id="user",
             data_schema=_build_main_schema(),
             errors=errors,
         )
-
-    async def async_step_pv_menu(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show menu to add extra PV arrays or finish."""
-        menu_options = ["add_pv_array", "finish_setup"]
-        if self._pv_extra_arrays:
-            menu_options.insert(1, "remove_pv_array")
-
-        return self.async_show_menu(
-            step_id="pv_menu",
-            menu_options=menu_options,
-            description_placeholders={
-                "pv_count": str(len(self._pv_extra_arrays)),
-            },
-        )
-
-    async def async_step_add_pv_array(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Add an extra PV array."""
-        if user_input is not None:
-            self._pv_extra_arrays.append(
-                {
-                    "peak_power_kwp": float(user_input["peak_power_kwp"]),
-                    "orientation": float(user_input["orientation"]),
-                    "tilt": float(user_input["tilt"]),
-                    "dc_coupled": bool(user_input.get("dc_coupled", False)),
-                }
-            )
-            return await self.async_step_pv_menu()
-
-        return self.async_show_form(
-            step_id="add_pv_array",
-            data_schema=_build_pv_array_schema(),
-            description_placeholders={
-                "array_number": str(len(self._pv_extra_arrays) + 2),
-            },
-        )
-
-    async def async_step_remove_pv_array(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Remove the last extra PV array."""
-        if self._pv_extra_arrays:
-            self._pv_extra_arrays.pop()
-        return await self.async_step_pv_menu()
-
-    async def async_step_finish_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Finish the config flow and create the entry."""
-        self._data[CONF_PV_EXTRA_ARRAYS] = self._pv_extra_arrays
-        return self.async_create_entry(title="Battery Controller", data=self._data)
 
     @staticmethod
     @callback
@@ -493,26 +423,27 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
 class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Battery Controller."""
 
-    def __init__(self) -> None:
-        """Initialize options flow."""
-        self._data: dict[str, Any] = {}
-        self._pv_extra_arrays: list[dict[str, Any]] = []
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle reconfiguration - main form with sections."""
+        """Handle reconfiguration."""
         errors: dict[str, str] = {}
         if user_input is not None:
             data = _extract_main_data(user_input)
             if not data.get(CONF_PRICE_SENSOR) or not data.get(CONF_BATTERY_SOC_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                self._data = data
-                # Preserve existing extra arrays for editing
-                existing = {**self.config_entry.data, **self.config_entry.options}
-                self._pv_extra_arrays = list(existing.get(CONF_PV_EXTRA_ARRAYS, []))
-                return await self.async_step_pv_menu()
+                # Preserve number entity values managed outside the config flow
+                for key in (
+                    CONF_MIN_SOC_PERCENT,
+                    CONF_MAX_SOC_PERCENT,
+                    CONF_DEGRADATION_COST_PER_KWH,
+                    CONF_MIN_PRICE_SPREAD,
+                    CONF_ZERO_GRID_DEADBAND_W,
+                ):
+                    if key in self.config_entry.options:
+                        data.setdefault(key, self.config_entry.options[key])
+                return self.async_create_entry(title="", data=data)
 
         # Build defaults from existing config
         defaults: dict[str, Any] = {}
@@ -526,67 +457,3 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=_build_main_schema(defaults),
             errors=errors,
         )
-
-    async def async_step_pv_menu(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show menu to manage extra PV arrays."""
-        menu_options = ["add_pv_array", "finish_setup"]
-        if self._pv_extra_arrays:
-            menu_options.insert(1, "remove_pv_array")
-
-        return self.async_show_menu(
-            step_id="pv_menu",
-            menu_options=menu_options,
-            description_placeholders={
-                "pv_count": str(len(self._pv_extra_arrays)),
-            },
-        )
-
-    async def async_step_add_pv_array(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Add an extra PV array."""
-        if user_input is not None:
-            self._pv_extra_arrays.append(
-                {
-                    "peak_power_kwp": float(user_input["peak_power_kwp"]),
-                    "orientation": float(user_input["orientation"]),
-                    "tilt": float(user_input["tilt"]),
-                    "dc_coupled": bool(user_input.get("dc_coupled", False)),
-                }
-            )
-            return await self.async_step_pv_menu()
-
-        return self.async_show_form(
-            step_id="add_pv_array",
-            data_schema=_build_pv_array_schema(),
-            description_placeholders={
-                "array_number": str(len(self._pv_extra_arrays) + 2),
-            },
-        )
-
-    async def async_step_remove_pv_array(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Remove the last extra PV array."""
-        if self._pv_extra_arrays:
-            self._pv_extra_arrays.pop()
-        return await self.async_step_pv_menu()
-
-    async def async_step_finish_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Finish the options flow."""
-        self._data[CONF_PV_EXTRA_ARRAYS] = self._pv_extra_arrays
-        # Preserve number entity values managed outside the config flow
-        for key in (
-            CONF_MIN_SOC_PERCENT,
-            CONF_MAX_SOC_PERCENT,
-            CONF_DEGRADATION_COST_PER_KWH,
-            CONF_MIN_PRICE_SPREAD,
-            CONF_ZERO_GRID_DEADBAND_W,
-        ):
-            if key in self.config_entry.options:
-                self._data.setdefault(key, self.config_entry.options[key])
-        return self.async_create_entry(title="", data=self._data)
