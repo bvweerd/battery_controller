@@ -6,39 +6,26 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry, ConfigSubentry
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
-    CONF_BATTERY_POWER_SENSOR,
-    CONF_BATTERY_SOC_SENSOR,
-    CONF_CAPACITY_KWH,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_KWH,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
-    CONF_MAX_SOC_PERCENT,
-    CONF_MIN_SOC_PERCENT,
     CONF_MIN_PRICE_SPREAD,
     CONF_PV_DC_COUPLED,
-    CONF_PV_DC_EFFICIENCY,
     CONF_PV_DC_PEAK_POWER_KWP,
-    CONF_ROUND_TRIP_EFFICIENCY,
     CONF_ZERO_GRID_DEADBAND_W,
-    DEFAULT_CAPACITY_KWH,
     DEFAULT_MAX_CHARGE_POWER_KW,
     DEFAULT_MAX_DISCHARGE_POWER_KW,
-    DEFAULT_MIN_SOC_PERCENT,
-    DEFAULT_MAX_SOC_PERCENT,
-    DEFAULT_PV_DC_EFFICIENCY,
-    DEFAULT_ROUND_TRIP_EFFICIENCY,
     DOMAIN,
     PLATFORMS,
     PV_SUBENTRY_TYPE,
@@ -72,20 +59,6 @@ _NO_RELOAD_KEYS = frozenset(
     }
 )
 
-# Battery spec keys that live in main config for legacy entries (pre-v4).
-# Used only in migration.
-_BATTERY_SPEC_KEYS = {
-    CONF_CAPACITY_KWH,
-    CONF_MAX_CHARGE_POWER_KW,
-    CONF_MAX_DISCHARGE_POWER_KW,
-    CONF_ROUND_TRIP_EFFICIENCY,
-    CONF_MIN_SOC_PERCENT,
-    CONF_MAX_SOC_PERCENT,
-    CONF_PV_DC_EFFICIENCY,
-    CONF_BATTERY_SOC_SENSOR,
-    CONF_BATTERY_POWER_SENSOR,
-}
-
 
 @dataclass
 class BatteryControllerData:
@@ -96,158 +69,6 @@ class BatteryControllerData:
     optimization_coordinator: OptimizationCoordinator
     config: dict[str, Any]
     device: DeviceInfo
-
-
-async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
-    """Migrate old config entry versions."""
-    _LOGGER.info(
-        "Migrating Battery Controller entry from version %s", config_entry.version
-    )
-
-    if config_entry.version == 3:
-        # v3 → v4: move battery specs + SoC/power sensors to a battery subentry.
-        # Read from data first, then options (options take precedence for runtime values).
-        merged = {**config_entry.data, **config_entry.options}
-
-        battery_data: dict[str, Any] = {
-            CONF_CAPACITY_KWH: float(
-                merged.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)
-            ),
-            CONF_MAX_CHARGE_POWER_KW: float(
-                merged.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
-            ),
-            CONF_MAX_DISCHARGE_POWER_KW: float(
-                merged.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
-            ),
-            CONF_ROUND_TRIP_EFFICIENCY: float(
-                merged.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
-            ),
-            CONF_MIN_SOC_PERCENT: float(
-                merged.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
-            ),
-            CONF_MAX_SOC_PERCENT: float(
-                merged.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
-            ),
-            CONF_PV_DC_EFFICIENCY: float(
-                merged.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
-            ),
-        }
-        soc_sensor = merged.get(CONF_BATTERY_SOC_SENSOR)
-        if soc_sensor:
-            battery_data[CONF_BATTERY_SOC_SENSOR] = soc_sensor
-        power_sensor = merged.get(CONF_BATTERY_POWER_SENSOR)
-        if power_sensor:
-            battery_data[CONF_BATTERY_POWER_SENSOR] = power_sensor
-
-        cap = battery_data[CONF_CAPACITY_KWH]
-        battery_subentry = ConfigSubentry(
-            subentry_type=BATTERY_SUBENTRY_TYPE,
-            title=f"{cap} kWh",
-            data=MappingProxyType(battery_data),
-            unique_id=None,
-        )
-        hass.config_entries.async_add_subentry(config_entry, battery_subentry)
-
-        # Strip battery keys from main data and options
-        new_data = {
-            k: v for k, v in config_entry.data.items() if k not in _BATTERY_SPEC_KEYS
-        }
-        new_options = {
-            k: v for k, v in config_entry.options.items() if k not in _BATTERY_SPEC_KEYS
-        }
-        hass.config_entries.async_update_entry(
-            config_entry, data=new_data, options=new_options, version=4
-        )
-        _LOGGER.info("Migration to v4 complete: battery subentry created (%s kWh)", cap)
-        return True
-
-    if config_entry.version < 3:
-        old_data = {**config_entry.data}
-        pv_arrays_to_create: list[tuple[str, dict]] = []
-
-        # Primary AC array (if configured)
-        kwp = float(old_data.get("pv_peak_power_kwp", 0.0))
-        if kwp > 0:
-            pv_arrays_to_create.append(
-                (
-                    f"{kwp} kWp AC",
-                    {
-                        "peak_power_kwp": kwp,
-                        "orientation": float(old_data.get("pv_orientation", 180.0)),
-                        "tilt": float(old_data.get("pv_tilt", 35.0)),
-                        "efficiency_factor": float(
-                            old_data.get("pv_efficiency_factor", 0.85)
-                        ),
-                        "dc_coupled": False,
-                    },
-                )
-            )
-
-        # Primary DC-coupled array (if configured separately)
-        dc_kwp = float(old_data.get("pv_dc_peak_power_kwp", 0.0))
-        if old_data.get("pv_dc_coupled") and dc_kwp > 0:
-            pv_arrays_to_create.append(
-                (
-                    f"{dc_kwp} kWp DC",
-                    {
-                        "peak_power_kwp": dc_kwp,
-                        "orientation": float(old_data.get("pv_orientation", 180.0)),
-                        "tilt": float(old_data.get("pv_tilt", 35.0)),
-                        "efficiency_factor": float(
-                            old_data.get("pv_dc_efficiency", 0.97)
-                        ),
-                        "dc_coupled": True,
-                    },
-                )
-            )
-
-        # Extra arrays from old pv_extra_arrays list
-        for arr in old_data.get("pv_extra_arrays", []):
-            arr_kwp = float(arr.get("peak_power_kwp", 0.0))
-            if arr_kwp <= 0:
-                continue
-            dc = bool(arr.get("dc_coupled", False))
-            coupling = "DC" if dc else "AC"
-            pv_arrays_to_create.append(
-                (
-                    f"{arr_kwp} kWp {coupling}",
-                    {
-                        "peak_power_kwp": arr_kwp,
-                        "orientation": float(arr.get("orientation", 180.0)),
-                        "tilt": float(arr.get("tilt", 35.0)),
-                        "efficiency_factor": float(arr.get("efficiency_factor", 0.85)),
-                        "dc_coupled": dc,
-                    },
-                )
-            )
-
-        for title, data in pv_arrays_to_create:
-            subentry = ConfigSubentry(
-                subentry_type=PV_SUBENTRY_TYPE,
-                title=title,
-                data=MappingProxyType(data),
-                unique_id=None,
-            )
-            hass.config_entries.async_add_subentry(config_entry, subentry)
-
-        # Strip PV-specific fields from main config; keep pv_dc_efficiency
-        pv_keys_to_remove = {
-            "pv_peak_power_kwp",
-            "pv_orientation",
-            "pv_tilt",
-            "pv_efficiency_factor",
-            "pv_dc_coupled",
-            "pv_dc_peak_power_kwp",
-            "pv_extra_arrays",
-        }
-        new_data = {k: v for k, v in old_data.items() if k not in pv_keys_to_remove}
-        hass.config_entries.async_update_entry(config_entry, data=new_data, version=3)
-        _LOGGER.info(
-            "Migration to v3 complete: %d PV subentries created",
-            len(pv_arrays_to_create),
-        )
-
-    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

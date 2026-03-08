@@ -519,7 +519,16 @@ def calculate_consumption_pattern(
 ) -> float:
     """Calculate expected consumption based on time patterns.
 
-    Default Dutch household pattern (3500 kWh/year = ~0.4 kW average).
+    This function is a cold-start fallback only.  It is called by
+    ConsumptionForecastModel when no historical data has been learned yet from
+    the HA recorder (i.e. _hourly_pattern is empty for the requested slot).
+    Once the recorder has accumulated enough statistics the learned pattern
+    takes over and this function is no longer invoked for those slots.
+
+    The built-in pattern reflects a typical Dutch household
+    (≈3500 kWh/year, ~0.4 kW average) with a morning and evening peak.
+    Making this user-configurable would add UI complexity for a value that
+    is replaced automatically within the first days of operation.
 
     Args:
         hour_of_day: Hour of day (0-23)

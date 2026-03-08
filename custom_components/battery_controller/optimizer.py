@@ -10,7 +10,15 @@ from .battery_model import BatteryConfig
 from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
+    MIN_PV_SURPLUS_KW,
+    POWER_IDLE_THRESHOLD_KW,
     POWER_STEP_W,
+    SOC_DERATING_EXTREME_FACTOR,
+    SOC_DERATING_EXTREME_HIGH,
+    SOC_DERATING_EXTREME_LOW,
+    SOC_DERATING_MODERATE_FACTOR,
+    SOC_DERATING_MODERATE_HIGH,
+    SOC_DERATING_MODERATE_LOW,
     SOC_RESOLUTION_WH,
 )
 
@@ -591,10 +599,16 @@ def _soc_efficiency(soc_percent: float, base_eff: float) -> float:
     capacity is genuinely less efficient and financially material (~0.14 €/step).
     """
     soc_factor = 1.0
-    if soc_percent < 20 or soc_percent > 80:
-        soc_factor = 0.98
-    if soc_percent < 10 or soc_percent > 90:
-        soc_factor = 0.95
+    if (
+        soc_percent < SOC_DERATING_MODERATE_LOW
+        or soc_percent > SOC_DERATING_MODERATE_HIGH
+    ):
+        soc_factor = SOC_DERATING_MODERATE_FACTOR
+    if (
+        soc_percent < SOC_DERATING_EXTREME_LOW
+        or soc_percent > SOC_DERATING_EXTREME_HIGH
+    ):
+        soc_factor = SOC_DERATING_EXTREME_FACTOR
     return base_eff * soc_factor
 
 
@@ -662,7 +676,7 @@ def _filter_oscillations(
         """
         if pv_forecast and consumption_forecast and feed_in_forecast:
             pv_surplus = pv_forecast[timestep] - consumption_forecast[timestep]
-            if pv_surplus > 0.05:  # 50W threshold for PV surplus
+            if pv_surplus > MIN_PV_SURPLUS_KW:
                 # Charging with PV surplus = opportunity cost of not selling
                 return feed_in_forecast[timestep]
         # Otherwise charging from grid
@@ -729,7 +743,7 @@ def _filter_oscillations(
         filtered_power[t] = actual_power_kw
 
         # Update mode if power changed to 0
-        if abs(actual_power_kw) < 0.001:
+        if abs(actual_power_kw) < POWER_IDLE_THRESHOLD_KW:
             filtered_mode[t] = "idle"
 
         filtered_soc.append(current_soc_kwh)

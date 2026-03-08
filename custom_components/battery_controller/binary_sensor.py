@@ -14,16 +14,14 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import ABSORPTION_THRESHOLD
 from .coordinator import OptimizationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 PARALLEL_UPDATES = 0
 
-# Battery actual charging power must be at least this fraction of the charge
-# setpoint before we consider the battery "unable to absorb more".
-_ABSORPTION_THRESHOLD = 0.70  # 70 %
-# Minimum charging setpoint (W) below which the check is skipped (noise floor).
+# Minimum charging setpoint (W) below which the absorption check is skipped (noise floor).
 _MIN_SETPOINT_W = 200.0
 
 
@@ -114,7 +112,7 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
 
         if (
             setpoint_w > _MIN_SETPOINT_W
-            and actual_w < setpoint_w * _ABSORPTION_THRESHOLD
+            and actual_w < setpoint_w * ABSORPTION_THRESHOLD
         ):
             return True
 

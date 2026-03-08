@@ -94,6 +94,10 @@ DEFAULT_ROUND_TRIP_EFFICIENCY = 0.90
 DEFAULT_MIN_SOC_PERCENT = 10.0
 DEFAULT_MAX_SOC_PERCENT = 90.0
 
+# Default values - PV array geometry
+DEFAULT_PV_ORIENTATION_DEG = 180.0  # degrees, South-facing
+DEFAULT_PV_TILT_DEG = 35.0  # degrees, typical mid-latitude tilt
+
 # Default values - DC-coupled PV
 DEFAULT_PV_DC_COUPLED = False
 DEFAULT_PV_DC_PEAK_POWER_KWP = 0.0
@@ -142,3 +146,41 @@ MIN_CYCLE_KWH = 0.2  # kWh
 # Grid capacity cap: maximum import/export power at grid connection (0 = unlimited)
 CONF_MAX_GRID_POWER_KW = "max_grid_power_kw"
 DEFAULT_MAX_GRID_POWER_KW = 0.0  # kW, 0 = no cap
+
+# Battery efficiency derating: SoC thresholds and factors.
+# Applied in both real-time dispatch (battery_model.py) and DP planning (optimizer.py).
+# Two-tier approach: moderate extremes get -2%, hard extremes get -5%.
+SOC_DERATING_MODERATE_LOW = 20  # percent — inner lower threshold
+SOC_DERATING_MODERATE_HIGH = 80  # percent — inner upper threshold
+SOC_DERATING_EXTREME_LOW = 10  # percent — outer lower threshold
+SOC_DERATING_EXTREME_HIGH = 90  # percent — outer upper threshold
+SOC_DERATING_MODERATE_FACTOR = 0.98  # -2% efficiency at moderate SoC extremes
+SOC_DERATING_EXTREME_FACTOR = 0.95  # -5% efficiency at hard SoC extremes
+
+# C-rate efficiency penalty: applied in real-time dispatch only (not DP planning).
+# See optimizer._soc_efficiency for why C-rate derating is excluded from the DP.
+C_RATE_THRESHOLD = 0.5  # C — penalty activates above this rate
+C_RATE_PENALTY_PER_THRESHOLD = (
+    0.02  # fractional loss per C_RATE_THRESHOLD unit above threshold
+)
+
+# Algorithm thresholds
+MIN_PV_SURPLUS_KW = (
+    0.05  # kW (50 W) — minimum surplus to apply PV opportunity-cost pricing
+)
+POWER_IDLE_THRESHOLD_KW = (
+    0.001  # kW (1 W) — power below this is treated as idle in the schedule
+)
+PRICE_CHANGE_REOPTIMIZE_THRESHOLD = (
+    0.10  # fractional — re-run optimizer on >=10% price change
+)
+STALE_SENSOR_MULTIPLIER = (
+    2.0  # x response_time_s — age limit before sensor is treated as stale
+)
+SOC_UNCERTAINTY_RESERVE_FRACTION = (
+    0.10  # max fraction of capacity reserved for solar forecast uncertainty
+)
+
+# Absorption detection: actual battery power must be at least this fraction of the
+# charge setpoint before the battery is considered unable to absorb more charge.
+ABSORPTION_THRESHOLD = 0.70  # fraction of setpoint

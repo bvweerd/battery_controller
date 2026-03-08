@@ -9,6 +9,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .const import DEFAULT_PV_ORIENTATION_DEG, DEFAULT_PV_TILT_DEG
 from .helpers import calculate_pv_forecast, calculate_consumption_pattern
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,8 +39,8 @@ class PVForecastModel:
     def __init__(
         self,
         peak_power_kwp: float = 0.0,
-        orientation_deg: float = 180,
-        tilt_deg: float = 35,
+        orientation_deg: float = DEFAULT_PV_ORIENTATION_DEG,
+        tilt_deg: float = DEFAULT_PV_TILT_DEG,
         efficiency_factor: float = 0.85,
     ):
         """Initialize PV forecast model."""

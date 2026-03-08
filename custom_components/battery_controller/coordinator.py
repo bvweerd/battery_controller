@@ -51,6 +51,9 @@ from .const import (
     MODE_HYBRID,
     MODE_MANUAL,
     MODE_ZERO_GRID,
+    PRICE_CHANGE_REOPTIMIZE_THRESHOLD,
+    SOC_UNCERTAINTY_RESERVE_FRACTION,
+    STALE_SENSOR_MULTIPLIER,
 )
 from .forecast_models import (
     ConsumptionForecastModel,
@@ -593,7 +596,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self.async_request_refresh())
         elif self._last_price is not None and self._last_price != 0:
             change_pct = abs(new_price - self._last_price) / abs(self._last_price)
-            if change_pct >= 0.10:
+            if change_pct >= PRICE_CHANGE_REOPTIMIZE_THRESHOLD:
                 _LOGGER.debug(
                     "Significant price change: %.2f%%, triggering optimization",
                     change_pct * 100,
@@ -653,7 +656,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Stale sensor detection (P4.1): if the first grid sensor has not updated
         # recently, treat its reading as unreliable and skip the zero_grid correction.
-        stale_limit_s = 2.0 * float(
+        stale_limit_s = STALE_SENSOR_MULTIPLIER * float(
             self.config.get(
                 CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
             )
@@ -1339,10 +1342,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 daylight_ghi
             )
             cv_ghi = (variance_ghi**0.5 / avg_ghi) if avg_ghi > 0 else 0.0
-            # Scale reserve linearly with coefficient of variation, up to 10% of capacity
+            # Scale reserve linearly with coefficient of variation, up to SOC_UNCERTAINTY_RESERVE_FRACTION of capacity
             uncertainty_reserve_kwh = min(
-                0.10 * battery_config.capacity_kwh,
-                cv_ghi * 0.10 * battery_config.capacity_kwh,
+                SOC_UNCERTAINTY_RESERVE_FRACTION * battery_config.capacity_kwh,
+                cv_ghi * SOC_UNCERTAINTY_RESERVE_FRACTION * battery_config.capacity_kwh,
             )
             if uncertainty_reserve_kwh > 0.01:
                 extra_pct = (

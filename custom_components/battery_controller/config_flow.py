@@ -47,6 +47,8 @@ from .const import (
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
     DEFAULT_MAX_GRID_POWER_KW,
     DEFAULT_PV_DC_EFFICIENCY,
+    DEFAULT_PV_ORIENTATION_DEG,
+    DEFAULT_PV_TILT_DEG,
     DEFAULT_ROUND_TRIP_EFFICIENCY,
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
@@ -177,12 +179,12 @@ def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Sch
             ): vol.All(vol.Coerce(float), vol.Range(min=0.01)),
             vol.Required(
                 "orientation",
-                default=d.get("orientation", 180.0),
+                default=d.get("orientation", DEFAULT_PV_ORIENTATION_DEG),
                 description={"suggested_value": d.get("orientation")},
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=360)),
             vol.Required(
                 "tilt",
-                default=d.get("tilt", 35.0),
+                default=d.get("tilt", DEFAULT_PV_TILT_DEG),
                 description={"suggested_value": d.get("tilt")},
             ): vol.All(vol.Coerce(float), vol.Range(min=0, max=90)),
             vol.Optional(

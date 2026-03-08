@@ -6,6 +6,17 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from .const import (
+    C_RATE_PENALTY_PER_THRESHOLD,
+    C_RATE_THRESHOLD,
+    SOC_DERATING_EXTREME_FACTOR,
+    SOC_DERATING_EXTREME_HIGH,
+    SOC_DERATING_EXTREME_LOW,
+    SOC_DERATING_MODERATE_FACTOR,
+    SOC_DERATING_MODERATE_HIGH,
+    SOC_DERATING_MODERATE_LOW,
+)
+
 
 @dataclass
 class BatteryConfig:
@@ -256,16 +267,26 @@ def calculate_efficiency(
         base_eff = config.discharge_efficiency
 
     # C-rate penalty (higher power = lower efficiency)
-    # 2% penalty per 0.5C above 0.5C
     c_rate = abs(power_kw) / config.capacity_kwh
-    c_rate_factor = 1.0 - 0.02 * max(0, c_rate - 0.5) / 0.5
+    c_rate_factor = (
+        1.0
+        - C_RATE_PENALTY_PER_THRESHOLD
+        * max(0, c_rate - C_RATE_THRESHOLD)
+        / C_RATE_THRESHOLD
+    )
 
     # SoC penalty (efficiency drops at extremes)
     soc_factor = 1.0
-    if soc_percent < 20 or soc_percent > 80:
-        soc_factor = 0.98
-    if soc_percent < 10 or soc_percent > 90:
-        soc_factor = 0.95
+    if (
+        soc_percent < SOC_DERATING_MODERATE_LOW
+        or soc_percent > SOC_DERATING_MODERATE_HIGH
+    ):
+        soc_factor = SOC_DERATING_MODERATE_FACTOR
+    if (
+        soc_percent < SOC_DERATING_EXTREME_LOW
+        or soc_percent > SOC_DERATING_EXTREME_HIGH
+    ):
+        soc_factor = SOC_DERATING_EXTREME_FACTOR
 
     return base_eff * c_rate_factor * soc_factor
 
