@@ -39,14 +39,12 @@ from .const import (
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
-    CONF_TIME_STEP_MINUTES,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DEGRADATION_COST_PER_KWH,
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-    DEFAULT_TIME_STEP_MINUTES,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
@@ -61,7 +59,10 @@ from .forecast_models import (
     PVForecastModel,
 )
 from .helpers import (
+    _synthesize_timestamps,
+    compute_step_durations_hours,
     extract_price_forecast_with_interval,
+    extract_price_forecast_with_timestamps,
     get_sensor_value,
     resample_forecast,
 )
@@ -675,15 +676,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Read current battery state
         battery_state = self.get_current_battery_state()
 
-        controller_mode = self._resolve_controller_mode(
-            self._effective_mode, current_grid_w
-        )
+        # Re-derive effective mode from the current control mode so that a
+        # mode switch (e.g. hybrid → follow_schedule) takes effect in the
+        # real-time loop immediately, without waiting for the next 15-min run.
+        if self._control_mode == MODE_ZERO_GRID:
+            rt_effective_mode = "zero_grid"
+            dp_schedule_w = 0.0
+        elif self._control_mode == MODE_MANUAL:
+            rt_effective_mode = "manual"
+            dp_schedule_w = self._get_manual_setpoint_w()
+        elif (
+            self._control_mode == MODE_FOLLOW_SCHEDULE and self._last_result is not None
+        ):
+            rt_effective_mode = self._last_result.optimal_mode
+            dp_schedule_w = self._last_result.optimal_power_kw * 1000
+        else:
+            # Hybrid (or no result yet): use cached values from last optimisation run
+            rt_effective_mode = self._effective_mode
+            dp_schedule_w = self._dp_schedule_w
 
-        # In manual mode read the setpoint fresh so user changes take effect immediately
-        dp_schedule_w = (
-            self._get_manual_setpoint_w()
-            if self._effective_mode == "manual"
-            else self._dp_schedule_w
+        controller_mode = self._resolve_controller_mode(
+            rt_effective_mode, current_grid_w
         )
 
         # Recalculate zero_grid setpoint with actual sensor data
@@ -1096,6 +1109,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         price_state = self.hass.states.get(self._price_sensor)
         price_forecast: list[float] = []
+        price_start_times: list = []
         price_interval: int = 60
         price_forecast_source: str = "live"
 
@@ -1109,8 +1123,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         if sensor_ok and price_state is not None:
-            price_forecast, price_interval = extract_price_forecast_with_interval(
-                price_state
+            price_forecast, price_start_times, price_interval = (
+                extract_price_forecast_with_timestamps(price_state)
             )
 
         if not price_forecast:
@@ -1187,9 +1201,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             feed_in_forecast = [fixed_price] * len(price_forecast)
 
         # Get optimization parameters — read runtime-tunable values from live options
-        time_step = int(
-            self.config.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES)
-        )
         entry_id = self.config.get("entry_id", "")
         live_entry = self.hass.config_entries.async_get_known_entry(entry_id)
         live_options = live_entry.options if live_entry is not None else {}
@@ -1208,15 +1219,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
         )
 
-        # Resample all forecasts to time step resolution
-        resampled_prices = resample_forecast(price_forecast, price_interval, time_step)
+        # Synthesise start_times for fallback paths that have no real timestamps
+        now_utc = dt_util.utcnow()
+        if not price_start_times and price_forecast:
+            price_start_times = _synthesize_timestamps(
+                now_utc, price_interval, len(price_forecast)
+            )
+
+        # price_forecast is already at native price_interval resolution — no resample needed.
+        resampled_prices = price_forecast
 
         # Extend horizon with historical model if live forecast covers less than 24 hours
-        min_horizon_steps = 24 * 60 // time_step
+        min_horizon_steps = 24 * 60 // price_interval
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
-            hours_already = len(resampled_prices) * time_step / 60
-            hours_for_model = (steps_needed * time_step + 59) // 60  # ceiling division
+            hours_already = len(resampled_prices) * price_interval / 60
+            hours_for_model = (steps_needed * price_interval + 59) // 60  # ceiling
             extension_start = dt_util.now().replace(
                 minute=0, second=0, microsecond=0
             ) + timedelta(hours=int(hours_already))
@@ -1230,9 +1248,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
                 wind_forecast=wind_raw[offset:] if wind_raw else None,
             )
-            resampled_extension = resample_forecast(model_extension, 60, time_step)
+            resampled_extension = resample_forecast(model_extension, 60, price_interval)
             original_steps = len(resampled_prices)
             resampled_prices = resampled_prices + resampled_extension[:steps_needed]
+            # Synthesise timestamps for the extension steps
+            last_ts = price_start_times[-1] if price_start_times else now_utc
+            for i in range(1, len(resampled_prices) - original_steps + 1):
+                price_start_times.append(
+                    last_ts + timedelta(minutes=i * price_interval)
+                )
             if price_forecast_source == "live":
                 price_forecast_source = "live+historical_model"
             _LOGGER.debug(
@@ -1241,18 +1265,29 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 len(resampled_prices),
             )
 
+        # Compute per-step durations: first step = remaining time in current price period,
+        # subsequent steps = full price_interval each.
+        step_durations_hours = compute_step_durations_hours(
+            price_start_times, price_interval, now_utc
+        )
+        # Ensure step_durations_hours matches the number of price steps
+        if len(step_durations_hours) < len(resampled_prices):
+            step_durations_hours += [price_interval / 60.0] * (
+                len(resampled_prices) - len(step_durations_hours)
+            )
+
         resampled_feed_in = None
         if feed_in_forecast:
             resampled_feed_in = resample_forecast(
-                feed_in_forecast, price_interval, time_step
+                feed_in_forecast, price_interval, price_interval
             )
 
-        # Get PV and consumption forecasts (already hourly from forecast coordinator)
+        # Resample hourly PV / consumption forecasts to the price sensor's native interval
         pv_forecast = resample_forecast(
-            forecast_data.get("pv_forecast_kw", []), 60, time_step
+            forecast_data.get("pv_forecast_kw", []), 60, price_interval
         )
         consumption_forecast = resample_forecast(
-            forecast_data.get("consumption_forecast_kw", []), 60, time_step
+            forecast_data.get("consumption_forecast_kw", []), 60, price_interval
         )
 
         # Horizon = length of price forecast (the binding constraint)
@@ -1263,7 +1298,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if forecast_data.get("pv_dc_coupled"):
             raw_dc = forecast_data.get("pv_dc_forecast_kw", [])
             if raw_dc and any(v > 0 for v in raw_dc):
-                pv_dc_forecast = resample_forecast(raw_dc, 60, time_step)
+                pv_dc_forecast = resample_forecast(raw_dc, 60, price_interval)
 
         # Pad shorter forecasts to match price horizon
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
@@ -1336,7 +1371,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             resampled_feed_in,
             pv_forecast,
             consumption_forecast,
-            time_step,
+            step_durations_hours,
             degradation_cost,
             min_spread,
             pv_dc_forecast,
@@ -1510,6 +1545,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "power_schedule_kw": result.power_schedule_kw,
             "mode_schedule": result.mode_schedule,
             "soc_schedule_kwh": result.soc_schedule_kwh,
+            "step_durations_hours": step_durations_hours[:n_steps],
             "total_cost": result.total_cost,
             "baseline_cost": result.baseline_cost,
             "savings": round(result.savings, 2),

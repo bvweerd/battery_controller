@@ -34,7 +34,6 @@ from .const import (
     CONF_PRICE_SENSOR,
     CONF_PV_DC_EFFICIENCY,
     CONF_ROUND_TRIP_EFFICIENCY,
-    CONF_TIME_STEP_MINUTES,
     CONF_MAX_GRID_POWER_KW,
     CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_ENABLED,
@@ -49,7 +48,6 @@ from .const import (
     DEFAULT_MAX_GRID_POWER_KW,
     DEFAULT_PV_DC_EFFICIENCY,
     DEFAULT_ROUND_TRIP_EFFICIENCY,
-    DEFAULT_TIME_STEP_MINUTES,
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
@@ -263,19 +261,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     advanced_schema = vol.Schema(
         {
             vol.Required(
-                CONF_TIME_STEP_MINUTES,
-                default=d.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES),
-            ): selector(
-                {
-                    "number": {
-                        "min": 1,
-                        "max": 60,
-                        "mode": "box",
-                        "unit_of_measurement": "min",
-                    }
-                }
-            ),
-            vol.Required(
                 CONF_OPTIMIZATION_INTERVAL_MINUTES,
                 default=d.get(
                     CONF_OPTIMIZATION_INTERVAL_MINUTES,
@@ -356,9 +341,6 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         ),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
         # Advanced
-        CONF_TIME_STEP_MINUTES: int(
-            _g(adv, CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES)
-        ),
         CONF_OPTIMIZATION_INTERVAL_MINUTES: int(
             _g(
                 adv,

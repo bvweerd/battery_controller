@@ -360,11 +360,11 @@ All lists share the same length and time alignment. Step 0 = current time step, 
 # Current scheduled power
 {{ state_attr('sensor.battery_controller_schedule', 'power_schedule_kw')[0] }}
 
-# Price in 2 hours (step 8 at 15-min resolution)
-{{ state_attr('sensor.battery_controller_schedule', 'price_forecast')[8] }}
+# Price in ~2 hours (step 2 for hourly prices, step 8 for 15-min prices)
+{{ state_attr('sensor.battery_controller_schedule', 'price_forecast')[2] }}
 
-# PV production expected in 1 hour (step 4 at 15-min resolution)
-{{ state_attr('sensor.battery_controller_schedule', 'pv_forecast_kw')[4] }}
+# PV production expected in next price period (step 1)
+{{ state_attr('sensor.battery_controller_schedule', 'pv_forecast_kw')[1] }}
 ```
 
 **Example ApexCharts card:**
@@ -379,11 +379,13 @@ series:
   - entity: sensor.battery_controller_schedule
     data_generator: |
       const schedule = entity.attributes.power_schedule_kw;
-      const stepMin = entity.attributes.time_step_minutes || 15;
+      const durations = entity.attributes.step_durations_hours || [];
       const now = new Date();
+      let t = now.getTime();
       return schedule.map((val, i) => {
-        const t = new Date(now.getTime() + i * stepMin * 60000);
-        return [t.getTime(), val];
+        const point = [t, val];
+        t += (durations[i] || 1) * 3600000;
+        return point;
       });
     name: Power (kW)
 ```

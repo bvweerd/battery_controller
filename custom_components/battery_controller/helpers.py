@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import State
@@ -176,6 +176,192 @@ def extract_price_forecast(state: State) -> list[float]:
     """Extract price forecast from a Home Assistant price state."""
     prices, _ = extract_price_forecast_with_interval(state)
     return prices
+
+
+def _synthesize_timestamps(
+    now: datetime, interval_minutes: int, count: int
+) -> list[datetime]:
+    """Synthesize UTC start timestamps for price entries without explicit timestamps.
+
+    Floors 'now' to the nearest interval boundary and generates 'count' timestamps.
+    """
+    total_minutes = now.hour * 60 + now.minute
+    floored_minutes = (total_minutes // interval_minutes) * interval_minutes
+    floor_dt = now.replace(
+        hour=floored_minutes // 60,
+        minute=floored_minutes % 60,
+        second=0,
+        microsecond=0,
+    )
+    return [floor_dt + timedelta(minutes=i * interval_minutes) for i in range(count)]
+
+
+def _fill_missing_timestamps(
+    timestamps: list[datetime | None], interval_minutes: int, now: datetime
+) -> list[datetime]:
+    """Fill None entries in a timestamp list using surrounding real timestamps."""
+    anchor_idx = next((i for i, ts in enumerate(timestamps) if ts is not None), None)
+    if anchor_idx is None:
+        return _synthesize_timestamps(now, interval_minutes, len(timestamps))
+    anchor = timestamps[anchor_idx]
+    assert anchor is not None
+    return [
+        ts
+        if ts is not None
+        else anchor + timedelta(minutes=(i - anchor_idx) * interval_minutes)
+        for i, ts in enumerate(timestamps)
+    ]
+
+
+def extract_price_forecast_with_timestamps(
+    state: State,
+) -> tuple[list[float], list[datetime], int]:
+    """Extract price forecast with UTC start timestamps from a HA price state.
+
+    Supports the same sensor formats as extract_price_forecast_with_interval.
+    Timestamps are synthesized for formats that carry no explicit start times.
+
+    Returns:
+        Tuple of (prices, start_times_utc, interval_minutes)
+    """
+    now = dt_util.utcnow()
+
+    # forecast_prices (assumed hourly, no timestamps)
+    forecast_attr = state.attributes.get("forecast_prices")
+    if isinstance(forecast_attr, (list, tuple)):
+        forecast: list[float] = []
+        for entry in forecast_attr:
+            price = _normalize_price_value(entry)
+            if price is not None:
+                forecast.append(price)
+        if forecast:
+            return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+
+    # net_prices_today/tomorrow — these carry per-entry timestamps
+    interval_forecast: list[float] = []
+    interval_timestamps: list[datetime | None] = []
+    detected_interval = 60
+
+    def _extend_with_timestamps(entries: Any, *, skip_past: bool = False) -> bool:
+        nonlocal detected_interval
+        if not isinstance(entries, (list, tuple)):
+            return False
+
+        interval = _detect_interval_from_entries(entries)
+        if interval != 60:
+            detected_interval = interval
+
+        added = False
+        for entry in entries:
+            ts: datetime | None = None
+            if isinstance(entry, dict):
+                start = entry.get("start") or entry.get("from") or entry.get("time")
+                if isinstance(start, str):
+                    parsed = dt_util.parse_datetime(start)
+                    if parsed is not None:
+                        ts = dt_util.as_utc(parsed)
+                        if (
+                            skip_past
+                            and ts + timedelta(minutes=detected_interval) <= now
+                        ):
+                            continue
+
+            price = _normalize_price_value(entry)
+            if price is not None:
+                interval_forecast.append(price)
+                interval_timestamps.append(ts)
+                added = True
+        return added
+
+    _extend_with_timestamps(state.attributes.get("net_prices_today"), skip_past=True)
+    _extend_with_timestamps(state.attributes.get("net_prices_tomorrow"))
+
+    if interval_forecast:
+        filled = _fill_missing_timestamps(interval_timestamps, detected_interval, now)
+        return interval_forecast, filled, detected_interval
+
+    # Generic forecast (no timestamps)
+    generic_forecast = state.attributes.get("forecast")
+    if isinstance(generic_forecast, (list, tuple)):
+        forecast = []
+        for entry in generic_forecast:
+            price = _normalize_price_value(entry)
+            if price is not None:
+                forecast.append(price)
+        if forecast:
+            return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+
+    # raw_today/raw_tomorrow (no timestamps)
+    hour = dt_util.now().hour  # Local time
+    forecast = []
+    raw_today = state.attributes.get("raw_today")
+    if isinstance(raw_today, list):
+        for entry in raw_today[hour:]:
+            price = _normalize_price_value(entry)
+            if price is not None:
+                forecast.append(price)
+    raw_tomorrow = state.attributes.get("raw_tomorrow")
+    if isinstance(raw_tomorrow, list):
+        for entry in raw_tomorrow:
+            price = _normalize_price_value(entry)
+            if price is not None:
+                forecast.append(price)
+    if forecast:
+        return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+
+    # today/tomorrow (no timestamps)
+    combined: list[Any] = []
+    today_attr = state.attributes.get("today")
+    if isinstance(today_attr, list):
+        combined.extend(today_attr[hour:])
+    tomorrow_attr = state.attributes.get("tomorrow")
+    if isinstance(tomorrow_attr, list):
+        combined.extend(tomorrow_attr)
+    forecast = []
+    for entry in combined:
+        price = _normalize_price_value(entry)
+        if price is not None:
+            forecast.append(price)
+    if forecast:
+        return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+
+    # Last resort: current state value
+    try:
+        price = float(state.state)
+    except (TypeError, ValueError):
+        return [], [], 60
+    return [price], _synthesize_timestamps(now, 60, 1), 60
+
+
+def compute_step_durations_hours(
+    start_times: list[datetime],
+    interval_minutes: int,
+    now: datetime,
+) -> list[float]:
+    """Compute per-step durations aligned to price interval boundaries.
+
+    The first step covers the remaining time until the next price boundary.
+    All subsequent steps are full intervals. This synchronizes the DP time
+    steps with the actual price periods so no resampling artefacts occur.
+
+    Args:
+        start_times: UTC start time for each price period (len >= 1)
+        interval_minutes: Native interval of the price sensor in minutes
+        now: Current UTC time
+
+    Returns:
+        List of step durations in hours, same length as start_times
+    """
+    full_h = interval_minutes / 60.0
+    min_h = 1.0 / 60.0  # Minimum 1-minute step
+
+    if len(start_times) <= 1:
+        return [full_h] * len(start_times)
+
+    first_h = (start_times[1] - now).total_seconds() / 3600.0
+    first_h = max(min_h, min(first_h, full_h))
+
+    return [first_h] + [full_h] * (len(start_times) - 1)
 
 
 def resample_forecast(

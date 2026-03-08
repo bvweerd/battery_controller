@@ -242,7 +242,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
             min_price_spread=0.05,
         )
@@ -267,7 +267,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
         )
 
         # With such a large price spread, optimizer should find savings
@@ -286,7 +286,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
         )
 
@@ -321,7 +321,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=feed_in,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
         )
 
@@ -341,7 +341,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
         )
 
         for soc in result.soc_schedule_kwh:
@@ -400,7 +400,7 @@ class TestOptimizeBatterySchedule:
                 feed_in_forecast=None,
                 pv_forecast=[0.0] * len(scenario["prices"]),
                 consumption_forecast=[0.5] * len(scenario["prices"]),
-                time_step_minutes=15,
+                step_durations_hours=None,  # uses 0.25h default
                 degradation_cost_per_kwh=scenario["degradation"],
                 min_price_spread=scenario["min_spread"],
             )
@@ -424,7 +424,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 6,
             consumption_forecast=[0.5] * 6,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.005,
             min_price_spread=0.0,  # Disable min spread check
         )
@@ -442,7 +442,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 4,
             consumption_forecast=[0.5] * 4,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.05,  # High degradation discourages cycling
             min_price_spread=0.0,
         )
@@ -460,7 +460,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 6,
             consumption_forecast=[0.5] * 6,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.005,
             min_price_spread=0.0,
         )
@@ -484,7 +484,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=None,
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             pv_dc_forecast=pv_dc,
         )
 
@@ -504,7 +504,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=[0.01] * 4,  # Very low feed-in
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
         )
 
         result_high_feedin = optimize_battery_schedule(
@@ -514,7 +514,7 @@ class TestOptimizeBatterySchedule:
             feed_in_forecast=[0.25] * 4,  # High feed-in
             pv_forecast=pv,
             consumption_forecast=consumption,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
         )
 
         # With low feed-in, storing PV is more attractive
@@ -565,7 +565,7 @@ class TestActionSpace:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
         )
         for power in result.power_schedule_kw:
             assert power <= config.max_charge_power_kw + 1e-6
@@ -580,7 +580,7 @@ class TestActionSpace:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.001,
             min_price_spread=0.0,
         )
@@ -610,7 +610,7 @@ class TestOscillationFilterFormula:
             feed_in_forecast=None,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=deg,
             min_price_spread=min_spread,
         )
@@ -640,7 +640,7 @@ class TestOscillationFilterFormula:
             feed_in_forecast=feed_in,
             pv_forecast=[0.0] * 8,
             consumption_forecast=[0.5] * 8,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=deg,
             min_price_spread=min_spread,
         )
@@ -675,7 +675,7 @@ class TestOscillationPrevention:
             feed_in_forecast=None,
             pv_forecast=pv_forecast,
             consumption_forecast=consumption_forecast,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
             min_price_spread=0.05,
         )
@@ -707,7 +707,7 @@ class TestOscillationPrevention:
             feed_in_forecast=None,
             pv_forecast=pv_forecast,
             consumption_forecast=consumption_forecast,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
             min_price_spread=0.05,
         )
@@ -735,7 +735,7 @@ class TestOscillationPrevention:
             feed_in_forecast=feed_in_price,
             pv_forecast=pv_forecast,
             consumption_forecast=consumption_forecast,
-            time_step_minutes=15,
+            step_durations_hours=None,  # uses 0.25h default
             degradation_cost_per_kwh=0.03,
             min_price_spread=0.05,
         )

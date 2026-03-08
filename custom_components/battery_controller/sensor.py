@@ -20,8 +20,6 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
-    CONF_TIME_STEP_MINUTES,
-    DEFAULT_TIME_STEP_MINUTES,
 )
 from .coordinator import ForecastCoordinator, OptimizationCoordinator
 
@@ -208,15 +206,10 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return {}
         result = self.coordinator.data.get("optimization_result")
-        cfg = self.coordinator.config_entry
-        time_step = int(
-            cfg.options.get(
-                CONF_TIME_STEP_MINUTES,
-                cfg.data.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES),
-            )
-        )
         attrs = {
-            "time_step_minutes": time_step,
+            "step_durations_hours": self.coordinator.data.get(
+                "step_durations_hours", []
+            ),
             "power_schedule_kw": self.coordinator.data.get("power_schedule_kw", []),
             "mode_schedule": self.coordinator.data.get("mode_schedule", []),
             "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", []),

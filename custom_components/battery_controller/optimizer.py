@@ -6,7 +6,7 @@ import logging
 import math
 from dataclasses import dataclass
 
-from .battery_model import BatteryConfig, calculate_efficiency
+from .battery_model import BatteryConfig
 from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
@@ -213,7 +213,7 @@ def optimize_battery_schedule(
     feed_in_forecast: list[float] | None,  # EUR/kWh sell prices (optional)
     pv_forecast: list[float],  # kW (AC-side PV)
     consumption_forecast: list[float],  # kW
-    time_step_minutes: int = 15,
+    step_durations_hours: list[float] | None = None,  # per-step duration in hours
     degradation_cost_per_kwh: float = 0.03,
     min_price_spread: float = 0.05,
     pv_dc_forecast: list[float] | None = None,  # kW (DC-coupled PV)
@@ -229,7 +229,10 @@ def optimize_battery_schedule(
         feed_in_forecast: Grid sell price forecast in EUR/kWh (optional)
         pv_forecast: AC-side PV production forecast in kW
         consumption_forecast: Consumption forecast in kW
-        time_step_minutes: Time step duration in minutes
+        step_durations_hours: Duration of each time step in hours. When aligned
+            to price-sensor boundaries, step 0 is the partial remainder of the
+            current price period; all subsequent steps are full intervals.
+            Defaults to 0.25 h (15 min) for every step when None.
         degradation_cost_per_kwh: Degradation cost in EUR/kWh
         min_price_spread: Minimum price spread for arbitrage
         pv_dc_forecast: DC-coupled PV production forecast in kW (optional)
@@ -249,27 +252,32 @@ def optimize_battery_schedule(
     if n_steps == 0:
         return _empty_result(battery_config, current_soc_kwh)
 
-    time_step_hours = time_step_minutes / 60.0
+    # Normalise step_durations_hours to exactly n_steps entries.
+    if not step_durations_hours:
+        step_durations_hours = [0.25] * n_steps
+    elif len(step_durations_hours) < n_steps:
+        step_durations_hours = list(step_durations_hours) + [
+            step_durations_hours[-1]
+        ] * (n_steps - len(step_durations_hours))
 
     # Discretize SoC space.
-    # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy.
-    # The minimum floor (SOC_RESOLUTION_WH = 25 Wh) is critical: with short time
-    # steps (e.g. 5-min) the per-step energy (8.3 Wh) is so small that the
-    # V-function slope collapses to the feed-in price, making the DP unable to
-    # find profitable charge/discharge cycles. 25 Wh ensures ~6× margin.
-    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * time_step_hours)
+    # Use the *minimum* step duration as the binding constraint so that even the
+    # shortest step (typically the partial first step) moves the SoC by at least
+    # one state boundary.  Without this, a very short first step would make
+    # sub-resolution actions appear "free" to the DP.
+    min_step_hours = min(step_durations_hours[:n_steps])
+
+    # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy
+    # over the shortest step.  SOC_RESOLUTION_WH (100 Wh) ensures at least ~6×
+    # margin above the per-step energy for the standard 15-min / 5 kW case.
+    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours)
 
     # Align the power step to the SoC resolution so every action moves an exact
     # integer number of states.  Without this, sub-boundary actions (e.g. 200 W
-    # at 5-min = 16.67 Wh) round *up* to a full state (25 Wh) in the state
-    # lookup while the cost calculation only pays for the actual 16.67 Wh.  This
-    # makes low-power actions appear artificially cheaper per kWh stored,
-    # causing the DP to prefer 200 W over 1200 W even in the cheapest hours.
-    # Aligning ensures each action's energy is an exact multiple of the state
-    # resolution, so the DP cost and credit are always consistent.
-    # Example: 5-min steps → aligned_step = 25/(5/60) = 300 W → actions: 0,300,…,1200 W
-    #          15-min steps → aligned_step = 25/(15/60) = 100 W → unchanged
-    aligned_step_w = soc_resolution_wh / time_step_hours
+    # at 5-min = 16.67 Wh) round *up* to a full state in the state lookup while
+    # the cost calculation only pays for the actual energy.  This makes low-power
+    # actions appear artificially cheaper per kWh stored.
+    aligned_step_w = soc_resolution_wh / min_step_hours
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
     min_soc_wh = battery_config.min_soc_kwh * 1000
     max_soc_wh = battery_config.max_soc_kwh * 1000
@@ -313,6 +321,7 @@ def optimize_battery_schedule(
 
     # Backward induction
     for t in range(n_steps - 1, -1, -1):
+        time_step_hours = step_durations_hours[t]
         grid_price = price_forecast[t]
         feed_in_price = feed_in_forecast[t] if t < len(feed_in_forecast) else grid_price
         pv_w = pv_forecast[t] * 1000 if t < len(pv_forecast) else 0
@@ -449,6 +458,7 @@ def optimize_battery_schedule(
     current_soc = float(soc_states[current_soc_idx])
 
     for t in range(n_steps):
+        time_step_hours = step_durations_hours[t]
         soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
         action_w = policy[t][soc_idx]
         pv_dc_w = pv_dc_forecast[t] * 1000 if t < len(pv_dc_forecast) else 0.0
@@ -497,7 +507,7 @@ def optimize_battery_schedule(
         min_price_spread=min_price_spread,
         degradation_cost_per_kwh=degradation_cost_per_kwh,
         rte=battery_config.round_trip_efficiency,
-        time_step_hours=time_step_hours,
+        step_durations_hours=step_durations_hours[:n_steps],
         min_soc_kwh=battery_config.min_soc_kwh,
         max_soc_kwh=battery_config.max_soc_kwh,
         pv_forecast=pv_forecast[:n_steps],
@@ -513,7 +523,7 @@ def optimize_battery_schedule(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
         soc_schedule_kwh=soc_schedule_kwh,
-        time_step_hours=time_step_hours,
+        step_durations_hours=step_durations_hours[:n_steps],
         min_cycle_kwh=MIN_CYCLE_KWH,
     )
 
@@ -524,6 +534,7 @@ def optimize_battery_schedule(
     # Baseline: DC PV excess goes to AC via inverter, no battery buffering
     baseline_cost = 0.0
     for t in range(n_steps):
+        time_step_hours = step_durations_hours[t]
         grid_price = price_forecast[t]
         feed_in_price = feed_in_forecast[t] if t < len(feed_in_forecast) else grid_price
         pv_w = pv_forecast[t] * 1000 if t < len(pv_forecast) else 0
@@ -595,7 +606,7 @@ def _filter_oscillations(
     min_price_spread: float,
     degradation_cost_per_kwh: float,
     rte: float,
-    time_step_hours: float,
+    step_durations_hours: list[float],
     min_soc_kwh: float,
     max_soc_kwh: float,
     pv_forecast: list[float] | None = None,
@@ -619,7 +630,7 @@ def _filter_oscillations(
         min_price_spread: Minimum price spread required
         degradation_cost_per_kwh: Degradation cost
         rte: Round trip efficiency
-        time_step_hours: Time step duration in hours
+        step_durations_hours: Per-step duration in hours
         min_soc_kwh: Minimum SoC
         max_soc_kwh: Maximum SoC
         pv_forecast: PV production forecast in kW (optional)
@@ -657,8 +668,11 @@ def _filter_oscillations(
         # Otherwise charging from grid
         return price_forecast[timestep]
 
-    # Lookahead window: scale with battery size, minimum 2 hours
-    lookahead_steps = max(1, round(oscillation_window_hours / time_step_hours))
+    # Lookahead window: use first step duration as representative interval.
+    # The first step may be shorter (partial interval), making the window
+    # slightly larger in step count — this is conservative and safe.
+    ref_step_h = step_durations_hours[0] if step_durations_hours else 0.25
+    lookahead_steps = max(1, round(oscillation_window_hours / ref_step_h))
 
     # Look for rapid charge/discharge oscillations
     i = 0
@@ -698,19 +712,20 @@ def _filter_oscillations(
     filtered_soc = [current_soc_kwh]
 
     for t in range(len(filtered_power)):
+        step_h = (
+            step_durations_hours[t]
+            if t < len(step_durations_hours)
+            else step_durations_hours[-1]
+        )
         power_kw = filtered_power[t]
         prev_soc = current_soc_kwh
         if power_kw > 0:  # Charging
-            current_soc_kwh = min(
-                current_soc_kwh + power_kw * time_step_hours, max_soc_kwh
-            )
+            current_soc_kwh = min(current_soc_kwh + power_kw * step_h, max_soc_kwh)
         elif power_kw < 0:  # Discharging
-            current_soc_kwh = max(
-                current_soc_kwh + power_kw * time_step_hours, min_soc_kwh
-            )
+            current_soc_kwh = max(current_soc_kwh + power_kw * step_h, min_soc_kwh)
 
         # Update power to match actual SoC change (e.g. if battery was full/empty)
-        actual_power_kw = (current_soc_kwh - prev_soc) / time_step_hours
+        actual_power_kw = (current_soc_kwh - prev_soc) / step_h
         filtered_power[t] = actual_power_kw
 
         # Update mode if power changed to 0
@@ -726,7 +741,7 @@ def _filter_micro_cycles(
     power_schedule_kw: list[float],
     mode_schedule: list[str],
     soc_schedule_kwh: list[float],
-    time_step_hours: float,
+    step_durations_hours: list[float],
     min_cycle_kwh: float = 0.2,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out micro-cycles whose total energy is below min_cycle_kwh.
@@ -739,7 +754,7 @@ def _filter_micro_cycles(
         power_schedule_kw: Power schedule in kW
         mode_schedule: Mode schedule
         soc_schedule_kwh: SoC schedule in kWh
-        time_step_hours: Time step duration in hours
+        step_durations_hours: Per-step duration in hours
         min_cycle_kwh: Minimum energy per charge/discharge block in kWh
 
     Returns:
@@ -762,7 +777,12 @@ def _filter_micro_cycles(
         j = i
         total_energy_kwh = 0.0
         while j < len(filtered_mode) and filtered_mode[j] == current_dir:
-            total_energy_kwh += abs(filtered_power[j]) * time_step_hours
+            step_h = (
+                step_durations_hours[j]
+                if j < len(step_durations_hours)
+                else step_durations_hours[-1]
+            )
+            total_energy_kwh += abs(filtered_power[j]) * step_h
             j += 1
 
         if total_energy_kwh < min_cycle_kwh:
