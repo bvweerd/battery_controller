@@ -84,6 +84,9 @@
   },
   "config_subentries": {
     "battery": {
+      "entry_type": {
+        "name": "Battery System"
+      },
       "flow_title": "Battery",
       "initiate_flow": {
         "user": "Add Battery System"
@@ -127,6 +130,9 @@
       }
     },
     "pv_array": {
+      "entry_type": {
+        "name": "PV Array"
+      },
       "flow_title": "PV Array",
       "initiate_flow": {
         "user": "Add PV Array"
