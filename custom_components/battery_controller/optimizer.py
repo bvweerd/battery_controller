@@ -202,8 +202,20 @@ def optimize_battery_schedule(
     # steps (e.g. 5-min) the per-step energy (8.3 Wh) is so small that the
     # V-function slope collapses to the feed-in price, making the DP unable to
     # find profitable charge/discharge cycles. 25 Wh ensures ~6× margin.
-    power_step_w = POWER_STEP_W
-    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), power_step_w * time_step_hours)
+    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * time_step_hours)
+
+    # Align the power step to the SoC resolution so every action moves an exact
+    # integer number of states.  Without this, sub-boundary actions (e.g. 200 W
+    # at 5-min = 16.67 Wh) round *up* to a full state (25 Wh) in the state
+    # lookup while the cost calculation only pays for the actual 16.67 Wh.  This
+    # makes low-power actions appear artificially cheaper per kWh stored,
+    # causing the DP to prefer 200 W over 1200 W even in the cheapest hours.
+    # Aligning ensures each action's energy is an exact multiple of the state
+    # resolution, so the DP cost and credit are always consistent.
+    # Example: 5-min steps → aligned_step = 25/(5/60) = 300 W → actions: 0,300,…,1200 W
+    #          15-min steps → aligned_step = 25/(15/60) = 100 W → unchanged
+    aligned_step_w = soc_resolution_wh / time_step_hours
+    power_step_w = max(float(POWER_STEP_W), aligned_step_w)
     min_soc_wh = battery_config.min_soc_kwh * 1000
     max_soc_wh = battery_config.max_soc_kwh * 1000
 
