@@ -1276,6 +1276,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 len(resampled_prices) - len(step_durations_hours)
             )
 
+        # Compute absolute UTC start time for each schedule step so the chart
+        # can render correct timestamps regardless of when the sensor is read.
+        # Step 0 starts at the current optimizer run time (now_utc); subsequent
+        # steps start at the price-period boundaries from the sensor.
+        step_start_times_iso: list[str] = [now_utc.isoformat()]
+        for ts in price_start_times[1 : len(resampled_prices)]:
+            step_start_times_iso.append(ts.isoformat())
+
         resampled_feed_in = None
         if feed_in_forecast:
             resampled_feed_in = resample_forecast(
@@ -1546,6 +1554,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "mode_schedule": result.mode_schedule,
             "soc_schedule_kwh": result.soc_schedule_kwh,
             "step_durations_hours": step_durations_hours[:n_steps],
+            "step_start_times_iso": step_start_times_iso[:n_steps],
             "total_cost": result.total_cost,
             "baseline_cost": result.baseline_cost,
             "savings": round(result.savings, 2),

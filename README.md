@@ -379,14 +379,11 @@ series:
   - entity: sensor.battery_controller_schedule
     data_generator: |
       const schedule = entity.attributes.power_schedule_kw;
-      const durations = entity.attributes.step_durations_hours || [];
-      const now = new Date();
-      let t = now.getTime();
+      const starts = entity.attributes.step_start_times_iso || [];
       return schedule.map((val, i) => {
-        const point = [t, val];
-        t += (durations[i] || 1) * 3600000;
-        return point;
-      });
+        const t = starts[i] ? new Date(starts[i]).getTime() : null;
+        return t !== null ? [t, val] : null;
+      }).filter(Boolean);
     name: Power (kW)
 ```
 

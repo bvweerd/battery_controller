@@ -207,6 +207,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
             return {}
         result = self.coordinator.data.get("optimization_result")
         attrs = {
+            "step_start_times_iso": self.coordinator.data.get(
+                "step_start_times_iso", []
+            ),
             "step_durations_hours": self.coordinator.data.get(
                 "step_durations_hours", []
             ),
