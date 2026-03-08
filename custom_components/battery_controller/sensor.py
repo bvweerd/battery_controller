@@ -412,8 +412,7 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_device_class = SensorDeviceClass.MONETARY
-    # MEASUREMENT: value resets each optimizer run; not a cumulative total.
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = SensorStateClass.TOTAL
 
     def __init__(self, coordinator, device, entry):
         super().__init__(coordinator, device, entry, "daily_savings")
