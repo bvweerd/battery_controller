@@ -14,6 +14,7 @@ import voluptuous as vol
 from .const import (
     BATTERY_SUBENTRY_TYPE,
     CONF_BATTERY_POWER_SENSOR,
+    CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
     CONF_DEGRADATION_COST_PER_KWH,
@@ -61,6 +62,10 @@ def _build_battery_subentry_schema(
     d = defaults or {}
     return vol.Schema(
         {
+            vol.Optional(
+                CONF_NAME,
+                description={"suggested_value": d.get(CONF_NAME)},
+            ): str,
             vol.Required(
                 CONF_CAPACITY_KWH,
                 default=d.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH),
@@ -126,18 +131,23 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalise battery subentry user input."""
     schema = _build_battery_subentry_schema()
     validated = schema(user_input)
-    result = {
-        CONF_CAPACITY_KWH: float(validated[CONF_CAPACITY_KWH]),
-        CONF_MAX_CHARGE_POWER_KW: float(validated[CONF_MAX_CHARGE_POWER_KW]),
-        CONF_MAX_DISCHARGE_POWER_KW: float(validated[CONF_MAX_DISCHARGE_POWER_KW]),
-        CONF_ROUND_TRIP_EFFICIENCY: float(validated[CONF_ROUND_TRIP_EFFICIENCY]),
-        CONF_MIN_SOC_PERCENT: float(validated[CONF_MIN_SOC_PERCENT]),
-        CONF_MAX_SOC_PERCENT: float(validated[CONF_MAX_SOC_PERCENT]),
-        CONF_BATTERY_SOC_SENSOR: validated[CONF_BATTERY_SOC_SENSOR],
-        CONF_PV_DC_EFFICIENCY: float(
-            validated.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
-        ),
-    }
+    result: dict[str, Any] = {}
+    if name := validated.get(CONF_NAME, "").strip():
+        result[CONF_NAME] = name
+    result.update(
+        {
+            CONF_CAPACITY_KWH: float(validated[CONF_CAPACITY_KWH]),
+            CONF_MAX_CHARGE_POWER_KW: float(validated[CONF_MAX_CHARGE_POWER_KW]),
+            CONF_MAX_DISCHARGE_POWER_KW: float(validated[CONF_MAX_DISCHARGE_POWER_KW]),
+            CONF_ROUND_TRIP_EFFICIENCY: float(validated[CONF_ROUND_TRIP_EFFICIENCY]),
+            CONF_MIN_SOC_PERCENT: float(validated[CONF_MIN_SOC_PERCENT]),
+            CONF_MAX_SOC_PERCENT: float(validated[CONF_MAX_SOC_PERCENT]),
+            CONF_BATTERY_SOC_SENSOR: validated[CONF_BATTERY_SOC_SENSOR],
+            CONF_PV_DC_EFFICIENCY: float(
+                validated.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+            ),
+        }
+    )
     if validated.get(CONF_BATTERY_POWER_SENSOR):
         result[CONF_BATTERY_POWER_SENSOR] = validated[CONF_BATTERY_POWER_SENSOR]
     return result
@@ -145,6 +155,8 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
 
 def _battery_subentry_title(data: dict[str, Any]) -> str:
     """Generate a display title for a battery subentry."""
+    if name := data.get(CONF_NAME, "").strip():
+        return name
     kwh = data.get(CONF_CAPACITY_KWH, 0)
     return f"{kwh} kWh"
 
@@ -154,6 +166,10 @@ def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Sch
     d = defaults or {}
     return vol.Schema(
         {
+            vol.Optional(
+                CONF_NAME,
+                description={"suggested_value": d.get(CONF_NAME)},
+            ): str,
             vol.Required(
                 "peak_power_kwp",
                 default=d.get("peak_power_kwp", 1.0),
@@ -421,10 +437,8 @@ class BatteryControllerPVSubentryFlow(config_entries.ConfigSubentryFlow):
             except vol.Invalid:
                 errors["base"] = "invalid_pv_input"
             else:
-                kwp = data["peak_power_kwp"]
-                coupling = "DC" if data["dc_coupled"] else "AC"
                 return self.async_create_entry(
-                    title=f"{kwp} kWp {coupling}",
+                    title=_pv_subentry_title(data),
                     data=data,
                 )
         return self.async_show_form(
@@ -448,12 +462,10 @@ class BatteryControllerPVSubentryFlow(config_entries.ConfigSubentryFlow):
             except vol.Invalid:
                 errors["base"] = "invalid_pv_input"
             else:
-                kwp = data["peak_power_kwp"]
-                coupling = "DC" if data["dc_coupled"] else "AC"
                 return self.async_update_and_abort(
                     entry,
                     subentry,
-                    title=f"{kwp} kWp {coupling}",
+                    title=_pv_subentry_title(data),
                     data=data,
                 )
         return self.async_show_form(
@@ -467,13 +479,28 @@ def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalise PV subentry user input."""
     schema = _build_pv_subentry_schema()
     validated = schema(user_input)
-    return {
-        "peak_power_kwp": float(validated["peak_power_kwp"]),
-        "orientation": float(validated["orientation"]),
-        "tilt": float(validated["tilt"]),
-        "efficiency_factor": float(validated.get("efficiency_factor", 0.85)),
-        "dc_coupled": bool(validated.get("dc_coupled", False)),
-    }
+    result: dict[str, Any] = {}
+    if name := validated.get(CONF_NAME, "").strip():
+        result[CONF_NAME] = name
+    result.update(
+        {
+            "peak_power_kwp": float(validated["peak_power_kwp"]),
+            "orientation": float(validated["orientation"]),
+            "tilt": float(validated["tilt"]),
+            "efficiency_factor": float(validated.get("efficiency_factor", 0.85)),
+            "dc_coupled": bool(validated.get("dc_coupled", False)),
+        }
+    )
+    return result
+
+
+def _pv_subentry_title(data: dict[str, Any]) -> str:
+    """Generate a display title for a PV subentry."""
+    if name := data.get(CONF_NAME, "").strip():
+        return name
+    kwp = data["peak_power_kwp"]
+    coupling = "DC" if data["dc_coupled"] else "AC"
+    return f"{kwp} kWp {coupling}"
 
 
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]

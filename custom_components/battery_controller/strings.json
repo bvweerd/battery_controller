@@ -90,6 +90,7 @@
           "title": "Add Battery",
           "description": "Configure a battery system. Battery SoC sensor is required. Power sensor improves real-time state detection.",
           "data": {
+            "name": "Name (optional)",
             "capacity_kwh": "Capacity (kWh)",
             "max_charge_power_kw": "Max charge power (kW)",
             "max_discharge_power_kw": "Max discharge power (kW)",
@@ -105,6 +106,7 @@
           "title": "Edit Battery",
           "description": "Update the configuration for this battery.",
           "data": {
+            "name": "Name (optional)",
             "capacity_kwh": "Capacity (kWh)",
             "max_charge_power_kw": "Max charge power (kW)",
             "max_discharge_power_kw": "Max discharge power (kW)",
@@ -128,6 +130,7 @@
           "title": "Add PV Array",
           "description": "Configure a PV array. For DC-coupled arrays (panels directly on battery inverter), enable the DC-coupled option.",
           "data": {
+            "name": "Name (optional)",
             "peak_power_kwp": "Peak power (kWp)",
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
@@ -143,6 +146,7 @@
           "title": "Edit PV Array",
           "description": "Update the configuration for this PV array.",
           "data": {
+            "name": "Name (optional)",
             "peak_power_kwp": "Peak power (kWp)",
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",

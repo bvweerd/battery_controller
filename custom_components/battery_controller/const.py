@@ -29,6 +29,9 @@ ACTION_IDLE = "idle"
 ACTION_CHARGING = "charging"
 ACTION_DISCHARGING = "discharging"
 
+# Configuration keys - General
+CONF_NAME = "name"
+
 # Configuration keys - Battery specifications
 CONF_CAPACITY_KWH = "capacity_kwh"
 CONF_USABLE_CAPACITY_KWH = "usable_capacity_kwh"
