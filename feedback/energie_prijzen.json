@@ -1,0 +1,439 @@
+{
+  "home_assistant": {
+    "installation_type": "Home Assistant Container",
+    "version": "2026.3.0",
+    "dev": false,
+    "hassio": false,
+    "virtualenv": false,
+    "python_version": "3.14.2",
+    "docker": true,
+    "arch": "x86_64",
+    "timezone": "Europe/Amsterdam",
+    "os_name": "Linux",
+    "os_version": "6.8.0-90-generic",
+    "container_arch": "amd64",
+    "run_as_root": true
+  },
+  "custom_components": {
+    "battery_controller": {
+      "documentation": "https://www.github.com/bvweerd/battery_controller",
+      "version": "1.0.0",
+      "requirements": []
+    },
+    "simple_pid_controller": {
+      "documentation": "https://www.github.com/bvweerd/simple_pid_controller",
+      "version": "1.4.2",
+      "requirements": [
+        "simple-pid==2.0.1"
+      ]
+    },
+    "alarmo": {
+      "documentation": "https://github.com/nielsfaber/alarmo",
+      "version": "1.10.16",
+      "requirements": []
+    },
+    "tuya_local": {
+      "documentation": "https://github.com/make-all/tuya-local",
+      "version": "2026.2.0",
+      "requirements": [
+        "tinytuya==1.17.4",
+        "tuya-device-sharing-sdk~=0.2.1"
+      ]
+    },
+    "browser_mod": {
+      "documentation": "https://github.com/thomasloven/hass-browser_mod/blob/master/README.md",
+      "version": "2.8.2",
+      "requirements": []
+    },
+    "heating_curve_optimizer": {
+      "documentation": "https://www.github.com/bvweerd/heating_curve_optimizer",
+      "version": "1.0.2",
+      "requirements": [
+        "aiohttp"
+      ]
+    },
+    "watchman": {
+      "documentation": "https://github.com/dummylabs/thewatchman",
+      "version": "0.8.4",
+      "requirements": [
+        "prettytable==3.12.0"
+      ]
+    },
+    "hacs": {
+      "documentation": "https://hacs.xyz/docs/use/",
+      "version": "2.0.5",
+      "requirements": [
+        "aiogithubapi>=22.10.1"
+      ]
+    },
+    "mbapi2020": {
+      "documentation": "https://github.com/ReneNulschDE/mbapi2020",
+      "version": "v0.34.0",
+      "requirements": [
+        "protobuf>=3.19.1"
+      ]
+    },
+    "moonraker": {
+      "documentation": "https://moonraker-home-assistant.readthedocs.io/en/latest/",
+      "version": "1.13.3",
+      "requirements": [
+        "moonraker-api==2.0.6"
+      ]
+    },
+    "afvalwijzer": {
+      "documentation": "https://github.com/xirixiz/homeassistant-afvalwijzer/blob/main/README.md",
+      "version": "2026.1011",
+      "requirements": [
+        "requests",
+        "urllib3"
+      ]
+    },
+    "spoolman": {
+      "documentation": "https://github.com/Disane87/spoolman-homeassistant",
+      "version": "0.0.0",
+      "requirements": []
+    },
+    "zonneplan_one": {
+      "documentation": "https://github.com/fsaris/home-assistant-zonneplan-one",
+      "version": "2026.2.1",
+      "requirements": []
+    },
+    "frigate": {
+      "documentation": "https://github.com/blakeblackshear/frigate",
+      "version": "5.14.2",
+      "requirements": [
+        "hass-web-proxy-lib==0.0.7",
+        "titlecase==2.4.1"
+      ]
+    },
+    "dynamic_energy_contract_calculator": {
+      "documentation": "https://www.github.com/bvweerd/dynamic_energy_contract_calculator",
+      "version": "v1.3.6",
+      "requirements": []
+    },
+    "nordpool": {
+      "documentation": "https://github.com/custom-components/nordpool/",
+      "version": "0.0.18",
+      "requirements": [
+        "backoff"
+      ]
+    },
+    "spook_inverse": {
+      "documentation": "https://spook.boo",
+      "version": "4.0.1",
+      "requirements": []
+    },
+    "ble_monitor": {
+      "documentation": "https://github.com/custom-components/ble_monitor",
+      "version": "13.11.1",
+      "requirements": [
+        "pycryptodomex>=3.23.0",
+        "janus>=2.0.0",
+        "aioblescan>=0.2.14",
+        "btsocket>=0.3.0",
+        "pyric>=0.1.6.3"
+      ]
+    },
+    "spook": {
+      "documentation": "https://spook.boo",
+      "version": "4.0.1",
+      "requirements": []
+    },
+    "powercalc": {
+      "documentation": "https://docs.powercalc.nl",
+      "version": "v1.20.8",
+      "requirements": [
+        "numpy>=1.21.1"
+      ]
+    },
+    "geekmagic": {
+      "documentation": "https://github.com/adrienbrault/geekmagic-hacs",
+      "version": "1.0.0",
+      "requirements": [
+        "pillow>=10.0.0",
+        "palettable>=3.3.0",
+        "stretchable>=1.0.0"
+      ]
+    }
+  },
+  "integration_manifest": {
+    "domain": "dynamic_energy_contract_calculator",
+    "name": "Dynamic Energy Contract Calculator",
+    "codeowners": [
+      "bvweerd"
+    ],
+    "config_flow": true,
+    "dependencies": [],
+    "documentation": "https://www.github.com/bvweerd/dynamic_energy_contract_calculator",
+    "homekit": {},
+    "iot_class": "calculated",
+    "issue_tracker": "https://github.com/bvweerd/dynamic_energy_contract_calculator/issues",
+    "quality_scale": "silver",
+    "requirements": [],
+    "ssdp": [],
+    "version": "v1.3.6",
+    "zeroconf": [],
+    "is_built_in": false,
+    "overwrites_built_in": false
+  },
+  "setup_times": {
+    "null": {
+      "setup": 0.0001092301681637764
+    },
+    "01KBD8WWSHAPXYAT04331WRAYS": {
+      "wait_import_platforms": -2.4894740050658584,
+      "config_entry_setup": 4.531605035066605
+    }
+  },
+  "data": {
+    "entry": {
+      "data": {
+        "configurations": [
+          {
+            "source_type": "Electricity consumption",
+            "sources": [
+              "sensor.energy_consumption_tarif_1",
+              "sensor.energy_consumption_tarif_2"
+            ]
+          },
+          {
+            "source_type": "Electricity production",
+            "sources": [
+              "sensor.energy_production_tarif_1",
+              "sensor.energy_production_tarif_2"
+            ]
+          },
+          {
+            "source_type": "Gas consumption",
+            "sources": [
+              "sensor.gas_consumption"
+            ]
+          }
+        ],
+        "price_sensor": [
+          "sensor.nordpool_kwh_nl_eur_5_10_0"
+        ],
+        "price_sensor_gas": [
+          "input_number.gastarief_levering"
+        ],
+        "price_settings": {
+          "average_prices_to_hourly": true,
+          "contract_start_date": "2026-01-25",
+          "netting_enabled": true,
+          "per_day_government_electricity_tax_rebate": 1.42975,
+          "per_day_grid_operator_electricity_connection_fee": 1.07438,
+          "per_day_grid_operator_gas_connection_fee": 0.5874,
+          "per_day_supplier_electricity_standing_charge": 0.17355,
+          "per_day_supplier_gas_standing_charge": 0.22249,
+          "per_unit_government_electricity_tax": 0.1088,
+          "per_unit_government_gas_tax": 0.57816,
+          "per_unit_supplier_electricity_markup": 0.01653,
+          "per_unit_supplier_electricity_production_markup": 0.02,
+          "per_unit_supplier_gas_markup": 0.3902,
+          "price_sensor": [
+            "sensor.nordpool_kwh_nl_eur_5_10_0"
+          ],
+          "price_sensor_gas": [
+            "input_number.gastarief_levering"
+          ],
+          "production_price_include_vat": false,
+          "reset_on_contract_anniversary": true,
+          "solar_bonus_annual_kwh_limit": 7500.0,
+          "solar_bonus_enabled": true,
+          "solar_bonus_percentage": 10.0,
+          "vat_percentage": 21.0
+        }
+      },
+      "options": {
+        "configurations": [
+          {
+            "source_type": "Electricity consumption",
+            "sources": [
+              "sensor.energy_consumption_tarif_1",
+              "sensor.energy_consumption_tarif_2"
+            ]
+          },
+          {
+            "source_type": "Electricity production",
+            "sources": [
+              "sensor.energy_production_tarif_1",
+              "sensor.energy_production_tarif_2"
+            ]
+          },
+          {
+            "source_type": "Gas consumption",
+            "sources": [
+              "sensor.gas_consumption"
+            ]
+          }
+        ],
+        "price_sensor": [
+          "sensor.nordpool_kwh_nl_eur_5_10_0"
+        ],
+        "price_sensor_gas": [
+          "input_number.gastarief_levering"
+        ],
+        "price_settings": {
+          "average_prices_to_hourly": true,
+          "contract_start_date": "2026-01-25",
+          "netting_enabled": true,
+          "per_day_government_electricity_tax_rebate": 1.4241,
+          "per_day_grid_operator_electricity_connection_fee": 1.0773,
+          "per_day_grid_operator_gas_connection_fee": 0.42251,
+          "per_day_supplier_electricity_standing_charge": 0.16982,
+          "per_day_supplier_gas_standing_charge": 0.22249,
+          "per_unit_government_electricity_tax": 0.0916,
+          "per_unit_government_gas_tax": 0.601,
+          "per_unit_supplier_electricity_markup": 0.01653,
+          "per_unit_supplier_electricity_production_markup": 0.02,
+          "per_unit_supplier_gas_markup": 0.0,
+          "price_sensor": [
+            "sensor.nordpool_kwh_nl_eur_5_10_0"
+          ],
+          "price_sensor_gas": [
+            "input_number.gastarief_levering"
+          ],
+          "production_price_include_vat": false,
+          "reset_on_contract_anniversary": true,
+          "solar_bonus_annual_kwh_limit": 7500.0,
+          "solar_bonus_enabled": true,
+          "solar_bonus_percentage": 10.0,
+          "vat_percentage": 21.0
+        }
+      }
+    },
+    "sources": [
+      {
+        "entity_id": "sensor.energy_consumption_tarif_1",
+        "state": {
+          "entity_id": "sensor.energy_consumption_tarif_1",
+          "state": "10668.476",
+          "attributes": {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "friendly_name": "Electricity Meter Energieverbruik (tarief 1)"
+          },
+          "last_changed": "2026-03-08T13:59:34.337052+00:00",
+          "last_reported": "2026-03-08T14:09:05.495853+00:00",
+          "last_updated": "2026-03-08T13:59:34.337052+00:00",
+          "context": "**REDACTED**"
+        }
+      },
+      {
+        "entity_id": "sensor.energy_consumption_tarif_2",
+        "state": {
+          "entity_id": "sensor.energy_consumption_tarif_2",
+          "state": "9774.537",
+          "attributes": {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "friendly_name": "Electricity Meter Energieverbruik (tarief 2)"
+          },
+          "last_changed": "2026-03-08T09:22:30.870477+00:00",
+          "last_reported": "2026-03-08T09:22:30.870477+00:00",
+          "last_updated": "2026-03-08T09:22:30.870477+00:00",
+          "context": "**REDACTED**"
+        }
+      },
+      {
+        "entity_id": "sensor.energy_production_tarif_1",
+        "state": {
+          "entity_id": "sensor.energy_production_tarif_1",
+          "state": "4859.896",
+          "attributes": {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "friendly_name": "Electricity Meter Energieproductie (tarief 1)"
+          },
+          "last_changed": "2026-03-08T14:09:05.496270+00:00",
+          "last_reported": "2026-03-08T14:09:05.496270+00:00",
+          "last_updated": "2026-03-08T14:09:05.496270+00:00",
+          "context": "**REDACTED**"
+        }
+      },
+      {
+        "entity_id": "sensor.energy_production_tarif_2",
+        "state": {
+          "entity_id": "sensor.energy_production_tarif_2",
+          "state": "11346.813",
+          "attributes": {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "kWh",
+            "device_class": "energy",
+            "friendly_name": "Electricity Meter Energieproductie (tarief 2)"
+          },
+          "last_changed": "2026-03-08T09:22:30.871004+00:00",
+          "last_reported": "2026-03-08T09:22:30.871004+00:00",
+          "last_updated": "2026-03-08T09:22:30.871004+00:00",
+          "context": "**REDACTED**"
+        }
+      },
+      {
+        "entity_id": "sensor.gas_consumption",
+        "state": {
+          "entity_id": "sensor.gas_consumption",
+          "state": "8875.249",
+          "attributes": {
+            "state_class": "total_increasing",
+            "unit_of_measurement": "m\u00b3",
+            "device_class": "gas",
+            "friendly_name": "Gas Meter Gasverbruik"
+          },
+          "last_changed": "2026-03-08T13:04:47.718872+00:00",
+          "last_reported": "2026-03-08T14:09:05.491474+00:00",
+          "last_updated": "2026-03-08T13:04:47.718872+00:00",
+          "context": "**REDACTED**"
+        }
+      }
+    ],
+    "netting": {
+      "enabled": true,
+      "net_consumption_kwh": 493.335,
+      "tax_balance_per_sensor": {
+        "dynamic_energy_contract_calculator_sensor_energy_consumption_tarif_1_cost_total": 54.67950862,
+        "dynamic_energy_contract_calculator_sensor_energy_consumption_tarif_2_cost_total": 0.0
+      }
+    },
+    "solar_bonus": {
+      "enabled": true,
+      "year_production_kwh": 137.10800000000745,
+      "total_bonus_euro": 1.1812133280001829
+    },
+    "binary_sensors": {
+      "solar_bonus_active": {
+        "entity_id": "binary_sensor.solar_bonus_active",
+        "state": "on",
+        "attributes": {
+          "friendly_name": "Solar Bonus Active"
+        },
+        "last_changed": "2026-03-08T09:22:23.701475+00:00",
+        "last_reported": "2026-03-08T14:08:56.331626+00:00",
+        "last_updated": "2026-03-08T09:22:23.701475+00:00",
+        "context": "**REDACTED**"
+      },
+      "production_price_positive": {
+        "entity_id": "binary_sensor.production_price_positive",
+        "state": "on",
+        "attributes": {
+          "friendly_name": "Production Price Positive"
+        },
+        "last_changed": "2026-03-08T09:22:23.701738+00:00",
+        "last_reported": "2026-03-08T14:08:56.331662+00:00",
+        "last_updated": "2026-03-08T09:22:23.701738+00:00",
+        "context": "**REDACTED**"
+      }
+    }
+  },
+  "issues": [
+    {
+      "created": "2025-08-06T06:56:23.553382+00:00",
+      "dismissed_version": "2025.7.4",
+      "domain": "dynamic_energy_contract_calculator",
+      "is_persistent": false,
+      "issue_id": "price_unavailable_sensor.gas_consumption_cost"
+    }
+  ]
+}
