@@ -120,9 +120,13 @@ DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+
 DEFAULT_CONTROL_MODE = "hybrid"
 
 # DP resolution constants
-# power_step_w × time_step_hours must equal the SoC resolution used in the optimizer.
-# SOC_RESOLUTION_WH is the minimum (floor) used only as a reference; the optimizer
-# calculates the effective resolution dynamically as max(1, power_step_w × dt_h).
+# SoC resolution is max(SOC_RESOLUTION_WH, power_step_w × dt_h).
+# SOC_RESOLUTION_WH must be large enough that arbitrage is decisively profitable:
+# with too-fine resolution (e.g. 8 Wh at 5-min), the V-function slope collapses
+# to near the feed-in price, making charging appear break-even and preventing
+# the optimizer from finding profitable charge/discharge cycles.
+# 25 Wh ensures ~6× margin between charging cost and discharge revenue per state.
+SOC_RESOLUTION_WH = 25.0  # Minimum SoC state size in Wh
 POWER_STEP_W = 100  # Battery power action granularity in W
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)

@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 
 from .battery_model import BatteryConfig
-from .const import DC_TO_AC_INVERTER_EFFICIENCY, POWER_STEP_W
+from .const import DC_TO_AC_INVERTER_EFFICIENCY, POWER_STEP_W, SOC_RESOLUTION_WH
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -197,12 +197,13 @@ def optimize_battery_schedule(
     time_step_hours = time_step_minutes / 60.0
 
     # Discretize SoC space.
-    # Resolution is derived from the power step and time step so that exactly one
-    # power-step at minimum non-zero power moves exactly one SoC state.
-    # e.g. 15-min: 100W × 0.25h = 25 Wh
-    #       5-min: 100W × 1/12h = 8.333 Wh
+    # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy.
+    # The minimum floor (SOC_RESOLUTION_WH = 25 Wh) is critical: with short time
+    # steps (e.g. 5-min) the per-step energy (8.3 Wh) is so small that the
+    # V-function slope collapses to the feed-in price, making the DP unable to
+    # find profitable charge/discharge cycles. 25 Wh ensures ~6× margin.
     power_step_w = POWER_STEP_W
-    soc_resolution_wh = max(0.1, power_step_w * time_step_hours)
+    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), power_step_w * time_step_hours)
     min_soc_wh = battery_config.min_soc_kwh * 1000
     max_soc_wh = battery_config.max_soc_kwh * 1000
 
@@ -272,6 +273,13 @@ def optimize_battery_schedule(
 
                 # Find nearest SoC state for next step
                 new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
+
+                # Skip sub-resolution actions: a non-zero action that doesn't
+                # cross a SoC state boundary appears "free" to the DP (no future
+                # value change) while still incurring real RTE losses, producing
+                # oscillating micro-charge/discharge artifacts.
+                if action_w != 0 and new_soc_idx == s_idx:
+                    continue
 
                 # Calculate immediate cost
                 step_cost = calculate_step_cost(
