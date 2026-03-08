@@ -158,6 +158,86 @@
       "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC)."
     }
   },
+  "config_subentries": {
+    "battery": {
+      "flow_title": "Batterij",
+      "initiate_flow": {
+        "user": "Batterijsysteem toevoegen"
+      },
+      "step": {
+        "user": {
+          "title": "Batterij toevoegen",
+          "description": "Configureer een batterijsysteem. SoC sensor is verplicht. Vermogensensor verbetert realtime statusdetectie.",
+          "data": {
+            "name": "Naam (optioneel)",
+            "capacity_kwh": "Capaciteit (kWh)",
+            "max_charge_power_kw": "Max laadvermogen (kW)",
+            "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
+            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Batterij SoC sensor",
+            "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+            "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
+          }
+        },
+        "reconfigure": {
+          "title": "Batterij bewerken",
+          "description": "Pas de configuratie van deze batterij aan.",
+          "data": {
+            "name": "Naam (optioneel)",
+            "capacity_kwh": "Capaciteit (kWh)",
+            "max_charge_power_kw": "Max laadvermogen (kW)",
+            "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
+            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Batterij SoC sensor",
+            "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+            "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
+          }
+        }
+      },
+      "error": {
+        "invalid_battery_input": "Ongeldige batterijconfiguratie. Controleer capaciteit, vermogensgrenzen en rendementswaarden."
+      }
+    },
+    "pv_array": {
+      "flow_title": "PV Array",
+      "initiate_flow": {
+        "user": "PV Array toevoegen"
+      },
+      "step": {
+        "user": {
+          "title": "PV Array toevoegen",
+          "description": "Configureer een PV array. Voor DC-gekoppelde arrays (panelen direct op batterij-omvormer), schakel de DC-gekoppeld optie in.",
+          "data": {
+            "name": "Naam (optioneel)",
+            "peak_power_kwp": "Piekvermogen (kWp)",
+            "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
+            "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
+            "efficiency_factor": "Systeemrendement (0-1, rekening met schaduw, bedrading, vervuiling)",
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+          }
+        },
+        "reconfigure": {
+          "title": "PV Array bewerken",
+          "description": "Pas de configuratie van deze PV array aan.",
+          "data": {
+            "name": "Naam (optioneel)",
+            "peak_power_kwp": "Piekvermogen (kWp)",
+            "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
+            "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
+            "efficiency_factor": "Systeemrendement (0-1)",
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+          }
+        }
+      },
+      "error": {
+        "invalid_pv_input": "Ongeldige PV array configuratie. Piekvermogen moet groter zijn dan 0, oriëntatie 0-360, hellingshoek 0-90."
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "optimal_power": {

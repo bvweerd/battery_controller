@@ -29,7 +29,8 @@
               "optimization_interval_minutes": "Optimization interval (minutes)",
               "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
               "zero_grid_enabled": "Zero-grid control enabled",
-              "zero_grid_response_time_s": "Zero-grid update interval (seconds)"
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
+              "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
             }
           }
         }
@@ -72,7 +73,8 @@
               "optimization_interval_minutes": "Optimization interval (minutes)",
               "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
               "zero_grid_enabled": "Zero-grid control enabled",
-              "zero_grid_response_time_s": "Zero-grid update interval (seconds)"
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
+              "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
             }
           }
         }
@@ -85,6 +87,9 @@
   "config_subentries": {
     "battery": {
       "flow_title": "Battery",
+      "initiate_flow": {
+        "user": "Add Battery System"
+      },
       "step": {
         "user": {
           "title": "Add Battery",
@@ -125,6 +130,9 @@
     },
     "pv_array": {
       "flow_title": "PV Array",
+      "initiate_flow": {
+        "user": "Add PV Array"
+      },
       "step": {
         "user": {
           "title": "Add PV Array",

@@ -6,8 +6,13 @@ import logging
 import math
 from dataclasses import dataclass
 
-from .battery_model import BatteryConfig
-from .const import DC_TO_AC_INVERTER_EFFICIENCY, POWER_STEP_W, SOC_RESOLUTION_WH
+from .battery_model import BatteryConfig, calculate_efficiency
+from .const import (
+    DC_TO_AC_INVERTER_EFFICIENCY,
+    MIN_CYCLE_KWH,
+    POWER_STEP_W,
+    SOC_RESOLUTION_WH,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +59,8 @@ def calculate_step_cost(
     degradation_cost_per_kwh: float,  # EUR/kWh throughput
     battery_config: BatteryConfig,
     pv_dc_production_w: float = 0.0,  # DC-coupled PV production in W
+    charge_eff_override: float | None = None,  # Override sqrt(RTE) for charging
+    discharge_eff_override: float | None = None,  # Override sqrt(RTE) for discharging
 ) -> float:
     """Calculate cost for a single time step.
 
@@ -64,17 +71,24 @@ def calculate_step_cost(
        - discharge_efficiency = sqrt(RTE) ~ 0.95
        - Charging: grid_energy = battery_energy / charge_eff
        - Discharging: usable_energy = battery_energy * discharge_eff
+       - When overrides are provided (from calculate_efficiency), these include
+         C-rate and SoC derating on top of the base sqrt(RTE).
 
     2. DC-coupled PV:
        - PV panels connected directly to battery inverter DC bus
        - Charge efficiency ~97% (MPPT only, no AC conversion)
        - This PV power is "free" and doesn't pass through grid meter
-       - Excess DC PV (when battery full) goes through inverter to AC
+       - In idle mode: DC PV passively charges battery up to available headroom
+       - Excess DC PV (when battery full or discharging) goes through inverter to AC
 
     3. Degradation:
        - Every kWh through the battery costs degradation
        - DC PV charging also counts for degradation
        - Prevents unnecessary cycles at small price differences
+
+    4. Grid capacity cap:
+       - If battery_config.max_grid_power_kw > 0, both import and export are capped.
+       - Excess PV that cannot be exported is treated as zero-revenue generation.
 
     Args:
         time_step_hours: Duration of time step in hours
@@ -82,27 +96,41 @@ def calculate_step_cost(
         action_w: Battery action in W (positive = charge, negative = discharge)
         grid_price: Grid buy price in EUR/kWh
         feed_in_price: Grid sell price in EUR/kWh
-        pv_production_w: AC-side PV production in W (already inverted)
+        pv_production_w: AC-side PV production in W (already inverted, clamped >= 0)
         consumption_w: Consumption in W
         rte: Round trip efficiency (0-1)
         degradation_cost_per_kwh: Degradation cost in EUR/kWh throughput
         battery_config: Battery configuration
-        pv_dc_production_w: DC-coupled PV production in W (before inverter)
+        pv_dc_production_w: DC-coupled PV production in W (before inverter, clamped >= 0)
+        charge_eff_override: Actual charge efficiency including C-rate/SoC derating.
+        discharge_eff_override: Actual discharge efficiency including C-rate/SoC derating.
 
     Returns:
         Total cost in EUR for this time step
     """
     sqrt_rte = math.sqrt(rte)
+    # Use overridden efficiencies if provided (include C-rate/SoC derating)
+    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
+    discharge_eff = (
+        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    )
     dc_eff = (
         battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else sqrt_rte
     )
 
+    # Clamp PV values: a faulty sensor should not appear as load
+    pv_production_w = max(0.0, pv_production_w)
+    pv_dc_production_w = max(0.0, pv_dc_production_w)
+
     # Handle DC-coupled PV
-    # DC PV can charge battery directly at higher efficiency
-    # Only relevant when charging (action_w > 0)
+    # DC PV can charge battery directly at higher efficiency.
+    # In idle mode (action_w == 0) DC-coupled inverters still absorb DC PV into
+    # the battery up to available headroom — the AC setpoint of 0 only stops
+    # AC-side grid charging, not DC MPPT charging.
     dc_charge_w = 0.0
     ac_charge_w = 0.0
     dc_pv_excess_w = pv_dc_production_w  # DC PV not used by battery -> goes to AC
+    throughput_kwh = 0.0
 
     if action_w > 0:  # CHARGING
         # Use DC PV first (free energy, higher efficiency)
@@ -110,21 +138,44 @@ def calculate_step_cost(
         ac_charge_w = action_w - dc_charge_w
 
         # DC PV not used by battery goes to AC side (through inverter)
-        dc_pv_used_w = dc_charge_w / dc_eff  # Actual DC PV consumed
-        dc_pv_excess_w = max(0, pv_dc_production_w - dc_pv_used_w)
+        dc_pv_used_w = dc_charge_w / dc_eff if dc_eff > 0 else 0.0
+        dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_used_w)
 
         # AC charging needs grid energy (with AC charge efficiency losses)
-        grid_to_battery_w = ac_charge_w / sqrt_rte if ac_charge_w > 0 else 0.0
-    else:  # DISCHARGING or IDLE
-        # DC PV excess goes entirely to AC side (battery not absorbing it)
+        grid_to_battery_w = ac_charge_w / charge_eff if ac_charge_w > 0 else 0.0
+
+        throughput_kwh = action_w * time_step_hours / 1000
+
+    elif action_w < 0:  # DISCHARGING
+        # All DC PV excess goes to AC side when discharging
         dc_pv_excess_w = pv_dc_production_w
 
-        if action_w < 0:
-            # Energy from battery to home (including discharge losses)
-            usable_power_w = abs(action_w) * sqrt_rte
-            grid_to_battery_w = -usable_power_w  # Negative = to home
+        # Energy from battery to home (including discharge losses)
+        usable_power_w = abs(action_w) * discharge_eff
+        grid_to_battery_w = -usable_power_w  # Negative = to home
+
+        throughput_kwh = abs(action_w) * time_step_hours / 1000
+
+    else:  # IDLE (action_w == 0)
+        grid_to_battery_w = 0.0
+        if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
+            # DC-coupled inverters absorb DC PV into the battery passively even
+            # when the AC setpoint is 0. Model this as free passive charging up
+            # to the available SoC headroom.
+            max_soc_wh = battery_config.max_soc_kwh * 1000
+            headroom_wh = max(0.0, max_soc_wh - soc_wh)
+            passive_charge_wh = min(
+                pv_dc_production_w * dc_eff * time_step_hours, headroom_wh
+            )
+            passive_charge_w = (
+                passive_charge_wh / time_step_hours if time_step_hours > 0 else 0.0
+            )
+            dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
+            dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
+            throughput_kwh = passive_charge_wh / 1000
         else:
-            grid_to_battery_w = 0.0
+            dc_pv_excess_w = pv_dc_production_w
+            throughput_kwh = 0.0
 
     # DC PV excess converted to AC (through inverter, ~96% efficiency)
     dc_pv_to_ac_w = (
@@ -137,6 +188,11 @@ def calculate_step_cost(
     # Net grid exchange (positive = buy, negative = sell)
     net_grid_w = consumption_w - total_ac_pv_w + grid_to_battery_w
 
+    # Apply grid capacity cap: limit both import and export (0 = unlimited)
+    if battery_config.max_grid_power_kw > 0:
+        cap_w = battery_config.max_grid_power_kw * 1000
+        net_grid_w = max(-cap_w, min(cap_w, net_grid_w))
+
     # Grid costs/revenue
     energy_kwh = abs(net_grid_w) * time_step_hours / 1000
     if net_grid_w > 0:
@@ -144,8 +200,7 @@ def calculate_step_cost(
     else:
         grid_cost = -energy_kwh * feed_in_price  # Selling (negative cost)
 
-    # Degradation costs (all battery throughput, including DC PV)
-    throughput_kwh = abs(action_w) * time_step_hours / 1000
+    # Degradation costs (all battery throughput, including passive DC PV charging)
     degradation_cost = throughput_kwh * degradation_cost_per_kwh
 
     return grid_cost + degradation_cost
@@ -261,15 +316,20 @@ def optimize_battery_schedule(
             consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
         )
 
+        # Pre-compute current SoC percent for efficiency derating (P1.2).
+        # Efficiency is SoC-dependent, so we compute it per state in the inner loop.
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
+            soc_percent = (soc_wh / (battery_config.capacity_kwh * 1000)) * 100.0
 
             for action_w in actions:
-                # SoC transition: action_w is battery-side power.
-                # Efficiency losses are on the grid/AC side and handled
-                # in calculate_step_cost. The battery stores/releases
-                # exactly action_w * time_step_hours Wh.
+                # SoC transition: action_w is battery-side power (explicit AC command).
+                # For DC-coupled systems in idle mode (action_w == 0), the MPPT
+                # charger passively charges the battery from DC PV up to available
+                # headroom — the AC setpoint of 0 only stops AC-side grid charging.
+                # Efficiency losses are on the grid/AC side and handled in
+                # calculate_step_cost.
                 if action_w > 0:
                     energy_change_wh = action_w * time_step_hours
                     new_soc_wh = soc_wh + energy_change_wh
@@ -281,17 +341,47 @@ def optimize_battery_schedule(
                     if new_soc_wh < min_soc_wh:
                         continue
                 else:
-                    new_soc_wh = soc_wh
+                    # Idle: no explicit AC charge/discharge.
+                    # For DC-coupled systems, DC PV passively charges the battery.
+                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                        dc_eff = battery_config.pv_dc_efficiency
+                        headroom_wh = max(0.0, max_soc_wh - soc_wh)
+                        passive_wh = min(
+                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        )
+                        new_soc_wh = soc_wh + passive_wh
+                    else:
+                        new_soc_wh = soc_wh
 
                 # Find nearest SoC state for next step
                 new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
 
-                # Skip sub-resolution actions: a non-zero action that doesn't
+                # Skip sub-resolution AC actions: a non-zero action that doesn't
                 # cross a SoC state boundary appears "free" to the DP (no future
                 # value change) while still incurring real RTE losses, producing
                 # oscillating micro-charge/discharge artifacts.
+                # Idle (action_w == 0) is exempt — passive DC PV may still change
+                # the SoC bin, and even if it doesn't, the cost is real.
                 if action_w != 0 and new_soc_idx == s_idx:
                     continue
+
+                # Compute per-action efficiency using C-rate and SoC derating (P1.2).
+                # calculate_efficiency returns base_eff × c_rate_factor × soc_factor,
+                # where base_eff = sqrt(RTE). This correctly models lower efficiency
+                # at high C-rates or extreme SoC levels.
+                if action_w > 0:
+                    c_eff = calculate_efficiency(
+                        action_w / 1000.0, soc_percent, battery_config
+                    )
+                    d_eff = None
+                elif action_w < 0:
+                    c_eff = None
+                    d_eff = calculate_efficiency(
+                        action_w / 1000.0, soc_percent, battery_config
+                    )
+                else:
+                    c_eff = None
+                    d_eff = None
 
                 # Calculate immediate cost
                 step_cost = calculate_step_cost(
@@ -306,6 +396,8 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    charge_eff_override=c_eff,
+                    discharge_eff_override=d_eff,
                 )
 
                 # Total cost = immediate + future
@@ -348,6 +440,7 @@ def optimize_battery_schedule(
     for t in range(n_steps):
         soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
         action_w = policy[t][soc_idx]
+        pv_dc_w = pv_dc_forecast[t] * 1000 if t < len(pv_dc_forecast) else 0.0
 
         power_kw = action_w / 1000
         power_schedule_kw.append(power_kw)
@@ -363,9 +456,26 @@ def optimize_battery_schedule(
                 current_soc - abs(action_w) * time_step_hours, float(min_soc_wh)
             )
         else:
+            # Idle: account for passive DC PV charging in forward pass
+            if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                dc_eff = battery_config.pv_dc_efficiency
+                headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
+                passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
+                current_soc = current_soc + passive_wh
             mode_schedule.append("idle")
 
         soc_schedule_kwh.append(current_soc / 1000)
+
+    # Oscillation filter window: at least 2 h, but scale with battery size so
+    # that a small battery (5 kWh / 5 kW = 1 h cycle) uses a shorter window and
+    # a large battery (20 kWh / 5 kW = 4 h cycle) uses a longer one.
+    usable_kwh = battery_config.max_soc_kwh - battery_config.min_soc_kwh
+    cycle_hours = (
+        usable_kwh / battery_config.max_discharge_power_kw
+        if battery_config.max_discharge_power_kw > 0
+        else 2.0
+    )
+    oscillation_window_hours = max(2.0, cycle_hours)
 
     # Post-process: remove unprofitable oscillations
     power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_oscillations(
@@ -384,6 +494,16 @@ def optimize_battery_schedule(
         feed_in_forecast=(
             feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps]
         ),
+        oscillation_window_hours=oscillation_window_hours,
+    )
+
+    # Post-process: suppress micro-cycles (P5.1)
+    power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_micro_cycles(
+        power_schedule_kw=power_schedule_kw,
+        mode_schedule=mode_schedule,
+        soc_schedule_kwh=soc_schedule_kwh,
+        time_step_hours=time_step_hours,
+        min_cycle_kwh=MIN_CYCLE_KWH,
     )
 
     # Calculate costs
@@ -452,6 +572,7 @@ def _filter_oscillations(
     pv_forecast: list[float] | None = None,
     consumption_forecast: list[float] | None = None,
     feed_in_forecast: list[float] | None = None,
+    oscillation_window_hours: float = 2.0,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out unprofitable oscillations from the schedule.
 
@@ -507,8 +628,8 @@ def _filter_oscillations(
         # Otherwise charging from grid
         return price_forecast[timestep]
 
-    # 2-hour lookahead window, independent of time step size
-    lookahead_steps = max(1, round(2.0 / time_step_hours))
+    # Lookahead window: scale with battery size, minimum 2 hours
+    lookahead_steps = max(1, round(oscillation_window_hours / time_step_hours))
 
     # Look for rapid charge/discharge oscillations
     i = 0
@@ -572,7 +693,60 @@ def _filter_oscillations(
     return filtered_power, filtered_mode, filtered_soc
 
 
-def _find_nearest_soc_idx(soc_wh: float, soc_states: list[int]) -> int:
+def _filter_micro_cycles(
+    power_schedule_kw: list[float],
+    mode_schedule: list[str],
+    soc_schedule_kwh: list[float],
+    time_step_hours: float,
+    min_cycle_kwh: float = 0.2,
+) -> tuple[list[float], list[str], list[float]]:
+    """Filter out micro-cycles whose total energy is below min_cycle_kwh.
+
+    Charge or discharge segments that move less energy than min_cycle_kwh have
+    disproportionately high degradation cost per kWh of useful storage.  Replacing
+    them with idle preserves battery lifespan without meaningful cost impact.
+
+    Args:
+        power_schedule_kw: Power schedule in kW
+        mode_schedule: Mode schedule
+        soc_schedule_kwh: SoC schedule in kWh
+        time_step_hours: Time step duration in hours
+        min_cycle_kwh: Minimum energy per charge/discharge block in kWh
+
+    Returns:
+        Filtered (power_schedule, mode_schedule, soc_schedule)
+    """
+    if not power_schedule_kw:
+        return power_schedule_kw, mode_schedule, soc_schedule_kwh
+
+    filtered_power = list(power_schedule_kw)
+    filtered_mode = list(mode_schedule)
+
+    i = 0
+    while i < len(filtered_mode):
+        current_dir = filtered_mode[i]
+        if current_dir not in ("charging", "discharging"):
+            i += 1
+            continue
+
+        # Find the extent of this contiguous charge/discharge block
+        j = i
+        total_energy_kwh = 0.0
+        while j < len(filtered_mode) and filtered_mode[j] == current_dir:
+            total_energy_kwh += abs(filtered_power[j]) * time_step_hours
+            j += 1
+
+        if total_energy_kwh < min_cycle_kwh:
+            for k in range(i, j):
+                filtered_power[k] = 0.0
+                filtered_mode[k] = "idle"
+
+        i = j
+
+    return filtered_power, filtered_mode, soc_schedule_kwh
+
+
+def _find_nearest_soc_idx(soc_wh: float, soc_states: list[float]) -> int:
     """Find the index of the nearest SoC state.
 
     Uses direct calculation since soc_states is a uniform grid,

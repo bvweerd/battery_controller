@@ -27,6 +27,9 @@ class BatteryConfig:
     pv_dc_peak_power_kwp: float = 0.0
     pv_dc_efficiency: float = 0.97  # MPPT + DC-DC conversion efficiency
 
+    # Grid capacity cap: maximum import/export power at grid connection (0 = unlimited)
+    max_grid_power_kw: float = 0.0
+
     # Derived values (calculated in __post_init__)
     charge_efficiency: float = field(init=False)
     discharge_efficiency: float = field(init=False)
@@ -107,6 +110,7 @@ class BatteryConfig:
             CONF_PV_DC_COUPLED,
             CONF_PV_DC_PEAK_POWER_KWP,
             CONF_PV_DC_EFFICIENCY,
+            CONF_MAX_GRID_POWER_KW,
             DEFAULT_CAPACITY_KWH,
             DEFAULT_MAX_CHARGE_POWER_KW,
             DEFAULT_MAX_DISCHARGE_POWER_KW,
@@ -116,6 +120,7 @@ class BatteryConfig:
             DEFAULT_PV_DC_COUPLED,
             DEFAULT_PV_DC_PEAK_POWER_KWP,
             DEFAULT_PV_DC_EFFICIENCY,
+            DEFAULT_MAX_GRID_POWER_KW,
         )
 
         return cls(
@@ -142,6 +147,9 @@ class BatteryConfig:
             ),
             pv_dc_efficiency=float(
                 config.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
+            ),
+            max_grid_power_kw=float(
+                config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
             ),
         )
 
@@ -179,6 +187,12 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         else 0.97
     )
 
+    # Feed-in cap: sum of individual caps (0 = unlimited for any → unlimited overall)
+    feed_in_caps = [c.max_grid_power_kw for c in configs]
+    combined_feed_in_kw = (
+        0.0 if any(cap == 0.0 for cap in feed_in_caps) else sum(feed_in_caps)
+    )
+
     return BatteryConfig(
         capacity_kwh=total_cap,
         max_charge_power_kw=sum(c.max_charge_power_kw for c in configs),
@@ -189,6 +203,7 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         pv_dc_coupled=pv_dc_coupled,
         pv_dc_peak_power_kwp=pv_dc_peak,
         pv_dc_efficiency=pv_dc_eff,
+        max_grid_power_kw=combined_feed_in_kw,
     )
 
 

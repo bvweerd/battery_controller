@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -143,10 +144,17 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             if wind_speed
             else [0.0] * len(radiation_forecast)
         )
+        temperature = hourly.get("temperature_2m", [])
+        temperature_forecast = (
+            [float(v) for v in temperature[start_idx : start_idx + 48]]
+            if temperature
+            else []
+        )
 
         result = {
             "radiation_forecast": [round(v, 1) for v in radiation_forecast],
             "wind_speed_forecast": [round(v, 1) for v in wind_speed_forecast],
+            "temperature_forecast": [round(v, 1) for v in temperature_forecast],
             "forecast_start_utc": now,
             "timestamp": dt_util.utcnow(),
         }
@@ -253,6 +261,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         radiation_forecast = weather_data.get("radiation_forecast", [])
         wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
+        temperature_forecast = weather_data.get("temperature_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
         if forecast_start and radiation_forecast:
             current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
@@ -264,6 +273,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 wind_speed_forecast = (
                     wind_speed_forecast[hours_elapsed:] if wind_speed_forecast else []
                 )
+                temperature_forecast = (
+                    temperature_forecast[hours_elapsed:] if temperature_forecast else []
+                )
                 _LOGGER.debug(
                     "Radiation forecast shifted by %d hours (weather data age)",
                     hours_elapsed,
@@ -273,22 +285,31 @@ class ForecastCoordinator(DataUpdateCoordinator):
         _, consumption_forecast, _ = self.net_load_model.forecast(radiation_forecast)
         n = len(consumption_forecast)
 
-        # Sum AC PV forecast across all AC subentry models
+        # Temperature forecast for PV derating (P2.2): pass if available
+        temp_for_pv = temperature_forecast if temperature_forecast else None
+
+        # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
         for model in self.pv_ac_models:
-            extra = model.forecast_from_radiation(radiation_forecast)
+            extra = model.forecast_from_radiation(radiation_forecast, temp_for_pv)
             for i in range(min(n, len(extra))):
                 pv_forecast[i] += extra[i]
 
+        # Clamp PV values: a faulty sensor/model must not produce negative output (P1.3)
+        pv_forecast = [max(0.0, v) for v in pv_forecast]
+
         net_load_forecast = [consumption_forecast[i] - pv_forecast[i] for i in range(n)]
 
-        # Sum DC PV forecast across all DC subentry models
+        # Sum DC PV forecast across all DC subentry models, applying temperature derating
         has_dc = bool(self.pv_dc_models)
         pv_dc_forecast = [0.0] * n
         for dc_model in self.pv_dc_models:
-            extra_dc = dc_model.forecast_from_radiation(radiation_forecast)
+            extra_dc = dc_model.forecast_from_radiation(radiation_forecast, temp_for_pv)
             for i in range(min(n, len(extra_dc))):
                 pv_dc_forecast[i] += extra_dc[i]
+
+        # Clamp DC PV values as well
+        pv_dc_forecast = [max(0.0, v) for v in pv_dc_forecast]
 
         # Derive current values from forecast (first element = current hour)
         current_pv = pv_forecast[0] if pv_forecast else 0.0
@@ -423,6 +444,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Guard against concurrent optimizer runs (e.g. price change + timer overlap).
         self._optimization_running: bool = False
+
+        # When a trigger arrives while an optimization is already running, queue one
+        # re-run rather than dropping the request entirely (P3.2).
+        self._pending_optimization: bool = False
+
+        # Last hybrid mode decision for hysteresis (P3.1).
+        # Tracks whether we were in "discharging" (schedule) or "zero_grid" state
+        # so small oscillations around the shadow-price threshold are damped.
+        self._last_hybrid_decision: str = "zero_grid"
 
     @property
     def control_mode(self) -> str:
@@ -615,7 +645,32 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Read actual grid power from DSMR sensor
         current_grid_w = self._get_realtime_grid_w()
         if current_grid_w is None:
+            _LOGGER.debug(
+                "Grid power sensors unavailable; real-time zero_grid update skipped"
+            )
             return
+
+        # Stale sensor detection (P4.1): if the first grid sensor has not updated
+        # recently, treat its reading as unreliable and skip the zero_grid correction.
+        stale_limit_s = 2.0 * float(
+            self.config.get(
+                CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
+            )
+        )
+        if self._power_consumption_sensors:
+            first_sensor = self._power_consumption_sensors[0]
+            state = self.hass.states.get(first_sensor)
+            if state is not None and state.last_updated is not None:
+                age_s = (dt_util.utcnow() - state.last_updated).total_seconds()
+                if age_s > stale_limit_s:
+                    _LOGGER.warning(
+                        "Grid power sensor '%s' is stale (%.0f s old, limit %.0f s); "
+                        "skipping zero_grid correction",
+                        first_sensor,
+                        age_s,
+                        stale_limit_s,
+                    )
+                    return
 
         # Read current battery state
         battery_state = self.get_current_battery_state()
@@ -973,11 +1028,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Run battery optimization."""
         _LOGGER.debug("OptimizationCoordinator: _async_update_data started.")
 
-        # Guard against concurrent optimizer runs (timer + price-change overlap)
+        # Guard against concurrent optimizer runs (timer + price-change overlap).
+        # Queue one pending re-run so triggers that arrive mid-run are not lost (P3.2).
         if self._optimization_running:
             _LOGGER.debug(
-                "OptimizationCoordinator: previous run still in progress, skipping."
+                "OptimizationCoordinator: previous run still in progress, queuing."
             )
+            self._pending_optimization = True
             if self.data is not None:
                 return self.data
             raise UpdateFailed("Optimization already in progress")
@@ -992,10 +1049,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 return self.data
 
         self._optimization_running = True
+        self._pending_optimization = False
         try:
             return await self._run_optimization()
         finally:
             self._optimization_running = False
+            if self._pending_optimization:
+                self._pending_optimization = False
+                _LOGGER.debug(
+                    "OptimizationCoordinator: pending trigger detected, scheduling re-run."
+                )
+                self.hass.async_create_task(self.async_request_refresh())
 
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
@@ -1219,6 +1283,42 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
+        # Uncertainty-based SoC reserve (P2.3): when GHI forecast is highly variable
+        # (cloudy/intermittent conditions), keep extra buffer so the battery is not
+        # discharged based on optimistic solar estimates that don't materialise.
+        battery_config = self.battery_config
+        weather_raw = self.weather_coordinator.data or {}
+        radiation_forecast_raw = weather_raw.get("radiation_forecast", [])
+        daylight_ghi = [v for v in radiation_forecast_raw[:24] if v > 50.0]
+        if len(daylight_ghi) > 2:
+            avg_ghi = sum(daylight_ghi) / len(daylight_ghi)
+            variance_ghi = sum((v - avg_ghi) ** 2 for v in daylight_ghi) / len(
+                daylight_ghi
+            )
+            cv_ghi = (variance_ghi**0.5 / avg_ghi) if avg_ghi > 0 else 0.0
+            # Scale reserve linearly with coefficient of variation, up to 10% of capacity
+            uncertainty_reserve_kwh = min(
+                0.10 * battery_config.capacity_kwh,
+                cv_ghi * 0.10 * battery_config.capacity_kwh,
+            )
+            if uncertainty_reserve_kwh > 0.01:
+                extra_pct = (
+                    uncertainty_reserve_kwh / battery_config.capacity_kwh
+                ) * 100.0
+                new_min_pct = min(
+                    battery_config.min_soc_percent + extra_pct,
+                    battery_config.max_soc_percent - 5.0,
+                )
+                battery_config = dataclasses.replace(
+                    battery_config, min_soc_percent=new_min_pct
+                )
+                _LOGGER.debug(
+                    "Forecast uncertainty (CV=%.2f) → min_soc raised by %.1f%% to %.1f%%",
+                    cv_ghi,
+                    extra_pct,
+                    new_min_pct,
+                )
+
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
         # Run optimization
         _LOGGER.debug(
@@ -1230,7 +1330,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         result = await self.hass.async_add_executor_job(
             optimize_battery_schedule,
-            self.battery_config,
+            battery_config,
             battery_state.soc_kwh,
             resampled_prices,
             resampled_feed_in,
@@ -1297,6 +1397,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 # Use shadow price as the threshold: net sell value per kWh stored
                 # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
                 # value of keeping the energy for future use), exporting is better.
+                #
+                # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
+                # oscillation when shadow_price ≈ net_sell_value.
+                # • Was discharging → continue unless net_sell_value < threshold × 0.95
+                # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
                 current_feed_in = (
                     resampled_feed_in[0]
                     if resampled_feed_in
@@ -1307,14 +1412,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     )
                 )
                 sqrt_rte = self.battery_config.round_trip_efficiency**0.5
-                if current_feed_in * sqrt_rte >= result.shadow_price_eur_kwh:
-                    # Selling captures at least as much value as keeping
+                net_sell_value = current_feed_in * sqrt_rte
+                threshold = result.shadow_price_eur_kwh
+                if self._last_hybrid_decision == "discharging":
+                    should_discharge = net_sell_value >= threshold * 0.95
+                else:
+                    should_discharge = net_sell_value >= threshold * 1.05
+
+                if should_discharge:
                     effective_mode = "discharging"
                     effective_power = result.optimal_power_kw
+                    self._last_hybrid_decision = "discharging"
                 else:
                     # Shadow price > sell value: energy is more valuable later
                     effective_mode = "zero_grid"
                     effective_power = 0.0
+                    self._last_hybrid_decision = "zero_grid"
             elif result.optimal_mode == "charging" and current_grid < 0:
                 current_feed_in = (
                     resampled_feed_in[0]

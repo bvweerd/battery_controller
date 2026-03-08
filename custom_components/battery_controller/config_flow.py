@@ -35,6 +35,7 @@ from .const import (
     CONF_PV_DC_EFFICIENCY,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_TIME_STEP_MINUTES,
+    CONF_MAX_GRID_POWER_KW,
     CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_ENABLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
@@ -45,6 +46,7 @@ from .const import (
     DEFAULT_MAX_SOC_PERCENT,
     DEFAULT_MIN_SOC_PERCENT,
     DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
+    DEFAULT_MAX_GRID_POWER_KW,
     DEFAULT_PV_DC_EFFICIENCY,
     DEFAULT_ROUND_TRIP_EFFICIENCY,
     DEFAULT_TIME_STEP_MINUTES,
@@ -306,6 +308,11 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 ),
                 description={"suggested_value": d.get(CONF_ZERO_GRID_RESPONSE_TIME_S)},
             ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=300.0)),
+            vol.Optional(
+                CONF_MAX_GRID_POWER_KW,
+                default=d.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW),
+                description={"suggested_value": d.get(CONF_MAX_GRID_POWER_KW)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1000.0)),
         }
     )
 
@@ -367,6 +374,9 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         ),
         CONF_ZERO_GRID_RESPONSE_TIME_S: float(
             _g(adv, CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S)
+        ),
+        CONF_MAX_GRID_POWER_KW: float(
+            _g(adv, CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
         ),
     }
 

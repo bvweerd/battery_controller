@@ -14,8 +14,26 @@ from .helpers import calculate_pv_forecast, calculate_consumption_pattern
 _LOGGER = logging.getLogger(__name__)
 
 
+def _get_season(month: int) -> int:
+    """Return meteorological season index for a given month.
+
+    0 = Winter (DJF: Dec, Jan, Feb)
+    1 = Spring (MAM: Mar, Apr, May)
+    2 = Summer (JJA: Jun, Jul, Aug)
+    3 = Autumn (SON: Sep, Oct, Nov)
+    """
+    return {12: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3}[
+        month
+    ]
+
+
 class PVForecastModel:
     """Model for PV production forecasting."""
+
+    # Temperature coefficient for standard silicon PV panels: ~0.4%/°C above 25°C.
+    # Applied when temperature_forecast is provided to forecast_from_radiation().
+    _TEMP_COEFF_PER_C = 0.004
+    _TEMP_STC_C = 25.0  # Standard Test Condition temperature
 
     def __init__(
         self,
@@ -33,22 +51,44 @@ class PVForecastModel:
     def forecast_from_radiation(
         self,
         radiation_forecast: list[float],
+        temperature_forecast: list[float] | None = None,
     ) -> list[float]:
         """Generate PV forecast from solar radiation data.
 
+        Applies panel temperature derating when temperature_forecast is provided.
+        Standard silicon panels lose ~0.4%/°C above 25°C (STC). On a 35°C day
+        this reduces output by ~4% compared to a radiation-only estimate.
+
         Args:
             radiation_forecast: Solar radiation in W/m2
+            temperature_forecast: Ambient temperature in °C (optional).
+                When provided, a temperature derating factor is applied per hour.
 
         Returns:
             PV production forecast in kW
         """
-        return calculate_pv_forecast(
+        base_forecast = calculate_pv_forecast(
             radiation_forecast,
             self.peak_power_kwp,
             self.orientation_deg,
             self.tilt_deg,
             self.efficiency_factor,
         )
+
+        if temperature_forecast is None:
+            return base_forecast
+
+        # Apply temperature derating: max 20% reduction floor (very hot panels)
+        result = []
+        for i, pv_kw in enumerate(base_forecast):
+            if i < len(temperature_forecast):
+                temp_c = temperature_forecast[i]
+                delta = max(0.0, temp_c - self._TEMP_STC_C)
+                derating = max(0.80, 1.0 - self._TEMP_COEFF_PER_C * delta)
+                result.append(pv_kw * derating)
+            else:
+                result.append(pv_kw)
+        return result
 
 
 class ConsumptionForecastModel:
@@ -82,7 +122,14 @@ class ConsumptionForecastModel:
         self.base_consumption_kw = base_consumption_kw
         self.pv_production_sensors = pv_production_sensors or []
         self._entry_id = entry_id
+        # Non-seasonal pattern (hour, day_of_week) → average kW
         self._hourly_pattern: dict[tuple[int, int], float] = {}
+        # Seasonal pattern (hour, day_of_week, season) → average kW
+        # season: 0=winter(DJF), 1=spring(MAM), 2=summer(JJA), 3=autumn(SON)
+        # Requires at least 2 samples per bucket to be used (same threshold as hourly).
+        self._seasonal_pattern: dict[tuple[int, int, int], float] = {}
+        # Minimum samples to trust a seasonal bucket
+        self._SEASONAL_MIN_SAMPLES: int = 2
 
     async def async_update_pattern(self) -> None:
         """Update consumption pattern from historical energy data.
@@ -236,26 +283,39 @@ class ConsumptionForecastModel:
                     "with your inverter's total energy sensor(s) to fix this."
                 )
 
-            # Group by (hour, day_of_week) and average.
+            # Group by (hour, day_of_week) and also (hour, day_of_week, season).
             # Convert to local time so the pattern aligns with the local-time
             # forecast generated in ConsumptionForecastModel.forecast().
+            # season: 0=winter(DJF), 1=spring(MAM), 2=summer(JJA), 3=autumn(SON)
             hourly_values: dict[tuple[int, int], list[float]] = {}
+            seasonal_values: dict[tuple[int, int, int], list[float]] = {}
             for ts_key, net_kwh in hourly_net.items():
                 dt = dt_util.parse_datetime(ts_key)
                 if dt is None:
                     continue
                 dt_local = dt_util.as_local(dt)
+                val = max(0.0, net_kwh)
                 key = (dt_local.hour, dt_local.weekday())
-                hourly_values.setdefault(key, []).append(max(0.0, net_kwh))
+                hourly_values.setdefault(key, []).append(val)
+                season = _get_season(dt_local.month)
+                seasonal_values.setdefault(
+                    (dt_local.hour, dt_local.weekday(), season), []
+                ).append(val)
 
-            for key, values in hourly_values.items():
+            for h_key, values in hourly_values.items():
                 if values:
-                    self._hourly_pattern[key] = sum(values) / len(values)
+                    self._hourly_pattern[h_key] = sum(values) / len(values)
+
+            for s_key, values in seasonal_values.items():
+                if len(values) >= self._SEASONAL_MIN_SAMPLES:
+                    self._seasonal_pattern[s_key] = sum(values) / len(values)
 
             _LOGGER.debug(
-                "Updated consumption pattern from %d energy sensors, %d data points",
+                "Updated consumption pattern from %d energy sensors, "
+                "%d hourly buckets, %d seasonal buckets",
                 len(all_sensors),
                 len(self._hourly_pattern),
+                len(self._seasonal_pattern),
             )
 
         except ImportError:
@@ -285,13 +345,15 @@ class ConsumptionForecastModel:
             dt = start_time + timedelta(hours=h)
             hour = dt.hour
             dow = dt.weekday()
+            season = _get_season(dt.month)
 
-            # Use historical pattern if available
-            key = (hour, dow)
-            if key in self._hourly_pattern:
-                forecast.append(self._hourly_pattern[key])
+            # Priority: seasonal pattern → hourly pattern → default
+            seasonal_key = (hour, dow, season)
+            if seasonal_key in self._seasonal_pattern:
+                forecast.append(self._seasonal_pattern[seasonal_key])
+            elif (hour, dow) in self._hourly_pattern:
+                forecast.append(self._hourly_pattern[(hour, dow)])
             else:
-                # Fall back to default pattern
                 forecast.append(
                     calculate_consumption_pattern(hour, dow, self.base_consumption_kw)
                 )
@@ -308,9 +370,12 @@ class ConsumptionForecastModel:
             Current consumption in kW
         """
         now = dt_util.now()
-        key = (now.hour, now.weekday())
-        if key in self._hourly_pattern:
-            return self._hourly_pattern[key]
+        season = _get_season(now.month)
+        seasonal_key = (now.hour, now.weekday(), season)
+        if seasonal_key in self._seasonal_pattern:
+            return self._seasonal_pattern[seasonal_key]
+        if (now.hour, now.weekday()) in self._hourly_pattern:
+            return self._hourly_pattern[(now.hour, now.weekday())]
         return calculate_consumption_pattern(
             now.hour, now.weekday(), self.base_consumption_kw
         )

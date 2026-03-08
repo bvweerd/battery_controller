@@ -134,3 +134,11 @@ POWER_STEP_W = 100  # Battery power action granularity in W
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96
+
+# Minimum cycle energy (P5.1): charge/discharge segments smaller than this are
+# suppressed as micro-cycles with disproportionate degradation cost.
+MIN_CYCLE_KWH = 0.2  # kWh
+
+# Grid capacity cap: maximum import/export power at grid connection (0 = unlimited)
+CONF_MAX_GRID_POWER_KW = "max_grid_power_kw"
+DEFAULT_MAX_GRID_POWER_KW = 0.0  # kW, 0 = no cap

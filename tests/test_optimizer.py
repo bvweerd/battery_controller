@@ -180,11 +180,16 @@ class TestCalculateStepCost:
         # DC PV charging is "free" (no grid cost), so cost_dc should be lower
         assert cost_dc <= cost_ac
 
-    def test_dc_pv_excess_to_ac(self, dc_battery_config):
-        """Excess DC PV goes to AC side through inverter."""
+    def test_dc_pv_passive_charge_when_idle(self, dc_battery_config):
+        """In idle mode, DC-coupled inverters passively charge the battery from DC PV.
+
+        P1.1: action_w=0 (no explicit AC command) does NOT route DC PV to AC when
+        the battery has headroom. The MPPT charger absorbs DC PV into the battery.
+        Net grid reflects consumption only (DC PV stored, not exported).
+        """
         cost = calculate_step_cost(
             time_step_hours=0.25,
-            soc_wh=5000,
+            soc_wh=5000,  # mid SoC, plenty of headroom (max=9000 Wh)
             action_w=0,
             grid_price=0.30,
             feed_in_price=0.07,
@@ -193,11 +198,30 @@ class TestCalculateStepCost:
             rte=0.90,
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
-            pv_dc_production_w=3000,  # 3kW DC PV, battery idle
+            pv_dc_production_w=3000,  # 3 kW DC PV absorbed into battery passively
         )
-        # DC PV excess: 3000W * 0.96 = 2880W to AC
-        # Net grid = 1000 - 2880 = -1880W (exporting)
-        # Revenue = 1880 * 0.25 / 1000 * 0.07 = 0.0329
+        # DC PV goes to battery (passive charge), not to AC.
+        # Net grid = 1000 W (consumption only) → importing from grid.
+        # Cost = 1000 * 0.25 / 1000 * 0.30 + degradation > 0
+        assert cost > 0
+
+    def test_dc_pv_excess_to_ac_when_battery_full(self, dc_battery_config):
+        """DC PV routes to AC only when the battery is at max SoC (no headroom)."""
+        cost = calculate_step_cost(
+            time_step_hours=0.25,
+            soc_wh=9000,  # max SoC — no headroom for passive charging
+            action_w=0,
+            grid_price=0.30,
+            feed_in_price=0.07,
+            pv_production_w=0,
+            consumption_w=1000,
+            rte=0.90,
+            degradation_cost_per_kwh=0.03,
+            battery_config=dc_battery_config,
+            pv_dc_production_w=3000,  # 3 kW DC PV, battery full → goes to AC
+        )
+        # Battery full: all DC PV → AC: 3000 * 0.96 = 2880 W
+        # Net grid = 1000 - 2880 = -1880 W (exporting) → revenue
         assert cost < 0  # Revenue from export
 
 
