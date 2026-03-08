@@ -298,8 +298,13 @@ def optimize_battery_schedule(
 
     # Generate actions up to (but never exceeding) the rated max power.
     # Using integer division ensures the last step stays within limits.
+    # Charge actions are listed highest-first so that when multiple actions yield
+    # equal total cost (e.g. same-price blocks with identical PV/consumption),
+    # the DP's strict-less-than comparison naturally picks the highest power.
+    # This produces front-loaded charging (full power first) instead of a ramp-up,
+    # which is both more intuitive and more robust against forecast uncertainty.
     charge_steps = int(max_charge_w / power_step_w)
-    charge_actions = [float(i * power_step_w) for i in range(charge_steps + 1)]
+    charge_actions = [float(i * power_step_w) for i in range(charge_steps, -1, -1)]
     discharge_steps = int(max_discharge_w / power_step_w)
     discharge_actions = [
         float(-i * power_step_w) for i in range(discharge_steps, 0, -1)
@@ -365,19 +370,25 @@ def optimize_battery_schedule(
                 if action_w != 0 and new_soc_idx == s_idx:
                     continue
 
-                # Compute per-action efficiency using C-rate and SoC derating (P1.2).
-                # calculate_efficiency returns base_eff × c_rate_factor × soc_factor,
-                # where base_eff = sqrt(RTE). This correctly models lower efficiency
-                # at high C-rates or extreme SoC levels.
+                # Compute per-action efficiency using SoC derating only (P1.2).
+                # We intentionally omit C-rate derating here: at 15-minute planning
+                # resolution the C-rate penalty (≤0.26% for this battery at max power)
+                # is smaller than forecast uncertainty and causes the DP to prefer
+                # ramped-up charging (low power first) over front-loading.  The
+                # result is that the battery ramps from 200 W → 1200 W within a
+                # same-price block instead of charging at full power immediately,
+                # which is confusing and reduces robustness against forecast changes.
+                # SoC derating (−2% above 80% SoC, −5% above 90% SoC) is kept
+                # because charging near full capacity is genuinely less efficient.
                 if action_w > 0:
-                    c_eff = calculate_efficiency(
-                        action_w / 1000.0, soc_percent, battery_config
+                    c_eff = _soc_efficiency(
+                        soc_percent, battery_config.charge_efficiency
                     )
                     d_eff = None
                 elif action_w < 0:
                     c_eff = None
-                    d_eff = calculate_efficiency(
-                        action_w / 1000.0, soc_percent, battery_config
+                    d_eff = _soc_efficiency(
+                        soc_percent, battery_config.discharge_efficiency
                     )
                 else:
                     c_eff = None
@@ -556,6 +567,24 @@ def optimize_battery_schedule(
         pv_forecast=list(pv_forecast[:n_steps]),
         consumption_forecast=list(consumption_forecast[:n_steps]),
     )
+
+
+def _soc_efficiency(soc_percent: float, base_eff: float) -> float:
+    """Efficiency for DP planning: apply SoC derating only (no C-rate derating).
+
+    C-rate derating is deliberately excluded from the DP planner.  At 15-minute
+    resolution the C-rate penalty (e.g. 0.26% at 0.57C) is smaller than
+    forecast uncertainty but causes the DP to systematically prefer ramp-up
+    charging (low power first, full power last) over front-loading within
+    same-price blocks.  SoC derating is kept because charging near full
+    capacity is genuinely less efficient and financially material (~0.14 €/step).
+    """
+    soc_factor = 1.0
+    if soc_percent < 20 or soc_percent > 80:
+        soc_factor = 0.98
+    if soc_percent < 10 or soc_percent > 90:
+        soc_factor = 0.95
+    return base_eff * soc_factor
 
 
 def _filter_oscillations(
