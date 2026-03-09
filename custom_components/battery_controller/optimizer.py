@@ -13,12 +13,6 @@ from .const import (
     MIN_PV_SURPLUS_KW,
     POWER_IDLE_THRESHOLD_KW,
     POWER_STEP_W,
-    SOC_DERATING_EXTREME_FACTOR,
-    SOC_DERATING_EXTREME_HIGH,
-    SOC_DERATING_EXTREME_LOW,
-    SOC_DERATING_MODERATE_FACTOR,
-    SOC_DERATING_MODERATE_HIGH,
-    SOC_DERATING_MODERATE_LOW,
     SOC_RESOLUTION_WH,
 )
 
@@ -269,23 +263,26 @@ def optimize_battery_schedule(
         ] * (n_steps - len(step_durations_hours))
 
     # Discretize SoC space.
-    # Use the *minimum* step duration as the binding constraint so that even the
-    # shortest step (typically the partial first step) moves the SoC by at least
-    # one state boundary.  Without this, a very short first step would make
-    # sub-resolution actions appear "free" to the DP.
+    # Use the *minimum* step duration only for SoC resolution (to ensure that
+    # even the shortest step moves the SoC by at least one state boundary).
     min_step_hours = min(step_durations_hours[:n_steps])
 
     # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy
-    # over the shortest step.  SOC_RESOLUTION_WH (100 Wh) ensures at least ~6×
-    # margin above the per-step energy for the standard 15-min / 5 kW case.
+    # over the shortest step.  SOC_RESOLUTION_WH (25 Wh) ensures at least ~6×
+    # margin above the per-step energy for the standard 15-min / 500 W case.
     soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours)
 
-    # Align the power step to the SoC resolution so every action moves an exact
-    # integer number of states.  Without this, sub-boundary actions (e.g. 200 W
-    # at 5-min = 16.67 Wh) round *up* to a full state in the state lookup while
-    # the cost calculation only pays for the actual energy.  This makes low-power
-    # actions appear artificially cheaper per kWh stored.
-    aligned_step_w = soc_resolution_wh / min_step_hours
+    # Align the power step to the SoC resolution using the *full* interval step,
+    # not min_step_hours.  The first step is typically a short partial interval
+    # (e.g. 3 min before the next price boundary); using its duration would inflate
+    # power_step_w and restrict the available actions for ALL subsequent full-interval
+    # steps (e.g. 1200 W max becomes 750 W when min_step=4 min with hourly prices).
+    # The per-action sub-resolution check (new_soc_idx == s_idx) already handles
+    # the short first step: actions that don't cross a state boundary are skipped.
+    full_step_hours = (
+        step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
+    )
+    aligned_step_w = soc_resolution_wh / full_step_hours
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
     min_soc_wh = battery_config.min_soc_kwh * 1000
     max_soc_wh = battery_config.max_soc_kwh * 1000
@@ -338,12 +335,9 @@ def optimize_battery_schedule(
             consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
         )
 
-        # Pre-compute current SoC percent for efficiency derating (P1.2).
-        # Efficiency is SoC-dependent, so we compute it per state in the inner loop.
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
-            soc_percent = (soc_wh / (battery_config.capacity_kwh * 1000)) * 100.0
 
             for action_w in actions:
                 # SoC transition: action_w is battery-side power (explicit AC command).
@@ -387,30 +381,6 @@ def optimize_battery_schedule(
                 if action_w != 0 and new_soc_idx == s_idx:
                     continue
 
-                # Compute per-action efficiency using SoC derating only (P1.2).
-                # We intentionally omit C-rate derating here: at 15-minute planning
-                # resolution the C-rate penalty (≤0.26% for this battery at max power)
-                # is smaller than forecast uncertainty and causes the DP to prefer
-                # ramped-up charging (low power first) over front-loading.  The
-                # result is that the battery ramps from 200 W → 1200 W within a
-                # same-price block instead of charging at full power immediately,
-                # which is confusing and reduces robustness against forecast changes.
-                # SoC derating (−2% above 80% SoC, −5% above 90% SoC) is kept
-                # because charging near full capacity is genuinely less efficient.
-                if action_w > 0:
-                    c_eff = _soc_efficiency(
-                        soc_percent, battery_config.charge_efficiency
-                    )
-                    d_eff = None
-                elif action_w < 0:
-                    c_eff = None
-                    d_eff = _soc_efficiency(
-                        soc_percent, battery_config.discharge_efficiency
-                    )
-                else:
-                    c_eff = None
-                    d_eff = None
-
                 # Calculate immediate cost
                 step_cost = calculate_step_cost(
                     time_step_hours=time_step_hours,
@@ -424,8 +394,6 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
-                    charge_eff_override=c_eff,
-                    discharge_eff_override=d_eff,
                 )
 
                 # Total cost = immediate + future
@@ -586,30 +554,6 @@ def optimize_battery_schedule(
         pv_forecast=list(pv_forecast[:n_steps]),
         consumption_forecast=list(consumption_forecast[:n_steps]),
     )
-
-
-def _soc_efficiency(soc_percent: float, base_eff: float) -> float:
-    """Efficiency for DP planning: apply SoC derating only (no C-rate derating).
-
-    C-rate derating is deliberately excluded from the DP planner.  At 15-minute
-    resolution the C-rate penalty (e.g. 0.26% at 0.57C) is smaller than
-    forecast uncertainty but causes the DP to systematically prefer ramp-up
-    charging (low power first, full power last) over front-loading within
-    same-price blocks.  SoC derating is kept because charging near full
-    capacity is genuinely less efficient and financially material (~0.14 €/step).
-    """
-    soc_factor = 1.0
-    if (
-        soc_percent < SOC_DERATING_MODERATE_LOW
-        or soc_percent > SOC_DERATING_MODERATE_HIGH
-    ):
-        soc_factor = SOC_DERATING_MODERATE_FACTOR
-    if (
-        soc_percent < SOC_DERATING_EXTREME_LOW
-        or soc_percent > SOC_DERATING_EXTREME_HIGH
-    ):
-        soc_factor = SOC_DERATING_EXTREME_FACTOR
-    return base_eff * soc_factor
 
 
 def _filter_oscillations(
