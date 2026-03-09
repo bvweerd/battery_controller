@@ -284,8 +284,13 @@ def optimize_battery_schedule(
     )
     aligned_step_w = soc_resolution_wh / full_step_hours
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
-    min_soc_wh = battery_config.min_soc_kwh * 1000
-    max_soc_wh = battery_config.max_soc_kwh * 1000
+    # Round to nearest Wh to avoid floating-point drift (e.g. 2.12 * 0.1 * 1000
+    # = 212.00000000000003).  Without rounding, soc_states[0] may be computed as
+    # 912.0 (losing the tiny fractional part) while min_soc_wh stays at
+    # 212.00000000000003, so the action that would exactly reach min_soc passes
+    # the boundary check (212.0 < 212.00000000000003) and gets skipped.
+    min_soc_wh = round(battery_config.min_soc_kwh * 1000)
+    max_soc_wh = round(battery_config.max_soc_kwh * 1000)
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
