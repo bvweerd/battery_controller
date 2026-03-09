@@ -12,7 +12,7 @@
 
 This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses **dynamic programming** (backward induction) to calculate the optimal charge/discharge schedule based on:
 
-- **Electricity price forecasts** (Nordpool, ENTSO-E, or any price sensor with forecast attributes)
+- **Electricity price forecasts** (Nordpool, ENTSO-E, or any price sensor with forecast attributes like the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
 - **PV production forecasts** (from open-meteo.com solar radiation data)
 - **Household consumption patterns** (learned from historical DSMR energy data)
 - **Battery characteristics** (capacity, power limits, round-trip efficiency, degradation)
@@ -64,7 +64,7 @@ The model also **extends the planning horizon** when live prices cover less than
 
 ### Prerequisites
 
-- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E).
+- A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator)).
 - Battery SoC sensor(s) from your inverter integration.
 - [HACS](https://hacs.xyz/) installed in your Home Assistant (recommended).
 
