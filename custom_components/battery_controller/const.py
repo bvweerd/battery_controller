@@ -184,3 +184,8 @@ SOC_UNCERTAINTY_RESERVE_FRACTION = (
 # Absorption detection: actual battery power must be at least this fraction of the
 # charge setpoint before the battery is considered unable to absorb more charge.
 ABSORPTION_THRESHOLD = 0.70  # fraction of setpoint
+
+# Real-time control thresholds
+BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode
+SETPOINT_STABLE_THRESHOLD_KW = 0.010  # kW (10 W) — setpoint "stable" if within this
+BATTERY_POWER_CHANGE_THRESHOLD_KW = 0.005  # kW (5 W) — minimum reportable power change

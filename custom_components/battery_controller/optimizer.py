@@ -311,7 +311,14 @@ def optimize_battery_schedule(
     # Energy above min_soc can be sold at (approximately) the last known
     # feed-in price. A non-zero terminal value prevents the optimizer from
     # irrationally discharging the battery just before the horizon ends.
-    terminal_price = feed_in_forecast[-1] if feed_in_forecast else 0.0
+    # Blend the last price with the 6-step tail average to dampen end-of-horizon
+    # artifacts caused by transient price spikes at the forecast boundary.
+    if feed_in_forecast:
+        lookback = min(6, len(feed_in_forecast))
+        avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
+        terminal_price = min(feed_in_forecast[-1], avg_tail)
+    else:
+        terminal_price = 0.0
     for s_idx, soc_wh in enumerate(soc_states):
         stored_kwh = (soc_wh - min_soc_wh) / 1000.0
         V[n_steps][s_idx] = -stored_kwh * terminal_price
@@ -363,7 +370,9 @@ def optimize_battery_schedule(
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
-                    energy_change_wh = abs(action_w) * time_step_hours * sqrt_rte
+                    # Discharge: action_w is AC setpoint → battery must supply
+                    # abs(action_w) / discharge_eff from its DC side.
+                    energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
@@ -417,24 +426,10 @@ def optimize_battery_schedule(
             V[t][s_idx] = best_cost
             policy[t][s_idx] = best_action
 
-    # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
-    # Computed as the numerical derivative of V[0] with respect to SoC:
-    #   λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC_kwh)
-    # Because V is cost (lower is better) and more energy lowers cost,
-    # the gradient is negative → shadow price is positive.
+    # Find current SoC index in the DP state space (needed for forward pass).
+    # Shadow price is computed after post-processing filters below.
     current_soc_wh = int(current_soc_kwh * 1000)
     current_soc_idx = _find_nearest_soc_idx(current_soc_wh, soc_states)
-    step_kwh = soc_resolution_wh / 1000.0
-    shadow_price_eur_kwh = 0.0
-    if n_soc_states >= 3 and 0 < current_soc_idx < n_soc_states - 1:
-        shadow_price_eur_kwh = (
-            V[0][current_soc_idx - 1] - V[0][current_soc_idx + 1]
-        ) / (2 * step_kwh)
-    elif n_soc_states >= 2:
-        if current_soc_idx == 0:
-            shadow_price_eur_kwh = (V[0][0] - V[0][1]) / step_kwh
-        else:
-            shadow_price_eur_kwh = (V[0][-2] - V[0][-1]) / step_kwh
 
     # Forward pass: extract optimal schedule
 
@@ -461,7 +456,7 @@ def optimize_battery_schedule(
         elif action_w < 0:
             mode_schedule.append("discharging")
             current_soc = max(
-                current_soc - abs(action_w) * time_step_hours * sqrt_rte,
+                current_soc - abs(action_w) * time_step_hours / sqrt_rte,
                 float(min_soc_wh),
             )
         else:
@@ -514,6 +509,26 @@ def optimize_battery_schedule(
         step_durations_hours=step_durations_hours[:n_steps],
         min_cycle_kwh=MIN_CYCLE_KWH,
     )
+
+    # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
+    # Computed after post-processing filters so it is consistent with the
+    # filtered schedule presented to the caller. V[0] is not modified by the
+    # filters (backward-pass values are stable), but placing the computation
+    # here makes the intent clear: shadow price belongs to the filtered world.
+    #   λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC_kwh)
+    # V is cost (lower is better); more energy lowers cost → gradient negative
+    # → shadow price positive.
+    step_kwh = soc_resolution_wh / 1000.0
+    shadow_price_eur_kwh = 0.0
+    if n_soc_states >= 3 and 0 < current_soc_idx < n_soc_states - 1:
+        shadow_price_eur_kwh = (
+            V[0][current_soc_idx - 1] - V[0][current_soc_idx + 1]
+        ) / (2 * step_kwh)
+    elif n_soc_states >= 2:
+        if current_soc_idx == 0:
+            shadow_price_eur_kwh = (V[0][0] - V[0][1]) / step_kwh
+        else:
+            shadow_price_eur_kwh = (V[0][-2] - V[0][-1]) / step_kwh
 
     # Calculate costs
     total_cost = V[0][current_soc_idx]
@@ -644,38 +659,39 @@ def _filter_oscillations(
     ref_step_h = step_durations_hours[0] if step_durations_hours else 0.25
     lookahead_steps = max(1, round(oscillation_window_hours / ref_step_h))
 
-    # Look for rapid charge/discharge oscillations
-    i = 0
-    while i < len(filtered_mode) - 1:
-        if filtered_mode[i] == "charging":
-            # Look ahead for quick discharge
-            for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                if filtered_mode[j] == "discharging":
-                    # Found charge followed by discharge - check if profitable
-                    charge_cost = get_charge_cost(i)  # May be feed-in opportunity cost
-                    discharge_price = price_forecast[j]
-                    effective_spread = discharge_price - charge_cost / rte
-
-                    if effective_spread < min_arbitrage_spread:
-                        # Not profitable - replace with idle
-                        filtered_power[i] = 0.0
-                        filtered_mode[i] = "idle"
+    # Iterative scan: repeat until convergence so that suppressing one step
+    # also triggers re-evaluation of any steps that depended on it (orphaned
+    # discharge after paired charge is suppressed, and vice-versa).
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(filtered_mode) - 1:
+            if filtered_mode[i] == "charging":
+                # Look ahead for quick discharge
+                for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
+                    if filtered_mode[j] == "discharging":
+                        charge_cost = get_charge_cost(i)
+                        discharge_price = price_forecast[j]
+                        effective_spread = discharge_price - charge_cost / rte
+                        if effective_spread < min_arbitrage_spread:
+                            filtered_power[i] = 0.0
+                            filtered_mode[i] = "idle"
+                            changed = True
                         break
-        elif filtered_mode[i] == "discharging":
-            # Look ahead for quick charge
-            for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                if filtered_mode[j] == "charging":
-                    # Found discharge followed by charge - check if profitable
-                    discharge_price = price_forecast[i]
-                    charge_cost = get_charge_cost(j)  # May be feed-in opportunity cost
-                    effective_spread = discharge_price - charge_cost / rte
-
-                    if effective_spread < min_arbitrage_spread:
-                        # Not profitable - replace with idle
-                        filtered_power[i] = 0.0
-                        filtered_mode[i] = "idle"
+            elif filtered_mode[i] == "discharging":
+                # Look ahead for quick charge
+                for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
+                    if filtered_mode[j] == "charging":
+                        discharge_price = price_forecast[i]
+                        charge_cost = get_charge_cost(j)
+                        effective_spread = discharge_price - charge_cost / rte
+                        if effective_spread < min_arbitrage_spread:
+                            filtered_power[i] = 0.0
+                            filtered_mode[i] = "idle"
+                            changed = True
                         break
-        i += 1
+            i += 1
 
     # Recalculate SoC schedule and update power values to match actual SoC changes
     current_soc_kwh = soc_schedule_kwh[0]
@@ -689,17 +705,23 @@ def _filter_oscillations(
         )
         power_kw = filtered_power[t]
         prev_soc = current_soc_kwh
-        if power_kw > 0:  # Charging
+        if power_kw > 0:  # Charging: SoC += AC_power × charge_eff × dt
             current_soc_kwh = min(
                 current_soc_kwh + power_kw * step_h * sqrt_rte, max_soc_kwh
             )
-        elif power_kw < 0:  # Discharging
+        elif power_kw < 0:  # Discharging: SoC -= AC_power / discharge_eff × dt
             current_soc_kwh = max(
-                current_soc_kwh + power_kw * step_h * sqrt_rte, min_soc_kwh
+                current_soc_kwh - abs(power_kw) * step_h / sqrt_rte, min_soc_kwh
             )
 
-        # Update power to match actual SoC change (e.g. if battery was full/empty)
-        actual_power_kw = (current_soc_kwh - prev_soc) / (step_h * sqrt_rte)
+        # Update power to match actual SoC change (e.g. if battery was full/empty).
+        # Charging:   AC_power = delta_soc / (dt × charge_eff)
+        # Discharging: AC_power = delta_soc × discharge_eff / dt  (delta_soc < 0)
+        delta_soc = current_soc_kwh - prev_soc
+        if delta_soc >= 0:
+            actual_power_kw = delta_soc / (step_h * sqrt_rte) if step_h > 0 else 0.0
+        else:
+            actual_power_kw = delta_soc * sqrt_rte / step_h if step_h > 0 else 0.0
         filtered_power[t] = actual_power_kw
 
         # Update mode if power changed to 0

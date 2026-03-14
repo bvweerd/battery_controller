@@ -178,7 +178,7 @@ def extract_price_forecast(state: State) -> list[float]:
     return prices
 
 
-def _synthesize_timestamps(
+def synthesize_timestamps(
     now: datetime, interval_minutes: int, count: int
 ) -> list[datetime]:
     """Synthesize UTC start timestamps for price entries without explicit timestamps.
@@ -202,7 +202,7 @@ def _fill_missing_timestamps(
     """Fill None entries in a timestamp list using surrounding real timestamps."""
     anchor_idx = next((i for i, ts in enumerate(timestamps) if ts is not None), None)
     if anchor_idx is None:
-        return _synthesize_timestamps(now, interval_minutes, len(timestamps))
+        return synthesize_timestamps(now, interval_minutes, len(timestamps))
     anchor = timestamps[anchor_idx]
     assert anchor is not None
     return [
@@ -235,7 +235,7 @@ def extract_price_forecast_with_timestamps(
             if price is not None:
                 forecast.append(price)
         if forecast:
-            return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+            return forecast, synthesize_timestamps(now, 60, len(forecast)), 60
 
     # net_prices_today/tomorrow — these carry per-entry timestamps
     interval_forecast: list[float] = []
@@ -289,7 +289,7 @@ def extract_price_forecast_with_timestamps(
             if price is not None:
                 forecast.append(price)
         if forecast:
-            return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+            return forecast, synthesize_timestamps(now, 60, len(forecast)), 60
 
     # raw_today/raw_tomorrow (no timestamps)
     hour = dt_util.now().hour  # Local time
@@ -307,7 +307,7 @@ def extract_price_forecast_with_timestamps(
             if price is not None:
                 forecast.append(price)
     if forecast:
-        return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+        return forecast, synthesize_timestamps(now, 60, len(forecast)), 60
 
     # today/tomorrow (no timestamps)
     combined: list[Any] = []
@@ -323,14 +323,14 @@ def extract_price_forecast_with_timestamps(
         if price is not None:
             forecast.append(price)
     if forecast:
-        return forecast, _synthesize_timestamps(now, 60, len(forecast)), 60
+        return forecast, synthesize_timestamps(now, 60, len(forecast)), 60
 
     # Last resort: current state value
     try:
         price = float(state.state)
     except (TypeError, ValueError):
         return [], [], 60
-    return [price], _synthesize_timestamps(now, 60, 1), 60
+    return [price], synthesize_timestamps(now, 60, 1), 60
 
 
 def compute_step_durations_hours(

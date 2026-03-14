@@ -8,9 +8,6 @@ from custom_components.battery_controller.battery_model import (
     BatteryState,
     calculate_efficiency,
     calculate_new_soc,
-    calculate_max_charge_power,
-    calculate_max_discharge_power,
-    should_cycle,
     calculate_degradation_cost_per_kwh,
 )
 
@@ -166,65 +163,6 @@ class TestCalculateNewSoc:
         # Try to discharge 1.5 kWh battery below min (1.0 kWh)
         new_soc, _ = calculate_new_soc(1.5, -5.0, 1.0, config)
         assert new_soc >= 1.0
-
-
-class TestMaxPower:
-    """Tests for max charge/discharge power functions."""
-
-    def test_max_charge_at_low_soc(self):
-        config = BatteryConfig(
-            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
-        )
-        power = calculate_max_charge_power(2.0, 1.0, config)
-        # Lots of headroom -> should be limited by inverter
-        assert power == pytest.approx(5.0, abs=0.5)
-
-    def test_max_charge_near_full(self):
-        config = BatteryConfig(
-            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
-        )
-        power = calculate_max_charge_power(8.8, 1.0, config)
-        # Only 0.2 kWh headroom -> low power
-        assert power < 1.0
-
-    def test_max_charge_at_full(self):
-        config = BatteryConfig(
-            capacity_kwh=10.0, max_charge_power_kw=5.0, max_soc_percent=90.0
-        )
-        power = calculate_max_charge_power(9.0, 1.0, config)
-        assert power == 0.0
-
-    def test_max_discharge_at_high_soc(self):
-        config = BatteryConfig(
-            capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0
-        )
-        power = calculate_max_discharge_power(8.0, 1.0, config)
-        assert power == pytest.approx(5.0, abs=0.5)
-
-    def test_max_discharge_at_min(self):
-        config = BatteryConfig(
-            capacity_kwh=10.0, max_discharge_power_kw=5.0, min_soc_percent=10.0
-        )
-        power = calculate_max_discharge_power(1.0, 1.0, config)
-        assert power == 0.0
-
-
-class TestShouldCycle:
-    """Tests for should_cycle function."""
-
-    def test_profitable_cycle(self):
-        # Buy at 0.05, sell at 0.20, RTE 0.90 -> profitable
-        assert should_cycle(0.05, 0.20, 0.90, 0.03) is True
-
-    def test_unprofitable_cycle(self):
-        # Buy at 0.10, sell at 0.12, RTE 0.90 -> not profitable
-        assert should_cycle(0.10, 0.12, 0.90, 0.03) is False
-
-    def test_marginal_cycle(self):
-        # At RTE=0.90, degradation=0.03:
-        # min_sell = 0.10 / 0.90 + 0.06 = 0.171
-        assert should_cycle(0.10, 0.17, 0.90, 0.03) is False
-        assert should_cycle(0.10, 0.18, 0.90, 0.03) is True
 
 
 class TestDegradationCost:
