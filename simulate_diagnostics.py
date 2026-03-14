@@ -84,13 +84,16 @@ def extract_inputs(diag: dict) -> tuple:
     )
     step_durations_hours = sched.get("step_durations_hours")
 
-    # step_start_times_iso lives in entity attributes, not in schedule dict
+    # step_start_times_iso and step_durations_hours live in entity attributes, not in schedule dict
     step_start_times = sched.get("step_start_times_iso", [])
-    if not step_start_times:
+    if not step_start_times or not step_durations_hours:
         for ent in diag.get("data", {}).get("entities", []):
             attrs = ent.get("attributes", {})
-            if "step_start_times_iso" in attrs:
+            if not step_start_times and "step_start_times_iso" in attrs:
                 step_start_times = attrs["step_start_times_iso"]
+            if not step_durations_hours and "step_durations_hours" in attrs:
+                step_durations_hours = attrs["step_durations_hours"]
+            if step_start_times and step_durations_hours:
                 break
 
     degradation_cost = options.get("degradation_cost_per_kwh", 0.04)

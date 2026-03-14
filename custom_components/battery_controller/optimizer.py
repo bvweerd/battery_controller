@@ -262,15 +262,21 @@ def optimize_battery_schedule(
             step_durations_hours[-1]
         ] * (n_steps - len(step_durations_hours))
 
+    sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+
     # Discretize SoC space.
     # Use the *minimum* step duration only for SoC resolution (to ensure that
     # even the shortest step moves the SoC by at least one state boundary).
     min_step_hours = min(step_durations_hours[:n_steps])
 
     # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy
-    # over the shortest step.  SOC_RESOLUTION_WH (25 Wh) ensures at least ~6×
-    # margin above the per-step energy for the standard 15-min / 500 W case.
-    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours)
+    # over the shortest step — accounting for charge/discharge efficiency (sqrt_rte)
+    # since SoC transitions now use action_w × dt × sqrt_rte.  Without the RTE
+    # factor the resolution was over-estimated (e.g. 55 Wh instead of 48 Wh for
+    # a 0.55 h partial first step at RTE=0.76), causing unnecessary coarseness.
+    soc_resolution_wh = max(
+        float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours * sqrt_rte
+    )
 
     # Align the power step to the SoC resolution using the *full* interval step,
     # not min_step_hours.  The first step is typically a short partial interval
@@ -352,12 +358,12 @@ def optimize_battery_schedule(
                 # Efficiency losses are on the grid/AC side and handled in
                 # calculate_step_cost.
                 if action_w > 0:
-                    energy_change_wh = action_w * time_step_hours
+                    energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
-                    energy_change_wh = abs(action_w) * time_step_hours
+                    energy_change_wh = abs(action_w) * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
@@ -450,12 +456,13 @@ def optimize_battery_schedule(
         if action_w > 0:
             mode_schedule.append("charging")
             current_soc = min(
-                current_soc + action_w * time_step_hours, float(max_soc_wh)
+                current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
             )
         elif action_w < 0:
             mode_schedule.append("discharging")
             current_soc = max(
-                current_soc - abs(action_w) * time_step_hours, float(min_soc_wh)
+                current_soc - abs(action_w) * time_step_hours * sqrt_rte,
+                float(min_soc_wh),
             )
         else:
             # Idle: account for passive DC PV charging in forward pass
@@ -683,12 +690,16 @@ def _filter_oscillations(
         power_kw = filtered_power[t]
         prev_soc = current_soc_kwh
         if power_kw > 0:  # Charging
-            current_soc_kwh = min(current_soc_kwh + power_kw * step_h, max_soc_kwh)
+            current_soc_kwh = min(
+                current_soc_kwh + power_kw * step_h * sqrt_rte, max_soc_kwh
+            )
         elif power_kw < 0:  # Discharging
-            current_soc_kwh = max(current_soc_kwh + power_kw * step_h, min_soc_kwh)
+            current_soc_kwh = max(
+                current_soc_kwh + power_kw * step_h * sqrt_rte, min_soc_kwh
+            )
 
         # Update power to match actual SoC change (e.g. if battery was full/empty)
-        actual_power_kw = (current_soc_kwh - prev_soc) / step_h
+        actual_power_kw = (current_soc_kwh - prev_soc) / (step_h * sqrt_rte)
         filtered_power[t] = actual_power_kw
 
         # Update mode if power changed to 0
