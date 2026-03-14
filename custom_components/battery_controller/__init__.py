@@ -72,6 +72,7 @@ class BatteryControllerData:
     config: dict[str, Any]
     device: DeviceInfo
     battery_devices: dict[str, DeviceInfo]  # keyed by subentry_id
+    pv_devices: dict[str, DeviceInfo]  # keyed by subentry_id
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -169,6 +170,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             via_device=(DOMAIN, entry.entry_id),
         )
 
+    pv_devices: dict[str, DeviceInfo] = {}
+    for s in entry.subentries.values():
+        if s.subentry_type == PV_SUBENTRY_TYPE:
+            kwp = s.data.get("peak_power_kwp", "?")
+            pv_devices[s.subentry_id] = DeviceInfo(
+                identifiers={(DOMAIN, s.subentry_id)},
+                name=s.title,
+                manufacturer="Custom",
+                model=f"{kwp} kWp PV Array",
+                via_device=(DOMAIN, entry.entry_id),
+            )
+
     entry.runtime_data = BatteryControllerData(
         weather_coordinator=weather_coordinator,
         forecast_coordinator=forecast_coordinator,
@@ -176,6 +189,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config=config,
         device=device,
         battery_devices=battery_devices,
+        pv_devices=pv_devices,
     )
 
     _LOGGER.debug("Coordinators initialized successfully")

@@ -180,10 +180,10 @@
         "name": "Schedule"
       },
       "soc": {
-        "name": "State of Charge"
+        "name": "Total State of Charge"
       },
       "battery_power": {
-        "name": "Battery Power"
+        "name": "Total Battery Power"
       },
       "pv_forecast": {
         "name": "PV Forecast"

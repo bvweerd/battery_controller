@@ -248,10 +248,10 @@
         "name": "Schema"
       },
       "soc": {
-        "name": "Laadtoestand"
+        "name": "Totale Laadtoestand"
       },
       "battery_power": {
-        "name": "Batterij Vermogen"
+        "name": "Totaal Batterij Vermogen"
       },
       "pv_forecast": {
         "name": "PV Voorspelling"

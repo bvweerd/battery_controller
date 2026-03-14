@@ -13,13 +13,15 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
+    DOMAIN,
     PV_SUBENTRY_TYPE,
 )
 from .coordinator import ForecastCoordinator, OptimizationCoordinator
@@ -33,7 +35,7 @@ PARALLEL_UPDATES = 0
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Battery Controller sensors from a config entry."""
     data = entry.runtime_data
@@ -41,70 +43,92 @@ async def async_setup_entry(
     forecast_coordinator = data.forecast_coordinator
     device = data.device
     battery_devices = data.battery_devices
+    pv_devices = data.pv_devices
 
-    sensors: list[SensorEntity] = [
-        # Optimization output sensors
-        BatteryOptimalPowerSensor(optimization_coordinator, device, entry),
-        BatteryOptimalModeSensor(optimization_coordinator, device, entry),
-        BatteryScheduleSensor(optimization_coordinator, device, entry),
-        # Battery state sensors
-        BatterySoCSensor(optimization_coordinator, device, entry),
-        BatteryPowerSensor(optimization_coordinator, device, entry),
-        # Forecast sensors (use ForecastCoordinator)
-        PVForecastSensor(forecast_coordinator, device, entry),
-        ConsumptionForecastSensor(forecast_coordinator, device, entry),
-        NetGridForecastSensor(forecast_coordinator, device, entry),
-        # Weather logging sensors (stored in recorder for price model training)
-        SolarIrradianceSensor(forecast_coordinator, device, entry),
-        WindSpeedSensor(forecast_coordinator, device, entry),
-        # Financial sensors
-        BatteryDailySavingsSensor(optimization_coordinator, device, entry),
-        BatteryShadowPriceSensor(optimization_coordinator, device, entry),
-        # Grid control sensors
-        CurrentGridPowerSensor(optimization_coordinator, device, entry),
-        BatteryGridSetpointSensor(optimization_coordinator, device, entry),
-        BatteryControlModeSensor(optimization_coordinator, device, entry),
-        # Diagnostics
-        OptimizationStatusSensor(optimization_coordinator, device, entry),
-    ]
+    # Main-device sensors (associated with the config entry, not any subentry)
+    async_add_entities(
+        [
+            # Optimization output sensors
+            BatteryOptimalPowerSensor(optimization_coordinator, device, entry),
+            BatteryOptimalModeSensor(optimization_coordinator, device, entry),
+            BatteryScheduleSensor(optimization_coordinator, device, entry),
+            # Battery state sensors
+            BatterySoCSensor(optimization_coordinator, device, entry),
+            BatteryPowerSensor(optimization_coordinator, device, entry),
+            # Forecast sensors (use ForecastCoordinator)
+            PVForecastSensor(forecast_coordinator, device, entry),
+            ConsumptionForecastSensor(forecast_coordinator, device, entry),
+            NetGridForecastSensor(forecast_coordinator, device, entry),
+            # Weather logging sensors (stored in recorder for price model training)
+            SolarIrradianceSensor(forecast_coordinator, device, entry),
+            WindSpeedSensor(forecast_coordinator, device, entry),
+            # Financial sensors
+            BatteryDailySavingsSensor(optimization_coordinator, device, entry),
+            BatteryShadowPriceSensor(optimization_coordinator, device, entry),
+            # Grid control sensors
+            CurrentGridPowerSensor(optimization_coordinator, device, entry),
+            BatteryGridSetpointSensor(optimization_coordinator, device, entry),
+            BatteryControlModeSensor(optimization_coordinator, device, entry),
+            # Diagnostics
+            OptimizationStatusSensor(optimization_coordinator, device, entry),
+        ]
+    )
 
-    # Per-battery sensors (one set per battery subentry, on the battery's own device)
+    # Per-battery subentry sensors — each call associates entities with that subentry
     for subentry in entry.subentries.values():
         if subentry.subentry_type == BATTERY_SUBENTRY_TYPE:
             batt_device = battery_devices.get(subentry.subentry_id, device)
-            sensors.append(
-                BatterySubentrySetpointSensor(
-                    optimization_coordinator,
-                    batt_device,
-                    entry,
-                    subentry.subentry_id,
-                    subentry.title,
-                )
-            )
-            sensors.append(
-                BatterySubentrySoCSensor(
-                    optimization_coordinator,
-                    batt_device,
-                    entry,
-                    subentry.subentry_id,
-                    subentry.title,
-                )
+            async_add_entities(
+                [
+                    BatterySubentrySetpointSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
+                    BatterySubentrySoCSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
+                ],
+                config_subentry_id=subentry.subentry_id,
             )
 
-    # Per-PV-array forecast sensors (one per PV subentry, diagnostic, disabled by default)
+    # Per-PV-array subentry sensors — diagnostic, disabled by default
     for subentry in entry.subentries.values():
         if subentry.subentry_type == PV_SUBENTRY_TYPE:
-            sensors.append(
-                PVArrayForecastSensor(
-                    forecast_coordinator,
-                    device,
-                    entry,
-                    subentry.subentry_id,
-                    subentry.title,
-                )
+            pv_device = pv_devices.get(subentry.subentry_id, device)
+            async_add_entities(
+                [
+                    PVArrayForecastSensor(
+                        forecast_coordinator,
+                        pv_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    )
+                ],
+                config_subentry_id=subentry.subentry_id,
             )
 
-    async_add_entities(sensors)
+    # Migration: remove legacy None-subentry device associations.
+    # Before per-subentry device support, battery/PV devices were registered under the
+    # main config entry (subentry=None). After async_add_entities with config_subentry_id,
+    # the device has both None and the subentry ID in its associations, causing it to
+    # appear in both "not under a sub-item" and the correct subentry in the HA UI.
+    device_registry = dr.async_get(hass)
+    for sid in list(battery_devices) + list(pv_devices):
+        dev = device_registry.async_get_device(identifiers={(DOMAIN, sid)})
+        if dev and None in dev.config_entries_subentries.get(entry.entry_id, set()):
+            device_registry.async_update_device(
+                dev.id,
+                remove_config_entry_id=entry.entry_id,
+                remove_config_subentry_id=None,
+            )
 
 
 class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], SensorEntity):
@@ -250,10 +274,10 @@ class BatteryScheduleSensor(BatteryControllerSensor):
 
 
 class BatterySoCSensor(BatteryControllerSensor):
-    """Sensor for battery state of charge."""
+    """Sensor for combined battery state of charge across all batteries."""
 
     _attr_translation_key = "soc"
-    _attr_name = "State of Charge"
+    _attr_name = "Total State of Charge"
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -288,7 +312,7 @@ class BatteryPowerSensor(BatteryControllerSensor):
     """Sensor for current battery power."""
 
     _attr_translation_key = "battery_power"
-    _attr_name = "Battery Power"
+    _attr_name = "Total Battery Power"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT

@@ -725,20 +725,35 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             mode=controller_mode,
         )
 
-        # Only push an update if something material changed (avoids flooding recorder)
         prev_target = (
             self.data.get("control_action", {}).get("target_power_kw")
             if self.data
             else None
         )
         new_target = control_action["target_power_kw"]
-        if prev_target is not None and abs(new_target - prev_target) < 0.010:
-            return  # Change < 10 W — skip recorder write
+        setpoint_stable = (
+            prev_target is not None and abs(new_target - prev_target) < 0.010
+        )
 
-        # Split setpoint across individual batteries
+        if setpoint_stable:
+            # Setpoint unchanged — still update battery state if power changed,
+            # so that BatteryPowerSensor stays current even when setpoint is stable.
+            old_state = self.data.get("battery_state") if self.data else None
+            if (
+                old_state is None
+                or abs(battery_state.power_kw - old_state.power_kw) > 0.005
+            ):
+                self.async_set_updated_data(
+                    {
+                        **self.data,
+                        "battery_state": battery_state,
+                        "per_battery_states": dict(self._per_battery_states),
+                    }
+                )
+            return
+
+        # Setpoint changed — full update including control action and setpoints
         battery_setpoints = self._split_setpoint(control_action["target_power_kw"])
-
-        # Update coordinator data with new control action (triggers sensor updates)
         self.async_set_updated_data(
             {
                 **self.data,

@@ -57,8 +57,8 @@ def _make_device(entry_id="test_entry"):
 # ---------------------------------------------------------------------------
 
 
-def test_battery_controller_data_has_battery_devices():
-    """BatteryControllerData must expose a battery_devices dict."""
+def test_battery_controller_data_has_battery_and_pv_devices():
+    """BatteryControllerData must expose battery_devices and pv_devices dicts."""
     data = BatteryControllerData(
         weather_coordinator=MagicMock(),
         forecast_coordinator=MagicMock(),
@@ -66,8 +66,10 @@ def test_battery_controller_data_has_battery_devices():
         config={},
         device=MagicMock(),
         battery_devices={"sub1": MagicMock()},
+        pv_devices={"pv1": MagicMock()},
     )
     assert "sub1" in data.battery_devices
+    assert "pv1" in data.pv_devices
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +112,45 @@ def test_battery_device_model_includes_capacity():
     )
     assert "10" in device["model"]
     assert "kWh" in device["model"]
+
+
+# ---------------------------------------------------------------------------
+# PV subentry DeviceInfo construction
+# ---------------------------------------------------------------------------
+
+
+def test_pv_device_identifiers_are_subentry_id():
+    """Each PV device must use the subentry_id as its identifier."""
+    subentry_id = "pv_sub_abc"
+    device = DeviceInfo(
+        identifiers={(DOMAIN, subentry_id)},
+        name="South Roof",
+        model="4.0 kWp PV Array",
+        via_device=(DOMAIN, "entry_xyz"),
+    )
+    assert (DOMAIN, subentry_id) in device["identifiers"]
+
+
+def test_pv_device_links_to_parent_via_device():
+    """PV device must reference the parent entry via via_device."""
+    device = DeviceInfo(
+        identifiers={(DOMAIN, "pv_sub1")},
+        name="South Roof",
+        via_device=(DOMAIN, "parent_entry"),
+    )
+    assert device["via_device"] == (DOMAIN, "parent_entry")
+
+
+def test_pv_device_model_includes_kwp():
+    """PV device model string should include peak power in kWp."""
+    device = DeviceInfo(
+        identifiers={(DOMAIN, "pv1")},
+        name="East Array",
+        model="6.5 kWp PV Array",
+        via_device=(DOMAIN, "entry1"),
+    )
+    assert "6.5" in device["model"]
+    assert "kWp" in device["model"]
 
 
 # ---------------------------------------------------------------------------
