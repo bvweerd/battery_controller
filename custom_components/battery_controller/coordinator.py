@@ -198,8 +198,11 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         # Build AC and DC PV forecast models from subentry data.
         # config["pv_arrays"] is a list of subentry data dicts injected by async_setup_entry.
+        # Each dict contains a "subentry_id" key for per-array forecast keying.
         self.pv_ac_models: list[PVForecastModel] = []
+        self.pv_ac_subentry_ids: list[str] = []
         self.pv_dc_models: list[PVForecastModel] = []
+        self.pv_dc_subentry_ids: list[str] = []
         for arr in config.get("pv_arrays", []):
             kwp = float(arr.get("peak_power_kwp", 0))
             if kwp <= 0:
@@ -208,6 +211,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             tilt = float(arr.get("tilt", 35.0))
             efficiency_factor = float(arr.get("efficiency_factor", 0.85))
             dc_coupled = bool(arr.get("dc_coupled", False))
+            subentry_id = arr.get("subentry_id", "")
             if dc_coupled:
                 # DC PV: raw panel output; DC coupling efficiency handled by battery model
                 self.pv_dc_models.append(
@@ -218,6 +222,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                         efficiency_factor=1.0,
                     )
                 )
+                self.pv_dc_subentry_ids.append(subentry_id)
             else:
                 self.pv_ac_models.append(
                     PVForecastModel(
@@ -227,6 +232,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                         efficiency_factor=efficiency_factor,
                     )
                 )
+                self.pv_ac_subentry_ids.append(subentry_id)
 
         # Dummy zero-power PV model for NetLoadForecast (consumption only)
         _dummy_pv = PVForecastModel(
@@ -294,8 +300,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
-        for model in self.pv_ac_models:
+        per_pv_array_forecasts: dict[str, list[float]] = {}
+        for sid, model in zip(self.pv_ac_subentry_ids, self.pv_ac_models):
             extra = model.forecast_from_radiation(radiation_forecast, temp_for_pv)
+            arr_forecast = [round(max(0.0, v), 3) for v in extra[:n]]
+            if sid:
+                per_pv_array_forecasts[sid] = arr_forecast
             for i in range(min(n, len(extra))):
                 pv_forecast[i] += extra[i]
 
@@ -307,8 +317,11 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Sum DC PV forecast across all DC subentry models, applying temperature derating
         has_dc = bool(self.pv_dc_models)
         pv_dc_forecast = [0.0] * n
-        for dc_model in self.pv_dc_models:
+        for sid, dc_model in zip(self.pv_dc_subentry_ids, self.pv_dc_models):
             extra_dc = dc_model.forecast_from_radiation(radiation_forecast, temp_for_pv)
+            arr_forecast = [round(max(0.0, v), 3) for v in extra_dc[:n]]
+            if sid:
+                per_pv_array_forecasts[sid] = arr_forecast
             for i in range(min(n, len(extra_dc))):
                 pv_dc_forecast[i] += extra_dc[i]
 
@@ -323,6 +336,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         result = {
             "pv_forecast_kw": [round(v, 3) for v in pv_forecast],
             "pv_dc_forecast_kw": [round(v, 3) for v in pv_dc_forecast],
+            "per_pv_array_forecasts": per_pv_array_forecasts,
             "consumption_forecast_kw": [round(v, 3) for v in consumption_forecast],
             "net_load_forecast_kw": [round(v, 3) for v in net_load_forecast],
             "current_pv_kw": round(current_pv, 3),

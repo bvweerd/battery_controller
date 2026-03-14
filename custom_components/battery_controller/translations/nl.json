@@ -273,6 +273,15 @@
       },
       "optimization_status": {
         "name": "Optimalisatie Status"
+      },
+      "battery_subentry_soc": {
+        "name": "Laadtoestand"
+      },
+      "battery_subentry_setpoint": {
+        "name": "Batterij Setpoint"
+      },
+      "pv_array_forecast": {
+        "name": "PV Voorspelling"
       }
     },
     "number": {

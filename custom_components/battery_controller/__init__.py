@@ -15,12 +15,14 @@ from homeassistant.helpers.entity import DeviceInfo
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
+    CONF_CAPACITY_KWH,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_KWH,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MIN_PRICE_SPREAD,
+    CONF_NAME,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
@@ -69,6 +71,7 @@ class BatteryControllerData:
     optimization_coordinator: OptimizationCoordinator
     config: dict[str, Any]
     device: DeviceInfo
+    battery_devices: dict[str, DeviceInfo]  # keyed by subentry_id
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -77,7 +80,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Collect subentries by type
     pv_arrays = [
-        s.data for s in entry.subentries.values() if s.subentry_type == PV_SUBENTRY_TYPE
+        {**s.data, "subentry_id": s.subentry_id}
+        for s in entry.subentries.values()
+        if s.subentry_type == PV_SUBENTRY_TYPE
     ]
     battery_subentries = [
         (s.subentry_id, dict(s.data))
@@ -146,12 +151,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sw_version=_MANIFEST.get("version", "unknown"),
     )
 
+    battery_devices: dict[str, DeviceInfo] = {}
+    for subentry_id, subentry_data in battery_subentries:
+        subentry = entry.subentries.get(subentry_id)
+        title = (
+            subentry.title
+            if subentry is not None
+            else subentry_data.get(CONF_NAME)
+            or f"{subentry_data.get(CONF_CAPACITY_KWH, '?')} kWh"
+        )
+        capacity_kwh = subentry_data.get(CONF_CAPACITY_KWH, "?")
+        battery_devices[subentry_id] = DeviceInfo(
+            identifiers={(DOMAIN, subentry_id)},
+            name=title,
+            manufacturer="Custom",
+            model=f"{capacity_kwh} kWh Battery",
+            via_device=(DOMAIN, entry.entry_id),
+        )
+
     entry.runtime_data = BatteryControllerData(
         weather_coordinator=weather_coordinator,
         forecast_coordinator=forecast_coordinator,
         optimization_coordinator=optimization_coordinator,
         config=config,
         device=device,
+        battery_devices=battery_devices,
     )
 
     _LOGGER.debug("Coordinators initialized successfully")

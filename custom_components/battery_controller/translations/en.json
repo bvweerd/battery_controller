@@ -217,6 +217,15 @@
       },
       "optimization_status": {
         "name": "Optimization Status"
+      },
+      "battery_subentry_soc": {
+        "name": "State of Charge"
+      },
+      "battery_subentry_setpoint": {
+        "name": "Battery Setpoint"
+      },
+      "pv_array_forecast": {
+        "name": "PV Forecast"
       }
     },
     "number": {

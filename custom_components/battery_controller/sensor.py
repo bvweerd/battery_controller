@@ -20,6 +20,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
+    PV_SUBENTRY_TYPE,
 )
 from .coordinator import ForecastCoordinator, OptimizationCoordinator
 
@@ -39,6 +40,7 @@ async def async_setup_entry(
     optimization_coordinator = data.optimization_coordinator
     forecast_coordinator = data.forecast_coordinator
     device = data.device
+    battery_devices = data.battery_devices
 
     sensors: list[SensorEntity] = [
         # Optimization output sensors
@@ -66,12 +68,35 @@ async def async_setup_entry(
         OptimizationStatusSensor(optimization_coordinator, device, entry),
     ]
 
-    # Per-battery setpoint sensors (one per battery subentry)
+    # Per-battery sensors (one set per battery subentry, on the battery's own device)
     for subentry in entry.subentries.values():
         if subentry.subentry_type == BATTERY_SUBENTRY_TYPE:
+            batt_device = battery_devices.get(subentry.subentry_id, device)
             sensors.append(
                 BatterySubentrySetpointSensor(
                     optimization_coordinator,
+                    batt_device,
+                    entry,
+                    subentry.subentry_id,
+                    subentry.title,
+                )
+            )
+            sensors.append(
+                BatterySubentrySoCSensor(
+                    optimization_coordinator,
+                    batt_device,
+                    entry,
+                    subentry.subentry_id,
+                    subentry.title,
+                )
+            )
+
+    # Per-PV-array forecast sensors (one per PV subentry, diagnostic, disabled by default)
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type == PV_SUBENTRY_TYPE:
+            sensors.append(
+                PVArrayForecastSensor(
+                    forecast_coordinator,
                     device,
                     entry,
                     subentry.subentry_id,
@@ -598,6 +623,87 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
             "power_kw": round(state.power_kw, 3),
             "mode": state.mode,
         }
+
+
+class BatterySubentrySoCSensor(BatteryControllerSensor):
+    """Per-battery state-of-charge sensor."""
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        battery_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"soc_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"State of Charge {battery_title}"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        per_states = self.coordinator.data.get("per_battery_states", {})
+        state = per_states.get(self._subentry_id)
+        if state is None:
+            return None
+        return round(state.soc_percent, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        per_states = self.coordinator.data.get("per_battery_states", {})
+        state = per_states.get(self._subentry_id)
+        if state is None:
+            return {}
+        return {
+            "soc_kwh": round(state.soc_kwh, 3),
+            "power_kw": round(state.power_kw, 3),
+            "mode": state.mode,
+        }
+
+
+class PVArrayForecastSensor(BatteryForecastSensor):
+    """Diagnostic sensor for a single PV array's expected output and forecast."""
+
+    _attr_native_unit_of_measurement = "kW"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(
+        self,
+        coordinator: ForecastCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        array_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"pv_array_forecast_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"PV Forecast {array_title}"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        forecasts = self.coordinator.data.get("per_pv_array_forecasts", {})
+        forecast = forecasts.get(self._subentry_id, [])
+        return forecast[0] if forecast else 0.0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        forecasts = self.coordinator.data.get("per_pv_array_forecasts", {})
+        return {"forecast_kw": forecasts.get(self._subentry_id, [])}
 
 
 class BatteryControlModeSensor(BatteryControllerSensor):

@@ -90,6 +90,7 @@ async def test_diagnostics_dataclass_access(
         optimization_coordinator=optimization_coord,
         config={},
         device=MagicMock(),
+        battery_devices={},
     )
 
     # We need to mock entity_registry.async_get and er.async_entries_for_config_entry
