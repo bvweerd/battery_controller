@@ -439,6 +439,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._effective_power: float = 0.0
         self._dp_schedule_w: float = 0.0
 
+        # Commitment filter: prevent switching active charge/discharge to idle unless
+        # the price has moved enough to make the change economically justified.
+        self._committed_action: str = "idle"
+        self._committed_price: float = 0.0
+        self._committed_power: float = 0.0
+
         # Failure tracking and cascade listeners
         self._last_failure_reason: str | None = None
         self._last_success_time: datetime | None = None
@@ -1532,6 +1538,51 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # follow_schedule: execute DP schedule exactly
             effective_mode = result.optimal_mode
             effective_power = result.optimal_power_kw
+
+        # Commitment filter: don't switch an active charge/discharge to idle unless
+        # the price has moved beyond the oscillation-filter threshold (same economics
+        # as the post-DP oscillation filter in optimizer.py).
+        if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
+            sqrt_rte = battery_config.round_trip_efficiency**0.5
+            commit_spread = degradation_cost * 2.0 / sqrt_rte + min_spread
+            current_price = resampled_prices[0] if resampled_prices else 0.0
+            soc_at_limit = (
+                battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
+                or battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98
+            )
+            direction_flip = (
+                self._committed_action == "charging" and effective_mode == "discharging"
+            ) or (
+                self._committed_action == "discharging" and effective_mode == "charging"
+            )
+            if self._committed_action == "charging":
+                price_jumped = current_price > self._committed_price + commit_spread
+            elif self._committed_action == "discharging":
+                price_jumped = current_price < self._committed_price - commit_spread
+            else:
+                price_jumped = False
+
+            if (
+                self._committed_action in ("charging", "discharging")
+                and effective_mode == "idle"
+                and not price_jumped
+                and not soc_at_limit
+                and not direction_flip
+            ):
+                _LOGGER.debug(
+                    "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
+                    "soc_at_limit=%s)",
+                    self._committed_action,
+                    abs(current_price - self._committed_price),
+                    commit_spread,
+                    soc_at_limit,
+                )
+                effective_mode = self._committed_action
+                effective_power = self._committed_power
+            else:
+                self._committed_action = effective_mode
+                self._committed_price = current_price
+                self._committed_power = effective_power
 
         # Store for real-time control loop
         self._effective_mode = effective_mode
