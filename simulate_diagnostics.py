@@ -704,6 +704,86 @@ def print_whatif(
 # ---------------------------------------------------------------------------
 
 
+def print_min_spread_analysis(battery, degradation_cost, price_forecast):
+    """Calculate and print the minimum price spread needed for profitable charge/discharge."""
+    rte = battery.round_trip_efficiency
+    sqrt_rte = math.sqrt(rte)
+    min_p = min(price_forecast)
+    max_p = max(price_forecast)
+    actual_spread = max_p - min_p
+
+    rte_loss = min_p * (1 / rte - 1)
+    deg_loss = 2 * degradation_cost / sqrt_rte
+    delta_min = rte_loss + deg_loss
+
+    print()
+    print("=" * 65)
+    print("  MINIMUM SPREAD ANALYSIS")
+    print("=" * 65)
+    print(f"  RTE:              {rte:.2f}  (√RTE = {sqrt_rte:.4f})")
+    print(f"  Degradation:      {degradation_cost:.2f} €/kWh")
+    print(
+        f"  Capacity:         {battery.max_soc_kwh} kWh  (usable: {battery.max_soc_kwh - battery.min_soc_kwh:.3f} kWh)"
+    )
+    print()
+    print(f"  Price range forecast:  {min_p:.4f} – {max_p:.4f} €/kWh")
+    print(f"  Actual spread:         {actual_spread * 100:.2f} ct/kWh")
+    print()
+    print(f"  Minimum spread needed (charge @ cheapest price {min_p:.4f}):")
+    print(
+        f"    RTE loss:          {rte_loss * 100:.2f} ct/kWh  (energy lost per cycle)"
+    )
+    print(
+        f"    Degradation cost:  {deg_loss * 100:.2f} ct/kWh  (2 × {degradation_cost:.2f} / √RTE)"
+    )
+    print("    ─────────────────────────────")
+    print(f"    Total Δ_min:       {delta_min * 100:.2f} ct/kWh")
+    print()
+
+    if actual_spread >= delta_min:
+        margin = (actual_spread - delta_min) * 100
+        usable = battery.max_soc_kwh - battery.min_soc_kwh
+        max_profit = (actual_spread - delta_min) * usable
+        print(
+            f"  ✓ PROFITABLE: spread {actual_spread * 100:.2f} ct > minimum {delta_min * 100:.2f} ct  (margin: {margin:.2f} ct)"
+        )
+        print(
+            f"    Max profit per cycle: {max_profit * 100:.2f} ct  ({max_profit:.4f} €)"
+        )
+    else:
+        shortage = (delta_min - actual_spread) * 100
+        print(
+            f"  ✗ NOT PROFITABLE: spread {actual_spread * 100:.2f} ct < minimum {delta_min * 100:.2f} ct"
+        )
+        print(
+            f"    Shortfall: {shortage:.2f} ct/kWh — optimizer correctly does not charge/discharge"
+        )
+
+    print()
+    print("  Break-even spread per buy price:")
+    print(
+        f"  {'p_buy':>8}  {'Δ_min':>10}  {'p_sell_min':>10}  {'Spread achievable?':>18}"
+    )
+    for p in sorted({min_p, 0.10, 0.15, 0.20, 0.25, max_p}):
+        d = p * (1 / rte - 1) + 2 * degradation_cost / sqrt_rte
+        ok = "✓" if max_p >= p + d else "✗"
+        print(f"  {p:>8.4f}  {d * 100:>9.2f}ct  {p + d:>10.4f}  {ok}")
+
+    print()
+    print("  Effect of higher RTE (at current prices):")
+    for test_rte in [0.76, 0.80, 0.85, 0.90, 0.95]:
+        sr = math.sqrt(test_rte)
+        d = min_p * (1 / test_rte - 1) + 2 * degradation_cost / sr
+        ok = (
+            "✓ profitable"
+            if actual_spread >= d
+            else f"✗ shortfall {(d - actual_spread) * 100:.2f} ct"
+        )
+        marker = " ← current" if test_rte == rte else ""
+        print(f"    RTE={test_rte:.2f}: Δ_min={d * 100:.2f} ct  {ok}{marker}")
+    print("=" * 65)
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "diagnostics.json"
     diag = load_diagnostics(path)
@@ -813,6 +893,12 @@ def main():
         recorded_power=rec_power,
         recorded_mode=rec_mode,
         recorded_soc=rec_soc,
+    )
+
+    print_min_spread_analysis(
+        battery=battery,
+        degradation_cost=degradation_cost,
+        price_forecast=price_forecast,
     )
 
     print_whatif(

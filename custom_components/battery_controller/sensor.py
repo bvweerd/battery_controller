@@ -270,6 +270,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
             attrs["price_forecast"] = result.price_forecast
             attrs["pv_forecast_kw"] = result.pv_forecast
             attrs["consumption_forecast_kw"] = result.consumption_forecast
+        price_forecast_model = self.coordinator.data.get("price_forecast_model")
+        if price_forecast_model is not None:
+            attrs["price_forecast_predicted"] = price_forecast_model
         return attrs
 
 

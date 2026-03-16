@@ -154,6 +154,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_soc: Any | None = None
         self._unsub_forecast: Any | None = None
         self._unsub_optimizer_timer: Any | None = None
+        self._unsub_price_model_refresh: Any | None = None
         self._interval_minutes: int = interval_minutes
 
         # Historical price forecast model (fallback when day-ahead not yet published)
@@ -161,7 +162,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             hass=hass,
             price_sensor_id=config.get(CONF_PRICE_SENSOR, ""),
             entry_id=config.get("entry_id"),
-            history_days=30,
+            history_days=28,
         )
 
         # Enabled flag: when False _async_update_data returns cached data immediately
@@ -211,9 +212,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Enable or disable the optimizer."""
         self._optimization_enabled = value
 
+    async def _handle_price_model_refresh(self, now: datetime) -> None:
+        """Refresh historical price model from HA recorder (daily timer)."""
+        _LOGGER.debug("Daily price model refresh triggered at %s", now)
+        await self._price_model.async_update_pattern()
+
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
         await self._price_model.async_update_pattern()
+
+        # Re-learn price pattern every 24 h so new data is picked up automatically,
+        # and so the model becomes available shortly after a fresh install.
+        self._unsub_price_model_refresh = async_track_time_interval(
+            self.hass,
+            self._handle_price_model_refresh,
+            timedelta(hours=24),
+        )
 
         if self._price_sensor:
             self._unsub_price = async_track_state_change_event(
@@ -390,7 +404,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if state is not None and state.last_updated is not None:
                 age_s = (dt_util.utcnow() - state.last_updated).total_seconds()
                 if age_s > stale_limit_s:
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Grid power sensor '%s' is stale (%.0f s old, limit %.0f s); "
                         "skipping zero_grid correction",
                         first_sensor,
@@ -606,6 +620,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_optimizer_timer:
             self._unsub_optimizer_timer()
             self._unsub_optimizer_timer = None
+        if self._unsub_price_model_refresh:
+            self._unsub_price_model_refresh()
+            self._unsub_price_model_refresh = None
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
@@ -981,8 +998,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # price_forecast is already at native price_interval resolution — no resample needed.
         resampled_prices = price_forecast
 
-        # Extend horizon with historical model if live forecast covers less than 24 hours
-        min_horizon_steps = 24 * 60 // price_interval
+        # Extend horizon with historical model if live forecast covers less than 36 hours
+        min_horizon_steps = 36 * 60 // price_interval
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
             hours_already = len(resampled_prices) * price_interval / 60
@@ -1016,6 +1033,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 original_steps,
                 len(resampled_prices),
             )
+
+        # Generate model forecast for price accuracy comparison.
+        # Always computed when live prices are used, so users can compare prediction vs actual.
+        price_forecast_model: list[float] | None = None
+        if self._price_model.has_data() and price_forecast_source.startswith("live"):
+            _weather = self.weather_coordinator.data or {}
+            total_hours = (len(resampled_prices) * price_interval + 59) // 60
+            _model_raw = self._price_model.forecast(
+                hours=total_hours,
+                ghi_forecast=_weather.get("radiation_forecast"),
+                wind_forecast=_weather.get("wind_speed_forecast"),
+            )
+            _model_resampled = resample_forecast(_model_raw, 60, price_interval)
+            price_forecast_model = _model_resampled[: len(resampled_prices)]
 
         # Compute per-step durations: first step = remaining time in current price period,
         # subsequent steps = full price_interval each.
@@ -1367,5 +1398,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
             ),
             "price_forecast_source": price_forecast_source,
+            "price_forecast_model": price_forecast_model,
             "timestamp": dt_util.utcnow(),
         }

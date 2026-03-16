@@ -482,31 +482,42 @@ class PriceForecastModel:
                 {"mean"},
             )
 
-            def _ts_key(stat: Any) -> str | None:
+            def _stat_dt(stat: Any) -> datetime | None:
+                """Extract start datetime directly from a statistics dict entry."""
                 start = stat.get("start")
                 if start is None:
                     return None
                 if isinstance(start, datetime):
-                    return start.isoformat()
-                return str(start)
+                    return start
+                # Fallback: try parsing string or Unix timestamp
+                if isinstance(start, (int, float)):
+                    from datetime import timezone
 
-            price_hourly: dict[str, float] = {}
+                    return datetime.fromtimestamp(start, tz=timezone.utc)
+                parsed = dt_util.parse_datetime(str(start))
+                return parsed
+
+            # price_hourly stores (datetime, price) to avoid string round-trip issues
+            price_hourly: list[tuple[datetime, float]] = []
             for stat in price_stats.get(self.price_sensor_id, []):
                 mean = stat.get("mean")
-                ts = _ts_key(stat)
-                if mean is not None and ts:
-                    price_hourly[ts] = float(mean)
+                dt_obj = _stat_dt(stat)
+                if mean is not None and dt_obj is not None:
+                    price_hourly.append((dt_obj, float(mean)))
 
             if not price_hourly:
-                _LOGGER.debug(
-                    "No price statistics found for %s; price model not yet available",
+                _LOGGER.info(
+                    "Price model: no statistics found for '%s' "
+                    "(query returned keys: %s); price_forecast_predicted unavailable",
                     self.price_sensor_id,
+                    list(price_stats.keys())[:5] if price_stats else "none",
                 )
                 return
 
             # Query weather sensor statistics if GHI/wind sensors exist
-            ghi_hourly: dict[str, float] = {}
-            wind_hourly: dict[str, float] = {}
+            # Key: UTC datetime rounded to hour → value for bin lookup
+            ghi_hourly: dict[datetime, float] = {}
+            wind_hourly: dict[datetime, float] = {}
             weather_ids = {sid for sid in (ghi_entity_id, wind_entity_id) if sid}
             if weather_ids:
                 weather_stats = await get_instance(self.hass).async_add_executor_job(
@@ -521,24 +532,21 @@ class PriceForecastModel:
                 )
                 for stat in weather_stats.get(ghi_entity_id or "", []):
                     mean = stat.get("mean")
-                    ts = _ts_key(stat)
-                    if mean is not None and ts:
-                        ghi_hourly[ts] = float(mean)
+                    dt_obj = _stat_dt(stat)
+                    if mean is not None and dt_obj is not None:
+                        ghi_hourly[dt_obj] = float(mean)
                 for stat in weather_stats.get(wind_entity_id or "", []):
                     mean = stat.get("mean")
-                    ts = _ts_key(stat)
-                    if mean is not None and ts:
-                        wind_hourly[ts] = float(mean)
+                    dt_obj = _stat_dt(stat)
+                    if mean is not None and dt_obj is not None:
+                        wind_hourly[dt_obj] = float(mean)
 
             # Build lookup tables
             weather_raw: dict[tuple[int, int, int, int], list[float]] = {}
             simple_raw: dict[tuple[int, int], list[float]] = {}
             all_prices: list[float] = []
 
-            for ts, price in price_hourly.items():
-                dt_obj = dt_util.parse_datetime(ts)
-                if dt_obj is None:
-                    continue
+            for dt_obj, price in price_hourly:
                 # Convert to local time so the pattern aligns with the local-time
                 # forecast generated in PriceForecastModel.forecast().
                 dt_local = dt_util.as_local(dt_obj)
@@ -546,9 +554,9 @@ class PriceForecastModel:
                 dow = dt_local.weekday()
                 all_prices.append(price)
                 simple_raw.setdefault((hour, dow), []).append(price)
-                if ts in ghi_hourly and ts in wind_hourly:
-                    gb = self._ghi_bin(ghi_hourly[ts])
-                    wb = self._wind_bin(wind_hourly[ts])
+                if dt_obj in ghi_hourly and dt_obj in wind_hourly:
+                    gb = self._ghi_bin(ghi_hourly[dt_obj])
+                    wb = self._wind_bin(wind_hourly[dt_obj])
                     weather_raw.setdefault((hour, dow, gb, wb), []).append(price)
 
             self._simple_pattern = simple_raw
