@@ -67,6 +67,7 @@ The model also **extends the planning horizon** when live prices cover less than
 
 ### Prerequisites
 
+- **Home Assistant 2025.1 or later**
 - A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator)).
 - Battery SoC sensor(s) from your inverter integration.
 - [HACS](https://hacs.xyz/) installed in your Home Assistant (recommended).
