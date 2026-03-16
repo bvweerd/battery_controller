@@ -267,12 +267,15 @@ class BatteryScheduleSensor(BatteryControllerSensor):
             "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", []),
         }
         if result is not None:
-            attrs["price_forecast"] = result.price_forecast
+            attrs["grid_price_forecast"] = result.price_forecast
             attrs["pv_forecast_kw"] = result.pv_forecast
             attrs["consumption_forecast_kw"] = result.consumption_forecast
         price_forecast_model = self.coordinator.data.get("price_forecast_model")
         if price_forecast_model is not None:
-            attrs["price_forecast_predicted"] = price_forecast_model
+            attrs["grid_price_forecast_predicted"] = price_forecast_model
+        feed_in_price_forecast = self.coordinator.data.get("feed_in_price_forecast")
+        if feed_in_price_forecast is not None:
+            attrs["feed_in_price_forecast"] = feed_in_price_forecast
         return attrs
 
 

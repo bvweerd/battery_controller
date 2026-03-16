@@ -947,6 +947,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
 
         # Get feed-in price forecast
+        feed_in_is_dynamic = False  # True when feed-in came from a live sensor forecast
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
         if feed_in_sensor:
             feed_in_state = self.hass.states.get(feed_in_sensor)
@@ -954,6 +955,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 feed_in_forecast, _ = extract_price_forecast_with_interval(
                     feed_in_state
                 )
+                feed_in_is_dynamic = True
             else:
                 # Sensor unavailable - fall back to fixed price
                 fixed_price = float(
@@ -1093,9 +1095,53 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Pad shorter forecasts to match price horizon
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
-            resampled_feed_in.extend(
-                [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
-            )
+            if feed_in_is_dynamic and self._price_model.has_data():
+                # Extend feed-in using the same historical price model as the grid price,
+                # scaled by the average feed-in/grid ratio from the overlapping live steps.
+                overlap = min(len(resampled_feed_in), len(resampled_prices))
+                pairs = [
+                    (fi, gp)
+                    for fi, gp in zip(
+                        resampled_feed_in[:overlap], resampled_prices[:overlap]
+                    )
+                    if gp > 0
+                ]
+                ratio = sum(fi / gp for fi, gp in pairs) / len(pairs) if pairs else None
+                if ratio is not None:
+                    steps_needed = n_steps - len(resampled_feed_in)
+                    hours_already = len(resampled_feed_in) * price_interval / 60
+                    hours_for_model = (steps_needed * price_interval + 59) // 60
+                    extension_start = dt_util.now().replace(
+                        minute=0, second=0, microsecond=0
+                    ) + timedelta(hours=int(hours_already))
+                    weather_raw = self.weather_coordinator.data or {}
+                    ghi_raw = weather_raw.get("radiation_forecast", [])
+                    wind_raw = weather_raw.get("wind_speed_forecast", [])
+                    offset = int(hours_already)
+                    model_ext = self._price_model.forecast(
+                        hours=hours_for_model,
+                        start_time=extension_start,
+                        ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
+                        wind_forecast=wind_raw[offset:] if wind_raw else None,
+                    )
+                    resampled_ext = resample_forecast(model_ext, 60, price_interval)
+                    resampled_feed_in.extend(
+                        [p * ratio for p in resampled_ext[:steps_needed]]
+                    )
+                    _LOGGER.debug(
+                        "Extended feed-in horizon by %d steps using price model "
+                        "(ratio=%.3f)",
+                        steps_needed,
+                        ratio,
+                    )
+                else:
+                    resampled_feed_in.extend(
+                        [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
+                    )
+            else:
+                resampled_feed_in.extend(
+                    [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
+                )
         while len(pv_forecast) < n_steps:
             pv_forecast.append(0.0)
         while len(consumption_forecast) < n_steps:
@@ -1417,5 +1463,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             ),
             "price_forecast_source": price_forecast_source,
             "price_forecast_model": price_forecast_model,
+            "feed_in_price_forecast": resampled_feed_in,
             "timestamp": dt_util.utcnow(),
         }
