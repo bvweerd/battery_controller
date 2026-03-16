@@ -164,6 +164,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             entry_id=config.get("entry_id"),
             history_days=28,
         )
+        # Separate historical model for feed-in price (learns its own pattern)
+        self._feed_in_price_model = PriceForecastModel(
+            hass=hass,
+            price_sensor_id=config.get(CONF_FEED_IN_PRICE_SENSOR, ""),
+            entry_id=config.get("entry_id"),
+            history_days=28,
+        )
 
         # Enabled flag: when False _async_update_data returns cached data immediately
         # without re-running the optimizer. The 15-min scheduler keeps running so it
@@ -216,10 +223,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Refresh historical price model from HA recorder (daily timer)."""
         _LOGGER.debug("Daily price model refresh triggered at %s", now)
         await self._price_model.async_update_pattern()
+        await self._feed_in_price_model.async_update_pattern()
 
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
         await self._price_model.async_update_pattern()
+        await self._feed_in_price_model.async_update_pattern()
 
         # Re-learn price pattern every 24 h so new data is picked up automatically,
         # and so the model becomes available shortly after a fresh install.
@@ -1093,55 +1102,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if raw_dc and any(v > 0 for v in raw_dc):
                 pv_dc_forecast = resample_forecast(raw_dc, 60, price_interval)
 
-        # Compute feed-in/grid ratio from overlapping live steps (used for both horizon
-        # extension and feed_in_price_forecast_predicted).
-        feed_in_ratio: float | None = None
-        if feed_in_is_dynamic and resampled_feed_in and self._price_model.has_data():
-            overlap = min(len(resampled_feed_in), len(resampled_prices))
-            pairs = [
-                (fi, gp)
-                for fi, gp in zip(
-                    resampled_feed_in[:overlap], resampled_prices[:overlap]
-                )
-                if gp > 0
-            ]
-            feed_in_ratio = (
-                sum(fi / gp for fi, gp in pairs) / len(pairs) if pairs else None
-            )
-
-        # Pad shorter forecasts to match price horizon
+        # Pad shorter forecasts to match price horizon.
+        # Priority: own feed-in model → grid model × ratio → last value.
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
-            if feed_in_ratio is not None:
-                steps_needed = n_steps - len(resampled_feed_in)
-                hours_already = len(resampled_feed_in) * price_interval / 60
-                hours_for_model = (steps_needed * price_interval + 59) // 60
-                extension_start = dt_util.now().replace(
-                    minute=0, second=0, microsecond=0
-                ) + timedelta(hours=int(hours_already))
-                weather_raw = self.weather_coordinator.data or {}
-                ghi_raw = weather_raw.get("radiation_forecast", [])
-                wind_raw = weather_raw.get("wind_speed_forecast", [])
-                offset = int(hours_already)
-                model_ext = self._price_model.forecast(
+            steps_needed = n_steps - len(resampled_feed_in)
+            hours_already = len(resampled_feed_in) * price_interval / 60
+            hours_for_model = (steps_needed * price_interval + 59) // 60
+            extension_start = dt_util.now().replace(
+                minute=0, second=0, microsecond=0
+            ) + timedelta(hours=int(hours_already))
+            weather_raw = self.weather_coordinator.data or {}
+            ghi_raw = weather_raw.get("radiation_forecast", [])
+            wind_raw = weather_raw.get("wind_speed_forecast", [])
+            offset = int(hours_already)
+
+            if feed_in_is_dynamic and self._feed_in_price_model.has_data():
+                # Own feed-in model has historical data — use it directly.
+                model_ext = self._feed_in_price_model.forecast(
                     hours=hours_for_model,
                     start_time=extension_start,
                     ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
                     wind_forecast=wind_raw[offset:] if wind_raw else None,
                 )
                 resampled_ext = resample_forecast(model_ext, 60, price_interval)
-                resampled_feed_in.extend(
-                    [p * feed_in_ratio for p in resampled_ext[:steps_needed]]
-                )
+                resampled_feed_in.extend(resampled_ext[:steps_needed])
                 _LOGGER.debug(
-                    "Extended feed-in horizon by %d steps using price model "
-                    "(ratio=%.3f)",
+                    "Extended feed-in horizon by %d steps using own feed-in model",
                     steps_needed,
-                    feed_in_ratio,
                 )
             else:
-                resampled_feed_in.extend(
-                    [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
-                )
+                resampled_feed_in.extend([resampled_feed_in[-1]] * steps_needed)
         while len(pv_forecast) < n_steps:
             pv_forecast.append(0.0)
         while len(consumption_forecast) < n_steps:
@@ -1152,12 +1142,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             while len(pv_dc_forecast) < n_steps:
                 pv_dc_forecast.append(0.0)
 
-        # Derive feed-in predicted forecast from the grid price model scaled by ratio.
+        # Derive feed-in predicted forecast for accuracy comparison.
+        # Priority: own feed-in model → grid model × ratio.
         feed_in_price_forecast_model: list[float] | None = None
-        if price_forecast_model is not None and feed_in_ratio is not None:
-            feed_in_price_forecast_model = [
-                p * feed_in_ratio for p in price_forecast_model
-            ]
+        if (
+            feed_in_is_dynamic
+            and price_forecast_source.startswith("live")
+            and self._feed_in_price_model.has_data()
+        ):
+            _weather = self.weather_coordinator.data or {}
+            total_hours = (len(resampled_prices) * price_interval + 59) // 60
+            _fi_raw = self._feed_in_price_model.forecast(
+                hours=total_hours,
+                ghi_forecast=_weather.get("radiation_forecast"),
+                wind_forecast=_weather.get("wind_speed_forecast"),
+            )
+            _fi_resampled = resample_forecast(_fi_raw, 60, price_interval)
+            feed_in_price_forecast_model = _fi_resampled[: len(resampled_prices)]
 
         # Get current battery state
         battery_state = self.get_current_battery_state()
