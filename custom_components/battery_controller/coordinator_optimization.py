@@ -1309,21 +1309,39 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
             if (
                 self._committed_action in ("charging", "discharging")
-                and effective_mode == "idle"
                 and not price_jumped
                 and not soc_at_limit
                 and not direction_flip
             ):
-                _LOGGER.debug(
-                    "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
-                    "soc_at_limit=%s)",
-                    self._committed_action,
-                    abs(current_price - self._committed_price),
-                    commit_spread,
-                    soc_at_limit,
-                )
-                effective_mode = self._committed_action
-                effective_power = self._committed_power
+                if effective_mode == self._committed_action:
+                    # Same direction within the same price period: lock power so
+                    # the 15-min re-optimizations don't produce erratic setpoints.
+                    _LOGGER.debug(
+                        "Commitment filter: locking %s power at %.0fW "
+                        "(price Δ=%.3f < commit_spread=%.3f)",
+                        self._committed_action,
+                        self._committed_power * 1000,
+                        abs(current_price - self._committed_price),
+                        commit_spread,
+                    )
+                    effective_power = self._committed_power
+                elif effective_mode == "idle":
+                    # Prevent switching an active charge/discharge to idle.
+                    _LOGGER.debug(
+                        "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
+                        "soc_at_limit=%s)",
+                        self._committed_action,
+                        abs(current_price - self._committed_price),
+                        commit_spread,
+                        soc_at_limit,
+                    )
+                    effective_mode = self._committed_action
+                    effective_power = self._committed_power
+                else:
+                    # Direction flip bypassed the guard — update commitment.
+                    self._committed_action = effective_mode
+                    self._committed_price = current_price
+                    self._committed_power = effective_power
             else:
                 self._committed_action = effective_mode
                 self._committed_price = current_price
