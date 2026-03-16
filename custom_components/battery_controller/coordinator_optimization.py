@@ -1093,51 +1093,51 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if raw_dc and any(v > 0 for v in raw_dc):
                 pv_dc_forecast = resample_forecast(raw_dc, 60, price_interval)
 
+        # Compute feed-in/grid ratio from overlapping live steps (used for both horizon
+        # extension and feed_in_price_forecast_predicted).
+        feed_in_ratio: float | None = None
+        if feed_in_is_dynamic and resampled_feed_in and self._price_model.has_data():
+            overlap = min(len(resampled_feed_in), len(resampled_prices))
+            pairs = [
+                (fi, gp)
+                for fi, gp in zip(
+                    resampled_feed_in[:overlap], resampled_prices[:overlap]
+                )
+                if gp > 0
+            ]
+            feed_in_ratio = (
+                sum(fi / gp for fi, gp in pairs) / len(pairs) if pairs else None
+            )
+
         # Pad shorter forecasts to match price horizon
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
-            if feed_in_is_dynamic and self._price_model.has_data():
-                # Extend feed-in using the same historical price model as the grid price,
-                # scaled by the average feed-in/grid ratio from the overlapping live steps.
-                overlap = min(len(resampled_feed_in), len(resampled_prices))
-                pairs = [
-                    (fi, gp)
-                    for fi, gp in zip(
-                        resampled_feed_in[:overlap], resampled_prices[:overlap]
-                    )
-                    if gp > 0
-                ]
-                ratio = sum(fi / gp for fi, gp in pairs) / len(pairs) if pairs else None
-                if ratio is not None:
-                    steps_needed = n_steps - len(resampled_feed_in)
-                    hours_already = len(resampled_feed_in) * price_interval / 60
-                    hours_for_model = (steps_needed * price_interval + 59) // 60
-                    extension_start = dt_util.now().replace(
-                        minute=0, second=0, microsecond=0
-                    ) + timedelta(hours=int(hours_already))
-                    weather_raw = self.weather_coordinator.data or {}
-                    ghi_raw = weather_raw.get("radiation_forecast", [])
-                    wind_raw = weather_raw.get("wind_speed_forecast", [])
-                    offset = int(hours_already)
-                    model_ext = self._price_model.forecast(
-                        hours=hours_for_model,
-                        start_time=extension_start,
-                        ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
-                        wind_forecast=wind_raw[offset:] if wind_raw else None,
-                    )
-                    resampled_ext = resample_forecast(model_ext, 60, price_interval)
-                    resampled_feed_in.extend(
-                        [p * ratio for p in resampled_ext[:steps_needed]]
-                    )
-                    _LOGGER.debug(
-                        "Extended feed-in horizon by %d steps using price model "
-                        "(ratio=%.3f)",
-                        steps_needed,
-                        ratio,
-                    )
-                else:
-                    resampled_feed_in.extend(
-                        [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
-                    )
+            if feed_in_ratio is not None:
+                steps_needed = n_steps - len(resampled_feed_in)
+                hours_already = len(resampled_feed_in) * price_interval / 60
+                hours_for_model = (steps_needed * price_interval + 59) // 60
+                extension_start = dt_util.now().replace(
+                    minute=0, second=0, microsecond=0
+                ) + timedelta(hours=int(hours_already))
+                weather_raw = self.weather_coordinator.data or {}
+                ghi_raw = weather_raw.get("radiation_forecast", [])
+                wind_raw = weather_raw.get("wind_speed_forecast", [])
+                offset = int(hours_already)
+                model_ext = self._price_model.forecast(
+                    hours=hours_for_model,
+                    start_time=extension_start,
+                    ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
+                    wind_forecast=wind_raw[offset:] if wind_raw else None,
+                )
+                resampled_ext = resample_forecast(model_ext, 60, price_interval)
+                resampled_feed_in.extend(
+                    [p * feed_in_ratio for p in resampled_ext[:steps_needed]]
+                )
+                _LOGGER.debug(
+                    "Extended feed-in horizon by %d steps using price model "
+                    "(ratio=%.3f)",
+                    steps_needed,
+                    feed_in_ratio,
+                )
             else:
                 resampled_feed_in.extend(
                     [resampled_feed_in[-1]] * (n_steps - len(resampled_feed_in))
@@ -1151,6 +1151,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if pv_dc_forecast is not None:
             while len(pv_dc_forecast) < n_steps:
                 pv_dc_forecast.append(0.0)
+
+        # Derive feed-in predicted forecast from the grid price model scaled by ratio.
+        feed_in_price_forecast_model: list[float] | None = None
+        if price_forecast_model is not None and feed_in_ratio is not None:
+            feed_in_price_forecast_model = [
+                p * feed_in_ratio for p in price_forecast_model
+            ]
 
         # Get current battery state
         battery_state = self.get_current_battery_state()
@@ -1463,6 +1470,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             ),
             "price_forecast_source": price_forecast_source,
             "price_forecast_model": price_forecast_model,
+            "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
             "timestamp": dt_util.utcnow(),
         }

@@ -276,6 +276,11 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         feed_in_price_forecast = self.coordinator.data.get("feed_in_price_forecast")
         if feed_in_price_forecast is not None:
             attrs["feed_in_price_forecast"] = feed_in_price_forecast
+        feed_in_price_forecast_model = self.coordinator.data.get(
+            "feed_in_price_forecast_model"
+        )
+        if feed_in_price_forecast_model is not None:
+            attrs["feed_in_price_forecast_predicted"] = feed_in_price_forecast_model
         return attrs
 
 
