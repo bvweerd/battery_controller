@@ -14,16 +14,18 @@ This Home Assistant custom integration optimizes your home battery to minimize e
 
 - **Electricity price forecasts** (Nordpool, ENTSO-E, or any price sensor with forecast attributes like the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
 - **PV production forecasts** (from open-meteo.com solar radiation data)
-- **Household consumption patterns** (learned from historical DSMR energy data)
+- **Household consumption patterns** (learned from historical energy meter data)
 - **Battery characteristics** (capacity, power limits, round-trip efficiency, degradation)
 - **Historical price model** (fallback and horizon extension when day-ahead prices are not yet published)
 
 Battery Controller works with any battery inverter and electricity meter — it is a calculated integration that reads sensors and writes setpoints. It does not communicate directly with hardware.
 
+![Battery Controller dashboard showing electricity prices, battery charge/discharge schedule and SoC](assets/battery-with-prediction.png)
+
 ### Key Features
 
 - **Price arbitrage**: Charge during cheap hours, discharge during expensive hours
-- **Multi-battery support**: Configure multiple batteries with independent sensors; the optimizer treats them as one aggregate while distributing setpoints proportionally.
+- **Multi-battery support**: Configure multiple batteries with independent sensors; the optimizer treats them as one aggregate while distributing setpoints proportionally
 - **Multi-array PV**: Add any number of PV arrays with independent orientation/tilt (e.g. south + east + west)
 - **Pre-day-ahead price model**: Optimize before day-ahead prices are published (typically before 13:00 CET) using a self-learning historical model that improves over time
 - **Horizon extension**: When live day-ahead prices cover less than 24 hours, the remaining hours are filled with the historical model automatically
@@ -32,6 +34,7 @@ Battery Controller works with any battery inverter and electricity meter — it 
 - **Zero-grid control**: Real-time battery control to minimize grid exchange
 - **Degradation-aware**: Accounts for battery wear in optimization decisions
 - **Multiple control modes**: Zero-grid, follow schedule, hybrid, or manual
+- **Negative price handling**: Suggests PV curtailment or maximum power consumption during negative prices
 
 ---
 
@@ -94,55 +97,141 @@ Once the main integration is added, you MUST add your hardware as subentries:
 ## Configuration
 
 ### Main Integration
-The main configuration covers global sensors and advanced settings.
+
+The main configuration covers global sensors and advanced settings, organised in collapsible sections.
+
+**Sensors (required)**
 
 | Parameter | Description |
 |-----------|-------------|
 | Electricity price sensor | Price sensor with forecast attributes |
-| Feed-in price sensor (opt) | Separate feed-in/export price sensor |
-| Power consumption sensors | DSMR **power** sensors (W) for real-time grid balance |
-| Power production sensors | DSMR **power** sensors (W) for real-time grid balance |
-| Energy consumption sensors | DSMR cumulative kWh sensors for pattern learning |
-| Energy production sensors | DSMR cumulative kWh sensors for pattern learning |
 
-### Battery Subentry
+**Optional Sensors**
+
+| Parameter | Description |
+|-----------|-------------|
+| Feed-in price sensor | Separate feed-in/export price sensor |
+| Power consumption sensors | Real-time grid import power sensors (W) for zero-grid control |
+| Power production sensors | Real-time grid export power sensors (W) for zero-grid control |
+| Energy consumption sensors | Cumulative kWh sensors for consumption pattern learning |
+| Energy production sensors | Cumulative kWh sensors for production pattern learning |
+| PV production sensors | Cumulative kWh sensors from PV inverters (used to reconstruct gross consumption) |
+
+**Advanced**
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| Optimization interval | 15 min | How often the DP optimizer runs |
+| Fixed feed-in price | €0.04/kWh | Fallback feed-in price when no sensor is available |
+| Zero grid enabled | true | Enable real-time zero-grid balance control |
+| Zero grid response time | 10 s | Expected battery response delay; limits setpoint update rate |
+| Max grid power | 0 kW | Grid connection cap (0 = unlimited) |
+
+### Battery Subentry
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Name (opt) | — | Display name for this battery |
 | Capacity (kWh) | 10.0 | Total battery capacity |
-| Max charge/discharge (kW) | 5.0 | Power limits |
-| Round-trip efficiency | 0.90 | Battery efficiency (0-1) |
-| Min/Max SoC (%) | 10.0 / 90.0 | Operating range for optimization |
+| Max charge power (kW) | 5.0 | Maximum charge rate |
+| Max discharge power (kW) | 5.0 | Maximum discharge rate |
+| Round-trip efficiency | 0.90 | Battery round-trip efficiency (0.5–1.0) |
+| Min SoC (%) | 10.0 | Lower operating limit for optimization |
+| Max SoC (%) | 90.0 | Upper operating limit for optimization |
 | SoC sensor | — | State-of-charge sensor (% or kWh) |
-| Power sensor (opt) | — | Real-time battery power sensor (kW) |
+| Power sensor (opt) | — | Real-time battery power sensor (W or kW) |
+| DC PV efficiency (opt) | 0.97 | Efficiency of DC-coupled PV on this inverter's DC bus |
+
+### PV Array Subentry
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Name (opt) | — | Display name for this array |
+| Peak power (kWp) | 1.0 | Array peak output |
+| Orientation (°) | 180 | Compass bearing: 0 = north, 90 = east, 180 = south, 270 = west |
+| Tilt (°) | 35 | Panel tilt angle from horizontal |
+| Efficiency factor (opt) | 0.85 | Derating for shading, soiling, inverter losses (AC-coupled) |
+| DC-coupled | false | Enable if this array is on the battery inverter's DC bus |
 
 ---
 
 ## Entities Created
 
+**Convention**: All power sensors use **positive for discharge** and **negative for charge**.
+
 ### Sensors
+
+**Optimization**
 
 | Entity | Unit | Description |
 |--------|------|-------------|
-| **Optimal Power** | W | **Strategy**: Battery power from DP optimizer (15-min planning). |
-| Optimal Mode | — | Current mode: `charging`, `discharging`, `idle`, `zero_grid`, `manual` |
-| **Schedule** | — | Full optimization schedule (available in attributes) |
-| State of Charge | % | Combined battery SoC (weighted average) |
-| Battery Power | kW | Combined battery power |
-| **Battery Setpoint** | W | **Tactics**: Combined real-time power target (~5s updates). |
-| **Battery Setpoint [Name]** | W | Per-battery power setpoint (split from combined setpoint). |
-| **Shadow Price of Storage** | EUR/kWh | **Marginal value of 1 kWh stored right now**. |
-| Estimated Savings | EUR | Financial impact of battery actions vs. doing nothing. |
+| Optimal Power | W | Battery power recommended by the DP optimizer for the current 15-min slot |
+| Optimal Mode | — | Current mode: `charging`, `discharging`, `idle`, `zero_grid` |
+| Schedule | — | Full schedule summary; detailed schedule available in attributes. Disabled by default to reduce recorder load. |
 
-**Convention**: All power sensors in this integration use **positive for discharge** and **negative for charge**.
+**Battery State**
+
+| Entity | Unit | Description |
+|--------|------|-------------|
+| Total State of Charge | % | Combined SoC across all batteries (capacity-weighted average) |
+| Total Battery Power | kW | Combined battery power across all batteries |
+| Battery Setpoint | W | Combined real-time power target sent to all batteries (~5s updates) |
+| Battery Setpoint [Name] | W | Per-battery power setpoint (split from the combined setpoint) |
+| State of Charge [Name] | % | Per-battery state of charge |
+
+**Financial**
+
+| Entity | Unit | Description |
+|--------|------|-------------|
+| Shadow Price of Storage | EUR/kWh | Marginal value of 1 kWh stored right now, derived from the DP value function. Use as a charge/discharge decision threshold. |
+| Estimated Savings | EUR | Cumulative financial benefit vs. doing nothing (running total) |
+
+**Forecast**
+
+| Entity | Unit | Description |
+|--------|------|-------------|
+| PV Forecast | kW | Current expected PV output; full hourly forecast in attributes |
+| Consumption Forecast | kW | Current expected household consumption; full forecast in attributes |
+| Net Grid Forecast | kW | Expected grid exchange without battery (consumption − PV); full forecast in attributes |
+| PV Forecast [Name] | kW | Per-array PV forecast. Diagnostic, disabled by default. |
+
+**Diagnostics** (disabled by default)
+
+| Entity | Unit | Description |
+|--------|------|-------------|
+| Solar Irradiance | W/m² | Current GHI from open-meteo; logged to recorder for price model training |
+| Wind Speed | m/s | Current wind speed from open-meteo; logged to recorder for price model training |
+| Current Grid Power | kW | Measured grid exchange used by the zero-grid controller |
+| Control Mode | — | Active control mode (diagnostic mirror of the select entity) |
+| Optimization Status | — | Optimizer health: `ok`, `stale`, `failed`, `disabled`, or `initializing` |
+
+### Binary Sensors
+
+| Entity | Description |
+|--------|-------------|
+| PV Curtailment Suggested | ON when feed-in price is negative and the battery can no longer absorb excess PV production (SoC at maximum, or actual charge power significantly below setpoint) |
+| Use Maximum Power Suggested | ON when the grid buy price is negative — signals that consuming as much as possible (battery charge, flexible loads) is beneficial |
+
+### Switch
+
+| Entity | Description |
+|--------|-------------|
+| Optimization Enabled | Pause/resume the optimizer without changing any other settings. State is restored on HA restart. |
+
+### Select
+
+| Entity | Options | Description |
+|--------|---------|-------------|
+| Control Mode | `zero_grid`, `follow_schedule`, `hybrid`, `manual` | Active battery control strategy |
 
 ### Number Entities
 
 | Entity | Range | Default | Description |
 |--------|-------|---------|-------------|
-| Degradation Cost | 0-0.20 EUR/kWh | 0.03 | Battery wear cost per kWh throughput |
-| **Min Price Spread** | 0-0.50 EUR/kWh | 0.05 | Minimum price spread to trigger arbitrage. |
-| Zero Grid Deadband | 0-500 W | 50 W | Deadband for zero-grid mode |
-| **Manual Power Setpoint** | — | 0 W | Target power in `manual` mode (+ = discharge) |
+| Degradation Cost | 0–0.20 EUR/kWh | 0.03 | Battery wear cost per kWh throughput; included in the optimizer's cost function |
+| Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Minimum buy/sell spread required before arbitrage is scheduled |
+| Zero Grid Deadband | 0–500 W | 50 W | Grid power tolerance; setpoints are not updated within this band |
+| Manual Power Setpoint | ±max power W | 0 W | Target power in `manual` mode (positive = discharge, negative = charge) |
 
 ---
 
@@ -153,16 +242,18 @@ The main configuration covers global sensors and advanced settings.
 - **Hybrid** (recommended): DP schedule for arbitrage, zero-grid for self-consumption.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
+Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
+
 ---
 
 ## Controlling Your Battery
 
-Use an automation to read the `Optimal Mode` and `Battery Setpoint` (or `Optimal Power`) sensors and send commands to your inverter.
+Use an automation to read `Battery Setpoint` (or `Optimal Power`) and send commands to your inverter.
 
 | Control Mode | Optimal Mode | Power Sensor to Use |
 |-------------|-------------|---------------------|
 | `follow_schedule` | `charging` / `discharging` | `sensor.battery_controller_optimal_power` (W) |
-| `hybrid` / `zero_grid`| `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
+| `hybrid` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
 
 ### Example Automation
 
