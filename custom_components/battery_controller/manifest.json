@@ -11,6 +11,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/bvweerd/battery_controller/issues",
   "requirements": [],
-  "homeassistant": "2025.1.0",
   "version": "2.0.0"
 }
