@@ -225,6 +225,7 @@ def run_dp(
     degradation_cost_per_kwh,
     min_price_spread,
     pv_dc_forecast=None,
+    terminal_shadow_price=None,
 ):
     """Run the DP backward pass and return V, policy, soc_states, soc_resolution_wh."""
     if pv_dc_forecast is None:
@@ -256,7 +257,14 @@ def run_dp(
     V = [[INF] * n_soc_states for _ in range(n_steps + 1)]
     policy = [[0.0] * n_soc_states for _ in range(n_steps)]
 
-    terminal_price = feed_in_forecast[-1] if feed_in_forecast else 0.0
+    if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
+        terminal_price = terminal_shadow_price
+    elif feed_in_forecast:
+        lookback = min(6, len(feed_in_forecast))
+        avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
+        terminal_price = min(feed_in_forecast[-1], avg_tail)
+    else:
+        terminal_price = 0.0
     for s_idx, soc_wh in enumerate(soc_states):
         stored_kwh = (soc_wh - min_soc_wh) / 1000.0
         V[n_steps][s_idx] = -stored_kwh * terminal_price
@@ -690,9 +698,12 @@ def print_whatif(
 
     print()
     print(
-        "  The actual terminal price comes from feed_in_forecast[-1] = price_forecast[-1]"
+        "  The actual terminal price comes from the shadow price (λ) of the previous run"
     )
-    print(f"  = last step's buy/sell price = {terminal_price:.4f} €/kWh")
+    print(
+        "  when available, otherwise from min(feed_in_forecast[-1], 6-step tail average)"
+    )
+    print(f"  = {terminal_price:.4f} €/kWh")
     print(
         "  If the horizon ended at a low-price night period, the DP would discharge more."
     )

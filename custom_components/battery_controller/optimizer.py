@@ -219,6 +219,7 @@ def optimize_battery_schedule(
     degradation_cost_per_kwh: float = 0.03,
     min_price_spread: float = 0.05,
     pv_dc_forecast: list[float] | None = None,  # kW (DC-coupled PV)
+    terminal_shadow_price: float | None = None,  # EUR/kWh from previous run
 ) -> OptimizationResult:
     """Optimize battery schedule using dynamic programming.
 
@@ -238,6 +239,12 @@ def optimize_battery_schedule(
         degradation_cost_per_kwh: Degradation cost in EUR/kWh
         min_price_spread: Minimum price spread for arbitrage
         pv_dc_forecast: DC-coupled PV production forecast in kW (optional)
+        terminal_shadow_price: Shadow price (λ) from the previous optimization
+            run, used as the terminal condition value for stored energy.  When
+            provided this replaces the feed-in tail average, producing a more
+            stable rolling-horizon schedule because λ is derived from the full
+            price structure rather than a single end-of-horizon price point.
+            Must be ≥ 0; negative values are ignored (fallback to feed-in tail).
 
     Returns:
         OptimizationResult with optimal schedule
@@ -311,9 +318,16 @@ def optimize_battery_schedule(
     # Energy above min_soc can be sold at (approximately) the last known
     # feed-in price. A non-zero terminal value prevents the optimizer from
     # irrationally discharging the battery just before the horizon ends.
-    # Blend the last price with the 6-step tail average to dampen end-of-horizon
+    #
+    # Preferred source: shadow price (λ) from the previous run.  λ is the
+    # marginal value of stored energy derived from the full price structure,
+    # so it is more stable across rolling-horizon runs than the spot price at
+    # a single end-of-horizon time step.
+    # Fallback: blend the last price with the 6-step tail average to dampen
     # artifacts caused by transient price spikes at the forecast boundary.
-    if feed_in_forecast:
+    if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
+        terminal_price = terminal_shadow_price
+    elif feed_in_forecast:
         lookback = min(6, len(feed_in_forecast))
         avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
         terminal_price = min(feed_in_forecast[-1], avg_tail)

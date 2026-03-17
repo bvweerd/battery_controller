@@ -138,6 +138,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Last optimization result and effective mode (persists between real-time updates)
         self._last_result: OptimizationResult | None = None
+        self._last_shadow_price: float | None = None
         self._effective_mode: str = "idle"
         self._effective_power: float = 0.0
         self._dp_schedule_w: float = 0.0
@@ -1208,6 +1209,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             len(resampled_prices),
         )
 
+        _LOGGER.debug(
+            "Terminal shadow price: %s",
+            f"{self._last_shadow_price:.4f} €/kWh"
+            if self._last_shadow_price is not None
+            else "none (first run, using feed-in tail)",
+        )
         result = await self.hass.async_add_executor_job(
             optimize_battery_schedule,
             battery_config,
@@ -1220,8 +1227,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             degradation_cost,
             min_spread,
             pv_dc_forecast,
+            self._last_shadow_price,
         )
 
+        self._last_shadow_price = result.shadow_price_eur_kwh
         self._last_result = result
 
         # Get current grid power: prefer real sensor, fall back to estimate

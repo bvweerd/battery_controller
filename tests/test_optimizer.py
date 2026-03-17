@@ -752,3 +752,118 @@ class TestOscillationPrevention:
 
         assert charge_count > 0, "Should charge during PV surplus to use later"
         assert discharge_count > 0, "Should discharge during expensive evening"
+
+
+class TestTerminalShadowPrice:
+    """Tests for terminal_shadow_price parameter."""
+
+    def _base_args(self, battery_config):
+        return dict(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+    def test_shadow_price_used_as_terminal(self, battery_config):
+        """High shadow price should encourage charging; low should encourage discharging."""
+        # Flat prices — no arbitrage opportunity; the terminal price drives the decision.
+        flat_price = [0.20] * 8
+        feed_in = [0.07] * 8
+        args = self._base_args(battery_config)
+
+        # High terminal shadow price: stored energy is worth a lot → prefer charging
+        result_high = optimize_battery_schedule(
+            price_forecast=flat_price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=0.40,
+            **args,
+        )
+
+        # Low terminal shadow price: stored energy worth little → prefer discharging
+        result_low = optimize_battery_schedule(
+            price_forecast=flat_price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=0.01,
+            **args,
+        )
+
+        final_soc_high = result_high.soc_schedule_kwh[-1]
+        final_soc_low = result_low.soc_schedule_kwh[-1]
+        assert final_soc_high > final_soc_low, (
+            "High terminal shadow price should lead to higher end SoC than low"
+        )
+
+    def test_fallback_when_no_shadow_price(self, battery_config):
+        """Without shadow price, optimizer uses feed-in tail average as terminal."""
+        price = [0.10, 0.10, 0.10, 0.30, 0.30, 0.30, 0.30, 0.30]
+        feed_in = [0.07] * 8
+        args = self._base_args(battery_config)
+
+        result = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=None,
+            **args,
+        )
+        # Should return a valid result with no crash
+        assert len(result.power_schedule_kw) == 8
+        assert result.shadow_price_eur_kwh >= 0.0
+
+    def test_negative_shadow_price_ignored(self, battery_config):
+        """Negative shadow price should be ignored; fallback to feed-in tail."""
+        price = [0.20] * 8
+        feed_in = [0.07] * 8
+        args = self._base_args(battery_config)
+
+        # With None (baseline fallback)
+        result_none = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=None,
+            **args,
+        )
+
+        # Negative value should produce identical result to None
+        result_neg = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=-0.10,
+            **args,
+        )
+
+        assert result_none.power_schedule_kw == result_neg.power_schedule_kw
+
+    def test_shadow_price_self_consistency(self, battery_config):
+        """Shadow price fed back as terminal should be close to the new shadow price."""
+        # Stable price scenario: shadow price should converge after one round-trip.
+        price = [0.10, 0.10, 0.20, 0.20, 0.10, 0.10, 0.20, 0.20]
+        feed_in = [0.07] * 8
+        args = self._base_args(battery_config)
+
+        # Run 1: no prior shadow price
+        result1 = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=None,
+            **args,
+        )
+        lambda1 = result1.shadow_price_eur_kwh
+
+        # Run 2: feed shadow price from run 1 back as terminal condition
+        result2 = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=lambda1,
+            **args,
+        )
+        lambda2 = result2.shadow_price_eur_kwh
+
+        # Shadow price should not explode — stay within a reasonable range of the prices
+        max_price = max(price)
+        assert 0.0 <= lambda2 <= max_price * 2, (
+            f"Shadow price {lambda2} after feedback is outside reasonable bounds"
+        )

@@ -61,6 +61,22 @@ Day-ahead electricity prices (Nordpool, ENTSO-E) are published around 13:00 CET.
 
 The model also **extends the planning horizon** when live prices cover less than 24 hours. It builds lookup tables from data in the HA recorder using hour, weekday, solar irradiance (GHI), and wind speed.
 
+### Learning period — give the optimizer time to calibrate
+
+> **Allow at least 2–4 weeks of operation before judging the optimizer's performance.**
+
+The optimizer uses a technique called *rolling-horizon dynamic programming*. On each run it calculates not only the optimal schedule, but also a **shadow price** (λ) — the marginal value of one extra kWh stored in the battery, given the current price forecast.
+
+That shadow price is fed back as the **terminal condition** of the next run: it tells the optimizer what stored energy will be worth *after* the planning horizon ends. A well-calibrated shadow price makes consecutive schedules consistent with each other and prevents the optimizer from over-charging or over-discharging near the horizon boundary.
+
+On the **first run** there is no shadow price yet, so the optimizer falls back to the average sell price at the end of the forecast. As runs accumulate (every 15 minutes), the shadow price converges toward the true marginal value of storage for your household's typical price and consumption pattern. During this convergence period you may notice:
+
+- The schedule changing more noticeably between runs.
+- The optimizer occasionally charging or discharging more aggressively than expected.
+- Estimated savings that appear lower than the long-run optimum.
+
+Both the **historical price model** and the **shadow price** build up from HA recorder data, so the longer the integration runs, the better the forecasts and the more stable the resulting schedule.
+
 ---
 
 ## Installation
