@@ -138,16 +138,22 @@ class ForecastCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("No weather data available")
 
         radiation_forecast = weather_data.get("radiation_forecast", [])
+        dni_forecast = weather_data.get("dni_forecast", [])
+        diffuse_forecast = weather_data.get("diffuse_forecast", [])
         wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
         temperature_forecast = weather_data.get("temperature_forecast", [])
         forecast_start = weather_data.get("forecast_start_utc")
+        current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
         if forecast_start and radiation_forecast:
-            current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
             hours_elapsed = max(
                 0, int((current_hour - forecast_start).total_seconds() / 3600)
             )
             if hours_elapsed > 0:
                 radiation_forecast = radiation_forecast[hours_elapsed:]
+                dni_forecast = dni_forecast[hours_elapsed:] if dni_forecast else []
+                diffuse_forecast = (
+                    diffuse_forecast[hours_elapsed:] if diffuse_forecast else []
+                )
                 wind_speed_forecast = (
                     wind_speed_forecast[hours_elapsed:] if wind_speed_forecast else []
                 )
@@ -159,6 +165,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     hours_elapsed,
                 )
 
+        # Build UTC timestamps for each forecast hour (needed for solar geometry)
+        lat = self.hass.config.latitude
+        lon = self.hass.config.longitude
+        timestamps_utc = [
+            current_hour + timedelta(hours=i) for i in range(len(radiation_forecast))
+        ]
+
         # Consumption forecast via net_load_model (dummy PV so result = pure consumption)
         _, consumption_forecast, _ = self.net_load_model.forecast(radiation_forecast)
         n = len(consumption_forecast)
@@ -166,11 +179,22 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Temperature forecast for PV derating (P2.2): pass if available
         temp_for_pv = temperature_forecast if temperature_forecast else None
 
+        # POA kwargs shared across all PV array calls
+        poa_kwargs = dict(
+            dni_forecast=dni_forecast or None,
+            diffuse_forecast=diffuse_forecast or None,
+            timestamps_utc=timestamps_utc,
+            latitude=lat,
+            longitude=lon,
+        )
+
         # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
         per_pv_array_forecasts: dict[str, list[float]] = {}
         for sid, model in zip(self.pv_ac_subentry_ids, self.pv_ac_models):
-            extra = model.forecast_from_radiation(radiation_forecast, temp_for_pv)
+            extra = model.forecast_from_radiation(
+                radiation_forecast, temp_for_pv, **poa_kwargs
+            )
             arr_forecast = [round(max(0.0, v), 3) for v in extra[:n]]
             if sid:
                 per_pv_array_forecasts[sid] = arr_forecast
@@ -186,7 +210,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
         has_dc = bool(self.pv_dc_models)
         pv_dc_forecast = [0.0] * n
         for sid, dc_model in zip(self.pv_dc_subentry_ids, self.pv_dc_models):
-            extra_dc = dc_model.forecast_from_radiation(radiation_forecast, temp_for_pv)
+            extra_dc = dc_model.forecast_from_radiation(
+                radiation_forecast, temp_for_pv, **poa_kwargs
+            )
             arr_forecast = [round(max(0.0, v), 3) for v in extra_dc[:n]]
             if sid:
                 per_pv_array_forecasts[sid] = arr_forecast
