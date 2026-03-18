@@ -706,7 +706,7 @@ function chartSchedule(id, powerKw, modes, socKwh, labels) {
   });
 }
 
-function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels) {
+function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels, priceMdl) {
   // Background highlighting for charge/discharge steps
   const buyData  = priceFc;
   const feedData = feedInFc || priceFc;
@@ -715,6 +715,8 @@ function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels) {
     { label:'Buy (€/kWh)',    data:buyData,  borderColor:'#8b5cf6', borderWidth:2, pointRadius:0, tension:0.3 },
     { label:'Feed-in (€/kWh)',data:feedData, borderColor:'#22c55e', borderWidth:2, pointRadius:0, tension:0.3, borderDash:[4,2] },
   ];
+  if (priceMdl && priceMdl.length > 0)
+    datasets.push({ label:'Price model (historical)', data:priceMdl, borderColor:'#94a3b8', borderWidth:1.5, pointRadius:0, borderDash:[3,3], tension:0.3 });
   if (shadowLine) datasets.push({ label:'Shadow price λ', data:shadowLine, borderColor:'#f59e0b', borderWidth:1.5, pointRadius:0, borderDash:[6,3] });
   mkChart(id, {
     type:'line', data:{ labels, datasets },
@@ -784,6 +786,31 @@ function generateTips(d) {
   const minP    = prices.length > 0 ? Math.min(...prices) : 0;
   const actualSpread = maxP - minP;
   const minArb  = (2 * degrad + spread) / sqrtRte;
+
+  // 0. Failure reason
+  if (opt.failure_reason) {
+    tips.push({ t:'err', title:'Optimization coordinator failed',
+      text:`Last failure: <code>${opt.failure_reason}</code><br>The optimizer may be running on stale data.
+      Check Home Assistant logs for details and resolve the underlying error.`});
+  }
+
+  // 0b. Price forecast source
+  const priceSrc = opt.price_forecast_source || '';
+  if (priceSrc === 'current_only') {
+    tips.push({ t:'err', title:'Price forecast is current price only — no future prices',
+      text:`Price forecast source: <b>current_only</b>. The optimizer only has the current price,
+      not a multi-hour forecast. This severely limits arbitrage scheduling.<br>
+      Fix: connect a dynamic price sensor (Nordpool, ENTSO-E, or an entity that exposes a list/forecast).`});
+  } else if (priceSrc === 'historical_model') {
+    tips.push({ t:'warn', title:'Price forecast using historical model (no live data)',
+      text:`Price forecast source: <b>historical_model</b>. No live price sensor is connected —
+      the optimizer uses a learned daily pattern instead of actual tariff data.
+      For dynamic tariffs, connect a Nordpool / ENTSO-E sensor for better results.`});
+  } else if (priceSrc === 'live+historical_model') {
+    tips.push({ t:'info', title:'Price forecast: live + historical model fill',
+      text:`Live price data is available but not covering the full horizon — the historical model fills the gap.
+      This is normal for day-ahead prices before they publish (usually afternoon).`});
+  }
 
   // 1. RTE
   if (rte < 0.82) {
@@ -1076,7 +1103,12 @@ function renderDiagnostics(raw) {
   const base = opt.baseline_cost || 0;
   document.getElementById('s-savings').textContent    = `€ ${savings.toFixed(4)}`;
   document.getElementById('s-savings-pct').textContent= base > 0 ? `${(savings/base*100).toFixed(1)}% vs baseline` : '';
-  document.getElementById('s-shadow').textContent     = '—'; // updated below after DP re-run
+  // Shadow price: use directly from diagnostics if present, else compute after DP re-run
+  if (opt.shadow_price_eur_kwh !== undefined && opt.shadow_price_eur_kwh !== null) {
+    document.getElementById('s-shadow').textContent = `€ ${opt.shadow_price_eur_kwh.toFixed(4)}/kWh`;
+  } else {
+    document.getElementById('s-shadow').textContent = '—';
+  }
   document.getElementById('s-ctrl').textContent       = opt.control_mode || '—';
   document.getElementById('s-ts').textContent         = opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '';
 
@@ -1097,23 +1129,37 @@ function renderDiagnostics(raw) {
     kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
 
+  const srcBadge = opt.price_forecast_source
+    ? `<span class="badge ${opt.price_forecast_source==='live'?'badge-ok':opt.price_forecast_source==='current_only'?'badge-fail':'badge-idle'}">${opt.price_forecast_source}</span>`
+    : '—';
+  const discThr = opt.discharge_threshold_eur_kwh;
+  const chgThr  = opt.charge_threshold_eur_kwh;
   document.getElementById('cfg-pv').innerHTML =
     kv('PV coupling', bc.pv_dc_coupled ? 'DC-coupled' : 'AC-coupled') +
     (bc.pv_dc_coupled ? kv('DC peak power', `${bc.pv_dc_peak_power_kwp?.toFixed(2)} kWp`) : '') +
     (bc.pv_dc_coupled ? kv('DC efficiency', `${((bc.pv_dc_efficiency||0)*100).toFixed(1)}%`) : '') +
     kv('Control mode', opt.control_mode || '—') +
+    kv('Price forecast source', srcBadge) +
     kv('Time step', opts.time_step_minutes ? `${opts.time_step_minutes} min` : '—') +
     kv('Current price', opt.current_price !== undefined ? `€ ${opt.current_price.toFixed(4)}/kWh` : '—') +
+    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+    kv('Discharge threshold (λ·√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
+    kv('Charge threshold (λ/√RTE)', chgThr !== undefined ? `€ ${chgThr.toFixed(4)}/kWh` : '—') +
     kv('Optimal action', opt.optimal_mode ? `${opt.optimal_mode} @ ${opt.optimal_power_kw?.toFixed(3)} kW` : '—');
 
   // ── Coordinator status
+  const failureHtml = opt.failure_reason
+    ? `<div class="mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">⚠ ${opt.failure_reason}</div>` : '';
   document.getElementById('coord-status').innerHTML = `
     ${kv('Weather coordinator', `<span class="badge ${wx.last_update_success?'badge-ok':'badge-fail'}">${wx.last_update_success?'OK':'Failed'}</span>`)}
     ${kv('Weather timestamp', wx.timestamp ? new Date(wx.timestamp).toLocaleString() : '—')}
     ${kv('Forecast coordinator', `<span class="badge ${fc.last_update_success?'badge-ok':'badge-fail'}">${fc.last_update_success?'OK':'Failed'}</span>`)}
     ${kv('Forecast timestamp', fc.timestamp ? new Date(fc.timestamp).toLocaleString() : '—')}
     ${kv('Optimization coordinator', `<span class="badge ${opt.last_update_success?'badge-ok':'badge-fail'}">${opt.last_update_success?'OK':'Failed'}</span>`)}
-    ${kv('Optimization timestamp', opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '—')}`;
+    ${kv('Optimization timestamp', opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '—')}
+    ${kv('GHI (irradiance)', fc.current_ghi_wm2 !== undefined ? `${fc.current_ghi_wm2} W/m²` : '—')}
+    ${kv('Wind speed', fc.current_wind_speed_ms !== undefined ? `${fc.current_wind_speed_ms} m/s` : '—')}
+    ${failureHtml}`;
 
   document.getElementById('current-values').innerHTML =
     kv('PV AC production', `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
@@ -1122,22 +1168,30 @@ function renderDiagnostics(raw) {
     kv('Net load', `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
     kv('Battery SoC', `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
     kv('Battery power', bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
-    kv('Battery mode', bs.mode ? badge(bs.mode, bs.mode) : '—');
+    kv('Battery mode', bs.mode ? badge(bs.mode, bs.mode) : '—') +
+    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+    // Per-array PV breakdown
+    (() => {
+      const arrays = fc.per_pv_array_forecasts || {};
+      const keys = Object.keys(arrays);
+      if (keys.length < 2) return '';
+      return keys.map(k => kv(`PV array ${k.slice(0,8)}… now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
+    })();
 
   // ── Charts
   const prices    = sched.price_forecast || [];
+  const feedInFc  = sched.feed_in_price_forecast || null; // new field; null = use buy price
   const pvFc      = sched.pv_forecast_kw || sched.pv_forecast || fc.pv_forecast_kw || [];
   const consumFc  = sched.consumption_forecast_kw || sched.consumption_forecast || fc.consumption_forecast_kw || [];
   const pvDcFc    = fc.pv_dc_forecast_kw || [];
   const powerKw   = sched.power_schedule_kw || [];
   const modes     = sched.mode_schedule    || [];
   const socKwh    = sched.soc_schedule_kwh || [];
-  const stepDurs  = sched.step_durations_hours || [];
-  const stepTimes = sched.step_start_times_iso || [];
+  const priceMdl  = sched.price_forecast_model || null;
 
-  // extract step times from entity attributes if not in sched
-  let resolvedStepTimes = stepTimes;
-  let resolvedStepDurs  = stepDurs;
+  // Step timing: prefer new schedule fields, fall back to entity attributes
+  let resolvedStepTimes = sched.step_start_times_iso || [];
+  let resolvedStepDurs  = sched.step_durations_hours  || [];
   if ((!resolvedStepTimes.length || !resolvedStepDurs.length) && d.entities) {
     for (const ent of d.entities) {
       const attrs = ent.attributes || {};
@@ -1154,20 +1208,26 @@ function renderDiagnostics(raw) {
     : timeLabels(prices.length, startIso, stepH);
 
   if (powerKw.length > 0) chartSchedule('chart-schedule', powerKw, modes, socKwh, labels);
-  if (prices.length   > 0) chartPrices('chart-prices', prices, null, null, modes, labels);
+  if (prices.length   > 0) {
+    const shadowForChart = opt.shadow_price_eur_kwh ?? null;
+    chartPrices('chart-prices', prices, feedInFc, shadowForChart, modes, labels, priceMdl);
+  }
   if (pvFc.length > 0 || consumFc.length > 0) chartPv('chart-pv', pvFc, consumFc, pvDcFc, labels);
   if (opt.total_cost !== undefined) {
     chartCosts('chart-costs', opt.baseline_cost || 0, opt.total_cost || 0);
+    const totalH = resolvedStepDurs.length
+      ? resolvedStepDurs.reduce((a, b) => a + b, 0)
+      : prices.length * stepH;
     document.getElementById('cost-details').innerHTML = `
       <div class="text-xs space-y-1">
         ${kv('Baseline (no battery)', `€ ${(opt.baseline_cost||0).toFixed(5)}`)}
         ${kv('Optimized total cost', `€ ${(opt.total_cost||0).toFixed(5)}`)}
         ${kv('Savings', `<span class="text-green-600 font-bold">€ ${(opt.savings||0).toFixed(5)}</span>`)}
-        ${kv('Horizon', `${(prices.length * stepH).toFixed(1)} h (${prices.length} steps)`)}
+        ${kv('Horizon', `${totalH.toFixed(1)} h (${prices.length} steps)`)}
       </div>`;
   }
 
-  // ── Profitability table (re-run minimal DP to get terminal price + shadow price)
+  // ── Profitability table: re-run DP with actual feed-in forecast if available
   if (prices.length > 0) {
     const cfg2 = {
       rte: bc.round_trip_efficiency || 0.9,
@@ -1179,15 +1239,19 @@ function renderDiagnostics(raw) {
       pvDcEfficiency: bc.pv_dc_efficiency || 0.97,
       maxGridPowerKw: opts.max_grid_power_kw || 0,
     };
-    const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, prices, pvFc.length ? pvFc : new Array(prices.length).fill(0),
+    const feedInForDp = feedInFc || prices;
+    const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, feedInForDp,
+      pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
-      opts.degradation_cost_per_kwh || 0.03, opts.min_price_spread || 0.05, null, null);
-    const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
-    document.getElementById('s-shadow').textContent = `€ ${shadow.toFixed(4)}/kWh`;
-    chartPrices('chart-prices', prices, null, shadow, modes, labels);
-
-    renderProfitabilityTable(prices, prices, pvFc, consumFc, powerKw, modes, socKwh,
+      opts.degradation_cost_per_kwh || 0.03, opts.min_price_spread || 0.05,
+      null, sched.terminal_shadow_price ?? null);
+    // Use shadow price from diagnostics if available; otherwise compute from V
+    if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
+      const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
+      document.getElementById('s-shadow').textContent = `€ ${shadow.toFixed(4)}/kWh`;
+    }
+    renderProfitabilityTable(prices, feedInForDp, pvFc, consumFc, powerKw, modes, socKwh,
       resolvedStepTimes, bc, opts, dp2.terminalPrice);
     renderSpreadAnalysis(bc, opts, prices);
   }
@@ -1326,11 +1390,17 @@ function prefillSim(d) {
   if (!consumFc.length) consumFc = fc.consumption_forecast_kw || [];
 
   const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
+  const feedInFcSim = sched.feed_in_price_forecast || null;
   if (prices.length > 0) {
     document.getElementById('sim-fc-body').innerHTML = '';
     for (let i = 0; i < prices.length; i++) {
-      addFcRow(prices[i]||0.15, fixedFeedIn, pvFc[i]||0, consumFc[i]||1.5);
+      const feedInVal = feedInFcSim && feedInFcSim[i] !== undefined ? feedInFcSim[i] : fixedFeedIn;
+      addFcRow(prices[i]||0.15, feedInVal, pvFc[i]||0, consumFc[i]||1.5);
     }
+  }
+  // Pre-fill terminal shadow price from previous DP run (stored in schedule)
+  if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
+    set('sp-terminal', sched.terminal_shadow_price);
   }
 }
 

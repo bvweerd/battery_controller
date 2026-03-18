@@ -100,10 +100,17 @@ def extract_inputs(diag: dict) -> tuple:
     min_price_spread = options.get("min_price_spread", 0.0)
     fixed_feed_in_price = options.get("fixed_feed_in_price", 0.04)
 
+    # Use actual feed-in forecast from schedule if available (new diagnostics field)
+    feed_in_forecast = sched.get("feed_in_price_forecast") or list(price_forecast)
+
+    # Terminal shadow price stored in schedule for DP reproduction
+    terminal_shadow_price = sched.get("terminal_shadow_price")
+
     return (
         battery,
         current_soc_kwh,
         price_forecast,
+        feed_in_forecast,
         pv_forecast,
         consumption_forecast,
         step_durations_hours,
@@ -111,6 +118,7 @@ def extract_inputs(diag: dict) -> tuple:
         degradation_cost,
         min_price_spread,
         fixed_feed_in_price,
+        terminal_shadow_price,
         opt_data,
         sched,
     )
@@ -803,6 +811,7 @@ def main():
         battery,
         current_soc_kwh,
         price_forecast,
+        feed_in_forecast,
         pv_forecast,
         consumption_forecast,
         step_durations_hours,
@@ -810,15 +819,10 @@ def main():
         degradation_cost,
         min_price_spread,
         fixed_feed_in_price,
+        terminal_shadow_price,
         opt_data,
         sched,
     ) = extract_inputs(diag)
-
-    # The optimizer uses the same array for feed_in as for price when no
-    # separate feed_in forecast is available. The coordinator may provide a
-    # dynamic feed_in sensor value, but the schedule only stores price_forecast.
-    # Use price_forecast as feed_in_forecast (matches actual DP behavior).
-    feed_in_forecast = list(price_forecast)
 
     n_steps = len(price_forecast)
     pv_dc_forecast = [0.0] * n_steps
@@ -829,6 +833,10 @@ def main():
         f"degradation={degradation_cost:.3f} €/kWh, "
         f"min_spread={min_price_spread:.3f} €/kWh"
     )
+    if terminal_shadow_price is not None:
+        print(
+            f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
+        )
 
     # Run DP
     (
@@ -852,6 +860,7 @@ def main():
         degradation_cost_per_kwh=degradation_cost,
         min_price_spread=min_price_spread,
         pv_dc_forecast=pv_dc_forecast,
+        terminal_shadow_price=terminal_shadow_price,
     )
 
     print(

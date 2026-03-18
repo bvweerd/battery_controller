@@ -59,6 +59,8 @@ async def async_get_config_entry_diagnostics(
         weather_data = {
             "last_update_success": weather_coord.last_update_success,
             "radiation_forecast": weather_coord.data.get("radiation_forecast"),
+            "wind_speed_forecast": weather_coord.data.get("wind_speed_forecast"),
+            "temperature_forecast": weather_coord.data.get("temperature_forecast"),
             "forecast_start_utc": str(weather_coord.data.get("forecast_start_utc")),
             "timestamp": str(weather_coord.data.get("timestamp")),
         }
@@ -78,7 +80,10 @@ async def async_get_config_entry_diagnostics(
             "current_dc_pv_kw": forecast_coord.data.get("current_dc_pv_kw"),
             "current_consumption_kw": forecast_coord.data.get("current_consumption_kw"),
             "current_net_load_kw": forecast_coord.data.get("current_net_load_kw"),
+            "current_ghi_wm2": forecast_coord.data.get("current_ghi_wm2"),
+            "current_wind_speed_ms": forecast_coord.data.get("current_wind_speed_ms"),
             "pv_dc_coupled": forecast_coord.data.get("pv_dc_coupled"),
+            "per_pv_array_forecasts": forecast_coord.data.get("per_pv_array_forecasts"),
             "timestamp": str(forecast_coord.data.get("timestamp")),
         }
         # Include learned consumption pattern
@@ -95,8 +100,14 @@ async def async_get_config_entry_diagnostics(
     optimization_data = {}
     if optimization_coord and optimization_coord.data:
         data = optimization_coord.data
+        shadow_price = data.get("shadow_price_eur_kwh", 0.0) or 0.0
+        sqrt_rte = battery_config.get(
+            "charge_efficiency", 1.0
+        )  # charge_eff = sqrt(RTE)
+
         optimization_data = {
             "last_update_success": optimization_coord.last_update_success,
+            "failure_reason": optimization_coord.last_failure_reason,
             "control_mode": data.get("control_mode"),
             "optimal_mode": data.get("optimal_mode"),
             "optimal_power_kw": data.get("optimal_power_kw"),
@@ -106,6 +117,13 @@ async def async_get_config_entry_diagnostics(
             "baseline_cost": data.get("baseline_cost"),
             "savings": data.get("savings"),
             "current_price": data.get("current_price"),
+            "current_feed_in_price": data.get("current_feed_in_price"),
+            "price_forecast_source": data.get("price_forecast_source"),
+            "shadow_price_eur_kwh": data.get("shadow_price_eur_kwh"),
+            "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte, 4),
+            "charge_threshold_eur_kwh": round(
+                shadow_price / sqrt_rte if sqrt_rte > 0 else 0.0, 4
+            ),
             "timestamp": str(data.get("timestamp")),
         }
 
@@ -119,6 +137,17 @@ async def async_get_config_entry_diagnostics(
                 "price_forecast": result.price_forecast,
                 "pv_forecast": result.pv_forecast,
                 "consumption_forecast": result.consumption_forecast,
+                # Step timing — needed for exact DP reproduction
+                "step_durations_hours": data.get("step_durations_hours"),
+                "step_start_times_iso": data.get("step_start_times_iso"),
+                # Feed-in and model forecasts — needed for full simulator fidelity
+                "feed_in_price_forecast": data.get("feed_in_price_forecast"),
+                "price_forecast_model": data.get("price_forecast_model"),
+                "feed_in_price_forecast_model": data.get(
+                    "feed_in_price_forecast_model"
+                ),
+                # Terminal shadow price (= current shadow price; next run uses it as terminal)
+                "terminal_shadow_price": data.get("shadow_price_eur_kwh"),
             }
 
         # Battery state at time of optimization
