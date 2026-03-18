@@ -598,22 +598,27 @@ def calculate_pv_forecast(
     )
 
     if use_poa:
+        assert dni_forecast is not None
+        assert diffuse_forecast is not None
+        assert timestamps_utc is not None
+        assert latitude is not None
+        assert longitude is not None
         forecast = []
         for i, ghi in enumerate(solar_radiation_wm2):
             if (
                 i >= len(timestamps_utc)
                 or i >= len(dni_forecast)
                 or i >= len(diffuse_forecast)
-            ):  # type: ignore[arg-type]
+            ):
                 forecast.append(0.0)
                 continue
             # Use midpoint of the hour for representative solar position
-            dt_mid = timestamps_utc[i].replace(minute=30, second=0, microsecond=0)  # type: ignore[index]
-            elev, azim = _solar_position(dt_mid, latitude, longitude)  # type: ignore[arg-type]
+            dt_mid = timestamps_utc[i].replace(minute=30, second=0, microsecond=0)
+            elev, azim = _solar_position(dt_mid, latitude, longitude)
             poa = _poa_irradiance(
                 ghi,
-                dni_forecast[i],  # type: ignore[index]
-                diffuse_forecast[i],  # type: ignore[index]
+                dni_forecast[i],
+                diffuse_forecast[i],
                 elev,
                 azim,
                 tilt_deg,

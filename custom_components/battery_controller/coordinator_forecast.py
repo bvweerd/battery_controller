@@ -179,21 +179,21 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Temperature forecast for PV derating (P2.2): pass if available
         temp_for_pv = temperature_forecast if temperature_forecast else None
 
-        # POA kwargs shared across all PV array calls
-        poa_kwargs = dict(
-            dni_forecast=dni_forecast or None,
-            diffuse_forecast=diffuse_forecast or None,
-            timestamps_utc=timestamps_utc,
-            latitude=lat,
-            longitude=lon,
-        )
+        poa_dni: list[float] | None = dni_forecast or None
+        poa_diffuse: list[float] | None = diffuse_forecast or None
 
         # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
         per_pv_array_forecasts: dict[str, list[float]] = {}
         for sid, model in zip(self.pv_ac_subentry_ids, self.pv_ac_models):
             extra = model.forecast_from_radiation(
-                radiation_forecast, temp_for_pv, **poa_kwargs
+                radiation_forecast,
+                temp_for_pv,
+                dni_forecast=poa_dni,
+                diffuse_forecast=poa_diffuse,
+                timestamps_utc=timestamps_utc,
+                latitude=lat,
+                longitude=lon,
             )
             arr_forecast = [round(max(0.0, v), 3) for v in extra[:n]]
             if sid:
@@ -211,7 +211,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
         pv_dc_forecast = [0.0] * n
         for sid, dc_model in zip(self.pv_dc_subentry_ids, self.pv_dc_models):
             extra_dc = dc_model.forecast_from_radiation(
-                radiation_forecast, temp_for_pv, **poa_kwargs
+                radiation_forecast,
+                temp_for_pv,
+                dni_forecast=poa_dni,
+                diffuse_forecast=poa_diffuse,
+                timestamps_utc=timestamps_utc,
+                latitude=lat,
+                longitude=lon,
             )
             arr_forecast = [round(max(0.0, v), 3) for v in extra_dc[:n]]
             if sid:
