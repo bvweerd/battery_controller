@@ -272,18 +272,18 @@ def optimize_battery_schedule(
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
 
     # Discretize SoC space.
-    # Use the *minimum* step duration only for SoC resolution (to ensure that
-    # even the shortest step moves the SoC by at least one state boundary).
     min_step_hours = min(step_durations_hours[:n_steps])
 
-    # Resolution is the larger of SOC_RESOLUTION_WH and one power-step's energy
-    # over the shortest step — accounting for charge/discharge efficiency (sqrt_rte)
-    # since SoC transitions now use action_w × dt × sqrt_rte.  Without the RTE
-    # factor the resolution was over-estimated (e.g. 55 Wh instead of 48 Wh for
-    # a 0.55 h partial first step at RTE=0.76), causing unnecessary coarseness.
-    soc_resolution_wh = max(
-        float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours * sqrt_rte
-    )
+    # SoC resolution: use the constant directly.
+    # Previously inflated to max(SOC_RESOLUTION_WH, POWER_STEP_W * min_step_hours
+    # * sqrt_rte) to ensure the minimum power action always moved at least one
+    # state.  With hourly prices this inflated to ~87 Wh (only 22 states for a
+    # 2 kWh battery), causing the DP to coarsely map post-discharge SoC and
+    # systematically undervalue concentrating discharge at the peak-price hour.
+    # The per-action sub-resolution guard (new_soc_idx == s_idx → skip) already
+    # handles steps where a small action cannot cross a state boundary, so the
+    # inflation is unnecessary.
+    soc_resolution_wh = float(SOC_RESOLUTION_WH)
 
     # Align the power step to the SoC resolution using the *full* interval step,
     # not min_step_hours.  The first step is typically a short partial interval
