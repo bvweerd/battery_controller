@@ -53,17 +53,30 @@ class PVForecastModel:
         self,
         radiation_forecast: list[float],
         temperature_forecast: list[float] | None = None,
+        dni_forecast: list[float] | None = None,
+        diffuse_forecast: list[float] | None = None,
+        timestamps_utc: list[datetime] | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
     ) -> list[float]:
         """Generate PV forecast from solar radiation data.
+
+        When dni_forecast, diffuse_forecast, timestamps_utc, latitude, and longitude
+        are provided, uses a proper POA transposition model (see calculate_pv_forecast).
+        Falls back to a simplified GHI-based model when any are missing.
 
         Applies panel temperature derating when temperature_forecast is provided.
         Standard silicon panels lose ~0.4%/°C above 25°C (STC). On a 35°C day
         this reduces output by ~4% compared to a radiation-only estimate.
 
         Args:
-            radiation_forecast: Solar radiation in W/m2
+            radiation_forecast: GHI forecast in W/m²
             temperature_forecast: Ambient temperature in °C (optional).
-                When provided, a temperature derating factor is applied per hour.
+            dni_forecast: Direct Normal Irradiance in W/m² (optional).
+            diffuse_forecast: Diffuse Horizontal Irradiance in W/m² (optional).
+            timestamps_utc: UTC datetime for each forecast hour (optional).
+            latitude: Site latitude in degrees (optional).
+            longitude: Site longitude in degrees (optional).
 
         Returns:
             PV production forecast in kW
@@ -74,6 +87,11 @@ class PVForecastModel:
             self.orientation_deg,
             self.tilt_deg,
             self.efficiency_factor,
+            dni_forecast=dni_forecast,
+            diffuse_forecast=diffuse_forecast,
+            timestamps_utc=timestamps_utc,
+            latitude=latitude,
+            longitude=longitude,
         )
 
         if temperature_forecast is None:

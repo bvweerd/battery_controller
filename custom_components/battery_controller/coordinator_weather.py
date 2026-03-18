@@ -41,7 +41,7 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
             {
                 "latitude": self.latitude,
                 "longitude": self.longitude,
-                "hourly": "temperature_2m,shortwave_radiation,wind_speed_10m",
+                "hourly": "temperature_2m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation,wind_speed_10m",
                 "wind_speed_unit": "ms",
                 "current_weather": "true",
                 "timezone": "UTC",
@@ -63,6 +63,8 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
         hourly = data.get("hourly", {})
         times = hourly.get("time", [])
         radiation = hourly.get("shortwave_radiation", [])
+        dni = hourly.get("direct_normal_irradiance", [])
+        diffuse = hourly.get("diffuse_radiation", [])
         wind_speed = hourly.get("wind_speed_10m", [])
 
         if not times or not radiation:
@@ -84,10 +86,19 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
 
         # Extract next 48 hours
         radiation_forecast = [float(v) for v in radiation[start_idx : start_idx + 48]]
+        n = len(radiation_forecast)
+        dni_forecast = (
+            [float(v) for v in dni[start_idx : start_idx + 48]] if dni else [0.0] * n
+        )
+        diffuse_forecast = (
+            [float(v) for v in diffuse[start_idx : start_idx + 48]]
+            if diffuse
+            else [0.0] * n
+        )
         wind_speed_forecast = (
             [float(v) for v in wind_speed[start_idx : start_idx + 48]]
             if wind_speed
-            else [0.0] * len(radiation_forecast)
+            else [0.0] * n
         )
         temperature = hourly.get("temperature_2m", [])
         temperature_forecast = (
@@ -98,6 +109,8 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
 
         result = {
             "radiation_forecast": [round(v, 1) for v in radiation_forecast],
+            "dni_forecast": [round(v, 1) for v in dni_forecast],
+            "diffuse_forecast": [round(v, 1) for v in diffuse_forecast],
             "wind_speed_forecast": [round(v, 1) for v in wind_speed_forecast],
             "temperature_forecast": [round(v, 1) for v in temperature_forecast],
             "forecast_start_utc": now,

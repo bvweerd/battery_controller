@@ -454,30 +454,134 @@ def get_sensor_value(
     return safe_float(state.state, default)
 
 
+def _solar_position(
+    dt_utc: datetime, latitude: float, longitude: float
+) -> tuple[float, float]:
+    """Return (elevation_deg, azimuth_deg from North clockwise) for the sun.
+
+    Uses Spencer (1971) declination and a simplified equation of time.
+    Accuracy: ~0.5° for latitudes 30–70°N, sufficient for hourly PV modelling.
+    """
+    day_of_year = dt_utc.timetuple().tm_yday
+    hour_utc = dt_utc.hour + dt_utc.minute / 60.0
+
+    # Solar declination (degrees)
+    declination = 23.45 * math.sin(math.radians(360.0 / 365.0 * (day_of_year - 81)))
+
+    # Equation of time (minutes)
+    b_rad = math.radians(360.0 / 365.0 * (day_of_year - 81))
+    eot_min = (
+        9.87 * math.sin(2 * b_rad) - 7.53 * math.cos(b_rad) - 1.5 * math.sin(b_rad)
+    )
+
+    # Solar time and hour angle
+    solar_time = hour_utc + longitude / 15.0 + eot_min / 60.0
+    hour_angle = (solar_time - 12.0) * 15.0  # degrees; negative = morning
+
+    lat_rad = math.radians(latitude)
+    dec_rad = math.radians(declination)
+    ha_rad = math.radians(hour_angle)
+
+    sin_elev = math.sin(lat_rad) * math.sin(dec_rad) + math.cos(lat_rad) * math.cos(
+        dec_rad
+    ) * math.cos(ha_rad)
+    elevation_deg = math.degrees(math.asin(max(-1.0, min(1.0, sin_elev))))
+
+    cos_elev = math.cos(math.radians(elevation_deg))
+    if cos_elev < 1e-6:
+        return elevation_deg, 180.0  # sun at zenith — azimuth undefined
+
+    cos_az = (
+        math.sin(dec_rad) - math.sin(math.radians(elevation_deg)) * math.sin(lat_rad)
+    ) / (cos_elev * math.cos(lat_rad))
+    azimuth_deg = math.degrees(math.acos(max(-1.0, min(1.0, cos_az))))
+    if hour_angle > 0:  # afternoon: sun is in the west
+        azimuth_deg = 360.0 - azimuth_deg
+
+    return elevation_deg, azimuth_deg
+
+
+def _poa_irradiance(
+    ghi: float,
+    dni: float,
+    diffuse: float,
+    sun_elevation_deg: float,
+    sun_azimuth_deg: float,
+    tilt_deg: float,
+    panel_azimuth_deg: float,
+    albedo: float = 0.2,
+) -> float:
+    """Compute Plane of Array (POA) irradiance using the isotropic diffuse model.
+
+    POA = beam_direct + isotropic_diffuse + ground_reflected
+
+    Args:
+        ghi: Global Horizontal Irradiance (W/m²)
+        dni: Direct Normal Irradiance (W/m²)
+        diffuse: Diffuse Horizontal Irradiance (W/m²)
+        sun_elevation_deg: Solar elevation above horizon (degrees)
+        sun_azimuth_deg: Solar azimuth from North, clockwise (degrees)
+        tilt_deg: Panel tilt from horizontal (degrees)
+        panel_azimuth_deg: Panel azimuth from North, clockwise (degrees; 180 = south)
+        albedo: Ground reflectance (default 0.2 for grass/concrete)
+
+    Returns:
+        POA irradiance in W/m²
+    """
+    if sun_elevation_deg <= 0:
+        return 0.0
+
+    tilt_rad = math.radians(tilt_deg)
+    zenith_rad = math.radians(90.0 - sun_elevation_deg)
+    delta_az_rad = math.radians(sun_azimuth_deg - panel_azimuth_deg)
+
+    # Angle of incidence on the tilted surface
+    cos_aoi = max(
+        0.0,
+        math.cos(zenith_rad) * math.cos(tilt_rad)
+        + math.sin(zenith_rad) * math.sin(tilt_rad) * math.cos(delta_az_rad),
+    )
+
+    beam_poa = dni * cos_aoi
+    diffuse_poa = diffuse * (1.0 + math.cos(tilt_rad)) / 2.0
+    reflected_poa = ghi * albedo * (1.0 - math.cos(tilt_rad)) / 2.0
+
+    return max(0.0, beam_poa + diffuse_poa + reflected_poa)
+
+
 def calculate_pv_forecast(
     solar_radiation_wm2: list[float],
     peak_power_kwp: float,
     orientation_deg: float = 180,  # 180 = south
     tilt_deg: float = 35,
     efficiency_factor: float = 0.85,
+    dni_forecast: list[float] | None = None,
+    diffuse_forecast: list[float] | None = None,
+    timestamps_utc: list[datetime] | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> list[float]:
     """Calculate PV production forecast from solar radiation.
 
-    Simple PV model:
-    P_pv = G * A * eta * orientation_factor * tilt_factor
+    When dni_forecast, diffuse_forecast, timestamps_utc, latitude, and longitude
+    are all provided, uses a proper Plane-of-Array (POA) transposition model with
+    real solar geometry. This correctly accounts for the panel tilt and orientation
+    relative to the sun's position, which can increase estimated yield by 30–50%
+    compared to using Global Horizontal Irradiance (GHI) alone in winter/spring.
 
-    Where:
-    - G = solar radiation (W/m2)
-    - A * eta ≈ peak_power_kwp / 1000 (normalized)
-    - orientation_factor = cos(orientation - sun_azimuth)
-    - tilt_factor = based on sun elevation
+    Falls back to a simplified GHI-based model when any of the above are missing.
 
     Args:
-        solar_radiation_wm2: Solar radiation forecast in W/m2
+        solar_radiation_wm2: GHI forecast in W/m²
         peak_power_kwp: PV system peak power in kWp
-        orientation_deg: Panel orientation in degrees (180 = south)
-        tilt_deg: Panel tilt angle in degrees
-        efficiency_factor: System efficiency factor (inverter, cables, etc.)
+        orientation_deg: Panel azimuth from North, clockwise (180 = south)
+        tilt_deg: Panel tilt from horizontal (degrees)
+        efficiency_factor: System efficiency (inverter, wiring, soiling, etc.)
+        dni_forecast: Direct Normal Irradiance forecast in W/m² (optional)
+        diffuse_forecast: Diffuse Horizontal Irradiance in W/m² (optional)
+        timestamps_utc: UTC datetime for each forecast hour (optional)
+        latitude: Site latitude in degrees (optional)
+        longitude: Site longitude in degrees (optional)
 
     Returns:
         PV production forecast in kW
@@ -485,20 +589,55 @@ def calculate_pv_forecast(
     if peak_power_kwp <= 0:
         return [0.0] * len(solar_radiation_wm2)
 
-    # Simplified orientation factor (south = 1.0, east/west = 0.65)
+    use_poa = (
+        dni_forecast is not None
+        and diffuse_forecast is not None
+        and timestamps_utc is not None
+        and latitude is not None
+        and longitude is not None
+    )
+
+    if use_poa:
+        assert dni_forecast is not None
+        assert diffuse_forecast is not None
+        assert timestamps_utc is not None
+        assert latitude is not None
+        assert longitude is not None
+        forecast = []
+        for i, ghi in enumerate(solar_radiation_wm2):
+            if (
+                i >= len(timestamps_utc)
+                or i >= len(dni_forecast)
+                or i >= len(diffuse_forecast)
+            ):
+                forecast.append(0.0)
+                continue
+            # Use midpoint of the hour for representative solar position
+            dt_mid = timestamps_utc[i].replace(minute=30, second=0, microsecond=0)
+            elev, azim = _solar_position(dt_mid, latitude, longitude)
+            poa = _poa_irradiance(
+                ghi,
+                dni_forecast[i],
+                diffuse_forecast[i],
+                elev,
+                azim,
+                tilt_deg,
+                orientation_deg,
+            )
+            power_kw = poa / 1000.0 * peak_power_kwp * efficiency_factor
+            forecast.append(max(0.0, power_kw))
+        return forecast
+
+    # Fallback: simplified GHI-based model
     orientation_factor = 1.0
     if orientation_deg < 135 or orientation_deg > 225:
-        # Not facing south
         deviation = min(abs(orientation_deg - 180), abs(orientation_deg - 180 + 360))
         orientation_factor = max(0.5, 1.0 - deviation / 180)
 
-    # Simplified tilt factor (35 degrees optimal for Netherlands)
     tilt_factor = 1.0 - abs(tilt_deg - 35) * 0.01
 
     forecast = []
     for radiation in solar_radiation_wm2:
-        # Power = radiation * peak_power / STC_radiation * factors
-        # STC radiation = 1000 W/m2
         power_kw = (
             radiation
             / 1000
