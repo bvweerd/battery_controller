@@ -8,6 +8,23 @@
 
 ---
 
+> **⚠️ This integration is aimed at technically experienced users.**
+> It requires setting up and tuning a number of parameters (efficiency, degradation costs, price sensors, control mode) and connecting it to your inverter via automations. Incorrect configuration will not damage your battery, but may result in suboptimal scheduling or no control at all. If you are not comfortable reading diagnostics data and interpreting optimizer output, this integration may not be the right fit — yet.
+
+---
+
+## 🔍 Diagnostics Analyzer
+
+**Upload your `diagnostics.json` to the online analyzer for a full breakdown of your configuration, optimizer schedule, profitability analysis, and improvement tips — no installation required.**
+
+**[▶ Open Battery Controller Analyzer](https://bvweerd.github.io/battery_controller/)**
+
+[![Battery Controller Analyzer screenshot](assets/analyzer.png)](https://bvweerd.github.io/battery_controller/)
+
+The analyzer runs entirely in your browser. It visualizes the current schedule, re-runs the DP optimizer with your data, and explains every charge/discharge decision. To generate a diagnostics file: **Settings → Devices & Services → Battery Controller → three-dot menu → Download diagnostics**.
+
+---
+
 ## What is Battery Controller?
 
 This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses **dynamic programming** (backward induction) to calculate the optimal charge/discharge schedule based on:
@@ -87,6 +104,39 @@ Both the **historical price model** and the **shadow price** build up from HA re
 - A dynamic electricity price sensor with forecast attributes (e.g., Nordpool, ENTSO-E, or the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator)).
 - Battery SoC sensor(s) from your inverter integration.
 - [HACS](https://hacs.xyz/) installed in your Home Assistant (recommended).
+
+### Verifying your price sensor
+
+The integration reads forecast data from the **forecast attributes** of your price sensor. Before setting up, verify that your sensor exposes the required attributes in Home Assistant's Developer Tools.
+
+Go to **Developer Tools → States**, find your price sensor (e.g. `sensor.nordpool_kwh_nl_eur_3_10_21`) and check that the attributes contain a list of future prices. The integration supports several common formats:
+
+**Nordpool / ENTSO-E style** — attributes contain `raw_today` and `raw_tomorrow`, each a list of objects with a `value` key:
+```yaml
+raw_today:
+  - start: "2026-03-16T00:00:00+01:00"
+    end:   "2026-03-16T01:00:00+01:00"
+    value: 0.1234
+  - ...
+raw_tomorrow:
+  - start: "2026-03-17T00:00:00+01:00"
+    value: 0.2345
+  - ...
+```
+
+**Generic forecast list** — attributes contain a `forecast` key with a list of objects:
+```yaml
+forecast:
+  - datetime: "2026-03-16T12:00:00+00:00"
+    price: 0.1580
+  - datetime: "2026-03-16T13:00:00+00:00"
+    price: 0.2210
+  - ...
+```
+
+**Dynamic Energy Contract Calculator** — exposes `prices_today` and `prices_tomorrow` as plain lists of floats (one per hour), or a combined `price_forecast` list.
+
+If your sensor's state is the current price but its attributes contain no forecast list, the optimizer will run with a flat price forecast and cannot perform meaningful arbitrage. In that case use a different sensor or add the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator) on top of your existing sensor.
 
 ### Via HACS (Recommended)
 
