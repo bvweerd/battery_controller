@@ -27,6 +27,9 @@ The analyzer runs entirely in your browser. It visualizes the current schedule, 
 
 ## What is Battery Controller?
 
+> **For a detailed, step-by-step explanation of the optimization algorithm**, see [ALGORITHM.md](ALGORITHM.md).
+
+
 This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses **dynamic programming** (backward induction) to calculate the optimal charge/discharge schedule based on:
 
 - **Electricity price forecasts** (Nordpool, ENTSO-E, or any price sensor with forecast attributes like the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
@@ -63,7 +66,7 @@ The integration runs three cascading coordinators:
 
 1. **Weather Coordinator** (every 30 min): Fetches solar radiation and wind speed forecasts from open-meteo.com
 2. **Forecast Coordinator** (every 15 min): Calculates PV production and consumption forecasts
-3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller
+3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller (see [ALGORITHM.md](ALGORITHM.md) for full algorithmic details)
 
 #### Subentry Structure
 Battery Controller uses **subentries** to manage hardware flexibly:
