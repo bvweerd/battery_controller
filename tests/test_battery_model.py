@@ -6,8 +6,6 @@ import pytest
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
     BatteryState,
-    calculate_efficiency,
-    calculate_new_soc,
     calculate_degradation_cost_per_kwh,
 )
 
@@ -99,70 +97,6 @@ class TestBatteryState:
     def test_from_soc_kwh_zero_capacity(self):
         state = BatteryState.from_soc_kwh(0.0, 0.0)
         assert state.soc_percent == 0.0
-
-
-class TestCalculateEfficiency:
-    """Tests for calculate_efficiency function."""
-
-    def test_base_efficiency_charging(self):
-        config = BatteryConfig(round_trip_efficiency=0.90)
-        eff = calculate_efficiency(2.0, 50.0, config)
-        # At 50% SoC, 0.4C rate -> no penalties
-        assert eff == pytest.approx(math.sqrt(0.90), abs=0.01)
-
-    def test_base_efficiency_discharging(self):
-        config = BatteryConfig(round_trip_efficiency=0.90)
-        eff = calculate_efficiency(-2.0, 50.0, config)
-        assert eff == pytest.approx(math.sqrt(0.90), abs=0.01)
-
-    def test_high_c_rate_penalty(self):
-        config = BatteryConfig(capacity_kwh=10.0, round_trip_efficiency=0.90)
-        eff_low = calculate_efficiency(2.0, 50.0, config)  # 0.2C
-        eff_high = calculate_efficiency(8.0, 50.0, config)  # 0.8C
-        assert eff_high < eff_low
-
-    def test_extreme_soc_penalty(self):
-        config = BatteryConfig(round_trip_efficiency=0.90)
-        eff_mid = calculate_efficiency(2.0, 50.0, config)
-        eff_low = calculate_efficiency(2.0, 5.0, config)
-        eff_high = calculate_efficiency(2.0, 95.0, config)
-        assert eff_low < eff_mid
-        assert eff_high < eff_mid
-
-
-class TestCalculateNewSoc:
-    """Tests for calculate_new_soc function."""
-
-    def test_charging(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_soc_percent=90.0)
-        new_soc, energy = calculate_new_soc(5.0, 2.0, 1.0, config)
-        # 2 kW * 1h * efficiency = ~1.9 kWh stored
-        assert new_soc > 5.0
-        assert energy > 0
-
-    def test_discharging(self):
-        config = BatteryConfig(capacity_kwh=10.0, min_soc_percent=10.0)
-        new_soc, energy = calculate_new_soc(5.0, -2.0, 1.0, config)
-        assert new_soc < 5.0
-        assert energy > 0
-
-    def test_idle(self):
-        config = BatteryConfig()
-        new_soc, energy = calculate_new_soc(5.0, 0.0, 1.0, config)
-        assert new_soc == 5.0
-        assert energy == 0.0
-
-    def test_charge_clamp_max(self):
-        config = BatteryConfig(capacity_kwh=10.0, max_soc_percent=90.0)
-        # Try to charge 8.5 kWh battery to above max (9.0 kWh)
-        new_soc, _ = calculate_new_soc(8.5, 5.0, 1.0, config)
-        assert new_soc <= 9.0
-
-    def test_discharge_clamp_min(self):
-        config = BatteryConfig(capacity_kwh=10.0, min_soc_percent=10.0)
-        # Try to discharge 1.5 kWh battery below min (1.0 kWh)
-        new_soc, _ = calculate_new_soc(1.5, -5.0, 1.0, config)
-        assert new_soc >= 1.0
 
 
 class TestDegradationCost:

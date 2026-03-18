@@ -6,17 +6,6 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from .const import (
-    C_RATE_PENALTY_PER_THRESHOLD,
-    C_RATE_THRESHOLD,
-    SOC_DERATING_EXTREME_FACTOR,
-    SOC_DERATING_EXTREME_HIGH,
-    SOC_DERATING_EXTREME_LOW,
-    SOC_DERATING_MODERATE_FACTOR,
-    SOC_DERATING_MODERATE_HIGH,
-    SOC_DERATING_MODERATE_LOW,
-)
-
 
 @dataclass
 class BatteryConfig:
@@ -239,97 +228,6 @@ class BatteryState:
         """Create BatteryState from SoC in percent."""
         soc_kwh = (soc_percent / 100.0) * capacity_kwh
         return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)
-
-
-def calculate_efficiency(
-    power_kw: float,
-    soc_percent: float,
-    config: BatteryConfig,
-) -> float:
-    """Calculate efficiency based on power level and SoC.
-
-    Efficiency varies with:
-    - Power (lower C-rate = higher efficiency)
-    - SoC (efficiency drops at very low/high SoC)
-
-    Args:
-        power_kw: Current power in kW (positive = charging)
-        soc_percent: Current state of charge in percent
-        config: Battery configuration
-
-    Returns:
-        Efficiency multiplier (0.0-1.0)
-    """
-    # Base efficiency from RTE
-    if power_kw >= 0:
-        base_eff = config.charge_efficiency
-    else:
-        base_eff = config.discharge_efficiency
-
-    # C-rate penalty (higher power = lower efficiency)
-    c_rate = abs(power_kw) / config.capacity_kwh
-    c_rate_factor = (
-        1.0
-        - C_RATE_PENALTY_PER_THRESHOLD
-        * max(0, c_rate - C_RATE_THRESHOLD)
-        / C_RATE_THRESHOLD
-    )
-
-    # SoC penalty (efficiency drops at extremes)
-    soc_factor = 1.0
-    if (
-        soc_percent < SOC_DERATING_MODERATE_LOW
-        or soc_percent > SOC_DERATING_MODERATE_HIGH
-    ):
-        soc_factor = SOC_DERATING_MODERATE_FACTOR
-    if (
-        soc_percent < SOC_DERATING_EXTREME_LOW
-        or soc_percent > SOC_DERATING_EXTREME_HIGH
-    ):
-        soc_factor = SOC_DERATING_EXTREME_FACTOR
-
-    return base_eff * c_rate_factor * soc_factor
-
-
-def calculate_new_soc(
-    current_soc_kwh: float,
-    power_kw: float,
-    duration_hours: float,
-    config: BatteryConfig,
-) -> tuple[float, float]:
-    """Calculate new SoC after applying power for duration.
-
-    Args:
-        current_soc_kwh: Current state of charge in kWh
-        power_kw: Power in kW (positive = charging, negative = discharging)
-        duration_hours: Duration in hours
-        config: Battery configuration
-
-    Returns:
-        Tuple of (new_soc_kwh, actual_energy_kwh)
-        actual_energy_kwh is the energy actually stored/released (after efficiency)
-    """
-    current_soc_percent = (current_soc_kwh / config.capacity_kwh) * 100.0
-
-    if power_kw > 0:
-        # Charging
-        efficiency = calculate_efficiency(power_kw, current_soc_percent, config)
-        energy_stored = power_kw * duration_hours * efficiency
-        new_soc = min(current_soc_kwh + energy_stored, config.max_soc_kwh)
-        actual_energy = new_soc - current_soc_kwh
-    elif power_kw < 0:
-        # Discharging
-        efficiency = calculate_efficiency(power_kw, current_soc_percent, config)
-        energy_released = abs(power_kw) * duration_hours
-        energy_from_battery = energy_released / efficiency
-        new_soc = max(current_soc_kwh - energy_from_battery, config.min_soc_kwh)
-        actual_energy = current_soc_kwh - new_soc
-    else:
-        # Idle
-        new_soc = current_soc_kwh
-        actual_energy = 0.0
-
-    return new_soc, actual_energy
 
 
 def calculate_degradation_cost_per_kwh(

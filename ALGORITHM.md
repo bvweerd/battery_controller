@@ -113,6 +113,8 @@ discharge_efficiency = sqrt(RTE)
 
 So charge × discharge = RTE end-to-end. For RTE = 0.90: each direction is ~0.9487.
 
+The efficiency is treated as constant across all power levels and SoC values. C-rate-dependent losses (I²R) and SoC-dependent losses are deliberately omitted: literature confirms both effects are negligible for LFP within the 10–90% SoC operating window and at the C-rates typical for home storage (≤ 0.5C). The user-configured RTE already accounts for real-world losses at typical operating conditions.
+
 DC-coupled PV uses its own path efficiency (`pv_dc_efficiency` ≈ 0.97, MPPT only, no AC conversion).
 
 ### 4.2 Charging (`action_w > 0`)

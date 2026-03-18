@@ -32,6 +32,14 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
 - **DC PV**: ~97% efficient (MPPT only); AC PV ~85% (through inverter). Excess DC goes to AC at 96%.
 - **SoC fallback**: If SoC sensor unavailable, last known SoC from previous run is used.
 
+## After Every Code Change
+Always do the following after modifying any source file:
+1. **Run tests**: `python -m pytest tests/ -v` — fix any failures before proceeding
+2. **Run pre-commit**: `pre-commit run --all-files` — fix any issues (ruff may auto-format)
+3. **Update `ALGORITHM.md`** — if algorithm logic, efficiency model, or DP behaviour changed
+4. **Update `simulate_diagnostics.py`** — if inputs, outputs, or data structures changed
+5. **Update `docs/index.html`** — if the simulator UI or displayed parameters changed
+
 ## Compaction: always preserve
 - Modified files and their key changes
 - Test failure messages (full traceback)
