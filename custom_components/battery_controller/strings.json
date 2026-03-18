@@ -1,0 +1,270 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Controller",
+        "description": "Configure your home battery for cost optimization. Add battery systems and PV arrays via the integration page after setup.",
+        "sections": {
+          "sensors": {
+            "name": "Required Sensors",
+            "data": {
+              "price_sensor": "Electricity price sensor"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optional Sensors",
+            "data": {
+              "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
+              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
+              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "optimization_interval_minutes": "Optimization interval (minutes)",
+              "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
+              "zero_grid_enabled": "Zero-grid control enabled",
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
+              "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Please configure the electricity price sensor."
+    },
+    "abort": {
+      "already_configured": "Battery Controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Battery Controller",
+        "description": "Reconfigure your battery controller settings. Manage battery systems and PV arrays via the integration page.",
+        "sections": {
+          "sensors": {
+            "name": "Required Sensors",
+            "data": {
+              "price_sensor": "Electricity price sensor"
+            }
+          },
+          "optional_sensors": {
+            "name": "Optional Sensors",
+            "data": {
+              "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
+              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
+              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+            }
+          },
+          "advanced": {
+            "name": "Advanced Settings",
+            "data": {
+              "optimization_interval_minutes": "Optimization interval (minutes)",
+              "fixed_feed_in_price": "Fixed feed-in price (EUR/kWh)",
+              "zero_grid_enabled": "Zero-grid control enabled",
+              "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
+              "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Please configure the electricity price sensor."
+    }
+  },
+  "config_subentries": {
+    "battery": {
+      "entry_type": "Battery System",
+      "flow_title": "Battery",
+      "initiate_flow": {
+        "user": "Add Battery System"
+      },
+      "step": {
+        "user": {
+          "title": "Add Battery",
+          "description": "Configure a battery system. Battery SoC sensor is required. Power sensor improves real-time state detection.",
+          "data": {
+            "name": "Name (optional)",
+            "capacity_kwh": "Capacity (kWh)",
+            "max_charge_power_kw": "Max charge power (kW)",
+            "max_discharge_power_kw": "Max discharge power (kW)",
+            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Battery SoC sensor",
+            "battery_power_sensor": "Battery power sensor (optional)",
+            "pv_dc_efficiency": "DC coupling efficiency (0–1, for DC-coupled PV on this inverter)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit Battery",
+          "description": "Update the configuration for this battery.",
+          "data": {
+            "name": "Name (optional)",
+            "capacity_kwh": "Capacity (kWh)",
+            "max_charge_power_kw": "Max charge power (kW)",
+            "max_discharge_power_kw": "Max discharge power (kW)",
+            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "min_soc_percent": "Minimum SoC (%)",
+            "max_soc_percent": "Maximum SoC (%)",
+            "battery_soc_sensor": "Battery SoC sensor",
+            "battery_power_sensor": "Battery power sensor (optional)",
+            "pv_dc_efficiency": "DC coupling efficiency (0–1)"
+          }
+        }
+      },
+      "error": {
+        "invalid_battery_input": "Invalid battery configuration. Check capacity, power limits, and efficiency values."
+      }
+    },
+    "pv_array": {
+      "entry_type": "PV Array",
+      "flow_title": "PV Array",
+      "initiate_flow": {
+        "user": "Add PV Array"
+      },
+      "step": {
+        "user": {
+          "title": "Add PV Array",
+          "description": "Configure a PV array. For DC-coupled arrays (panels directly on battery inverter), enable the DC-coupled option.",
+          "data": {
+            "name": "Name (optional)",
+            "peak_power_kwp": "Peak power (kWp)",
+            "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
+            "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
+            "efficiency_factor": "System efficiency (0-1, accounts for shading, wiring, soiling)",
+            "dc_coupled": "DC-coupled (directly on battery inverter)"
+          },
+          "data_description": {
+            "peak_power_kwp": "Total rated peak power of all panels in this array",
+            "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit PV Array",
+          "description": "Update the configuration for this PV array.",
+          "data": {
+            "name": "Name (optional)",
+            "peak_power_kwp": "Peak power (kWp)",
+            "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
+            "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
+            "efficiency_factor": "System efficiency (0-1)",
+            "dc_coupled": "DC-coupled (directly on battery inverter)"
+          }
+        }
+      },
+      "error": {
+        "invalid_pv_input": "Invalid PV array configuration. Peak power must be greater than 0, orientation 0-360, tilt 0-90."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "optimal_power": {
+        "name": "Optimal Power"
+      },
+      "optimal_mode": {
+        "name": "Optimal Mode"
+      },
+      "schedule": {
+        "name": "Schedule"
+      },
+      "soc": {
+        "name": "Total State of Charge"
+      },
+      "battery_power": {
+        "name": "Total Battery Power"
+      },
+      "pv_forecast": {
+        "name": "PV Forecast"
+      },
+      "consumption_forecast": {
+        "name": "Consumption Forecast"
+      },
+      "net_grid_forecast": {
+        "name": "Net Grid Forecast"
+      },
+      "ghi": {
+        "name": "Solar Irradiance"
+      },
+      "wind_speed_ms": {
+        "name": "Wind Speed"
+      },
+      "daily_savings": {
+        "name": "Estimated Savings"
+      },
+      "shadow_price": {
+        "name": "Shadow Price of Storage"
+      },
+      "current_grid_power": {
+        "name": "Current Grid Power"
+      },
+      "battery_setpoint": {
+        "name": "Battery Setpoint"
+      },
+      "control_mode": {
+        "name": "Control Mode"
+      },
+      "optimization_status": {
+        "name": "Optimization Status"
+      },
+      "battery_subentry_soc": {
+        "name": "State of Charge"
+      },
+      "battery_subentry_setpoint": {
+        "name": "Battery Setpoint"
+      },
+      "pv_array_forecast": {
+        "name": "PV Forecast"
+      }
+    },
+    "number": {
+      "degradation_cost": {
+        "name": "Degradation Cost"
+      },
+      "min_price_spread": {
+        "name": "Minimum Price Spread"
+      },
+      "zero_grid_deadband": {
+        "name": "Zero Grid Deadband"
+      },
+      "manual_power_setpoint": {
+        "name": "Manual Power Setpoint"
+      }
+    },
+    "select": {
+      "control_mode": {
+        "name": "Control Mode",
+        "state": {
+          "zero_grid": "Zero grid",
+          "follow_schedule": "Follow schedule",
+          "hybrid": "Hybrid",
+          "manual": "Manual"
+        }
+      }
+    },
+    "switch": {
+      "optimization_enabled": {
+        "name": "Optimization Enabled"
+      }
+    },
+    "binary_sensor": {
+      "pv_curtailment": {
+        "name": "PV Curtailment Suggested"
+      },
+      "use_max_power": {
+        "name": "Use Maximum Power Suggested"
+      }
+    }
+  }
+}

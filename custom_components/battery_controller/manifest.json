@@ -1,0 +1,15 @@
+{
+  "domain": "battery_controller",
+  "name": "Battery Controller",
+  "after_dependencies": ["recorder"],
+  "codeowners": [
+    "@bvweerd"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.github.com/bvweerd/battery_controller",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/bvweerd/battery_controller/issues",
+  "requirements": [],
+  "version": "2.0.0"
+}

@@ -1,0 +1,1576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Battery Controller Analyzer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  .chart-container { position: relative; height: 260px; }
+  .chart-container-lg { position: relative; height: 320px; }
+  .drop-zone.drag-over { border-color: #3b82f6 !important; background-color: #eff6ff !important; }
+  .kv-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #f3f4f6; }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-label { color: #6b7280; font-size: 0.8125rem; }
+  .kv-value { font-weight: 500; font-size: 0.8125rem; color: #111827; }
+  .badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
+  .badge-charging { background: #dbeafe; color: #1d4ed8; }
+  .badge-discharging { background: #ffedd5; color: #c2410c; }
+  .badge-idle { background: #f3f4f6; color: #374151; }
+  .badge-ok { background: #dcfce7; color: #166534; }
+  .badge-fail { background: #fee2e2; color: #991b1b; }
+  .tip-warn { border-left: 4px solid #f59e0b; background: #fffbeb; }
+  .tip-err  { border-left: 4px solid #ef4444; background: #fef2f2; }
+  .tip-info { border-left: 4px solid #3b82f6; background: #eff6ff; }
+  .tip-ok   { border-left: 4px solid #22c55e; background: #f0fdf4; }
+  .sim-input { width: 100%; border: 1px solid #d1d5db; border-radius: 4px; padding: 4px 8px; font-size: 0.8125rem; }
+  .sim-input:focus { outline: none; box-shadow: 0 0 0 2px #93c5fd; border-color: #3b82f6; }
+  .fc-cell input { width: 100%; border: none; padding: 3px 4px; font-size: 0.75rem; background: transparent; }
+  .fc-cell input:focus { outline: none; background: #eff6ff; border-radius: 2px; }
+  .row-charge { background: #eff6ff; }
+  .row-discharge { background: #fff7ed; }
+  .row-idle { }
+  .scrolltable { overflow-x: auto; max-height: 320px; overflow-y: auto; }
+  .sticky-header thead th { position: sticky; top: 0; background: #f9fafb; z-index: 1; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+
+<!-- Header -->
+<header class="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-10 shadow-sm">
+  <div class="max-w-screen-xl mx-auto flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold text-gray-900">⚡ Battery Controller Analyzer</h1>
+      <p class="text-xs text-gray-500">Upload diagnostics.json · Analyze · Simulate</p>
+    </div>
+    <div id="header-status" class="hidden text-xs px-3 py-1 rounded-full font-medium bg-green-100 text-green-800"></div>
+  </div>
+</header>
+
+<main class="max-w-screen-xl mx-auto px-4 py-6 space-y-6">
+
+<!-- ═══════════════════════════════════════════════════════════ UPLOAD -->
+<section id="upload-section" class="bg-white rounded-xl border border-gray-200 p-6">
+  <div id="drop-zone"
+    class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
+    <div class="text-5xl mb-3">📊</div>
+    <p class="text-base font-semibold text-gray-700">Drop <code class="text-blue-600">diagnostics.json</code> here</p>
+    <p class="text-sm text-gray-400 mt-1">or click to browse · or paste below</p>
+    <input type="file" id="file-input" accept=".json" class="hidden">
+  </div>
+  <div class="mt-3 flex items-center gap-2">
+    <button id="paste-toggle" class="text-sm text-blue-600 hover:underline">Paste JSON ▾</button>
+  </div>
+  <div id="paste-area" class="hidden mt-2">
+    <textarea id="json-input" rows="7"
+      placeholder='Paste full diagnostics JSON here (the outer { "home_assistant": ..., "data": ... } wrapper is fine, or just the "data" section)...'
+      class="w-full border border-gray-300 rounded-lg p-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-400 resize-y"></textarea>
+    <button id="parse-btn" class="mt-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">Analyze</button>
+  </div>
+  <div id="parse-error" class="hidden mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm font-mono"></div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════ DASHBOARD -->
+<div id="dashboard" class="hidden space-y-6">
+
+  <!-- Summary bar -->
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 uppercase tracking-wide">State of Charge</div>
+      <div id="s-soc" class="text-2xl font-bold text-gray-900 mt-1">—</div>
+      <div id="s-soc-kwh" class="text-xs text-gray-400"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 uppercase tracking-wide">Battery mode</div>
+      <div id="s-mode" class="text-2xl font-bold mt-1">—</div>
+      <div id="s-power" class="text-xs text-gray-400"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 uppercase tracking-wide">Savings (horizon)</div>
+      <div id="s-savings" class="text-2xl font-bold text-green-600 mt-1">—</div>
+      <div id="s-savings-pct" class="text-xs text-gray-400"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 uppercase tracking-wide">Shadow price λ</div>
+      <div id="s-shadow" class="text-2xl font-bold text-purple-600 mt-1">—</div>
+      <div class="text-xs text-gray-400">marginal €/kWh stored</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 uppercase tracking-wide">Control mode</div>
+      <div id="s-ctrl" class="text-2xl font-bold text-gray-900 mt-1">—</div>
+      <div id="s-ts" class="text-xs text-gray-400"></div>
+    </div>
+  </div>
+
+  <!-- Config + State -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 text-sm">🔋 Battery Hardware</h3>
+      <div id="cfg-hw"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 text-sm">⚡ Efficiency &amp; Costs</h3>
+      <div id="cfg-eff"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 text-sm">☀️ PV &amp; Optimizer</h3>
+      <div id="cfg-pv"></div>
+    </div>
+  </div>
+
+  <!-- Coordinator health + current values -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 text-sm">📡 Coordinator Status</h3>
+      <div id="coord-status" class="space-y-1"></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 text-sm">🔌 Current Values</h3>
+      <div id="current-values" class="space-y-1"></div>
+    </div>
+  </div>
+
+  <!-- Schedule charts -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-2 text-sm">Power Schedule &amp; SoC Trajectory</h3>
+      <div class="chart-container"><canvas id="chart-schedule"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-2 text-sm">Price Forecast</h3>
+      <div class="chart-container"><canvas id="chart-prices"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-2 text-sm">PV Production &amp; Consumption</h3>
+      <div class="chart-container"><canvas id="chart-pv"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-semibold text-gray-700 mb-2 text-sm">Cost Comparison</h3>
+      <div class="chart-container"><canvas id="chart-costs"></canvas></div>
+      <div id="cost-details" class="mt-3"></div>
+    </div>
+  </div>
+
+  <!-- Profitability per-step analysis -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-1 text-sm">Step-by-Step Profitability Analysis</h3>
+    <p class="text-xs text-gray-400 mb-3">
+      Charge profit = λ − p<sub>buy</sub>/√RTE − degradation per kWh.
+      Discharge profit = p<sub>sell</sub>·√RTE − λ − degradation per kWh.
+      Green = active action · Red rows = missed discharge opportunity (profit &gt; 0 but idle/charging).
+    </p>
+    <div class="scrolltable sticky-header">
+      <table class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="bg-gray-50 text-gray-600">
+            <th class="border border-gray-200 px-2 py-1 text-left">Step</th>
+            <th class="border border-gray-200 px-2 py-1">Time</th>
+            <th class="border border-gray-200 px-2 py-1">Price</th>
+            <th class="border border-gray-200 px-2 py-1">Feed-in</th>
+            <th class="border border-gray-200 px-2 py-1">PV kW</th>
+            <th class="border border-gray-200 px-2 py-1">Consump kW</th>
+            <th class="border border-gray-200 px-2 py-1">Power kW</th>
+            <th class="border border-gray-200 px-2 py-1">Mode</th>
+            <th class="border border-gray-200 px-2 py-1">SoC kWh</th>
+            <th class="border border-gray-200 px-2 py-1">Disc profit</th>
+            <th class="border border-gray-200 px-2 py-1">Chg profit</th>
+          </tr>
+        </thead>
+        <tbody id="profitability-table"></tbody>
+      </table>
+    </div>
+    <div id="profitability-legend" class="mt-2 text-xs text-gray-400">
+      Terminal price λ = <span id="terminal-price-label">—</span> €/kWh (re-computed; integration may use rolling shadow price) ·
+      Break-even discharge: <span id="breakeven-discharge-label">—</span> €/kWh ·
+      Break-even charge: <span id="breakeven-charge-label">—</span> €/kWh
+    </div>
+  </div>
+
+  <!-- Min spread analysis -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-1 text-sm">Minimum Spread Analysis</h3>
+    <p class="text-xs text-gray-400 mb-3">How much price spread is needed for arbitrage to be profitable, given your battery parameters?</p>
+    <div id="spread-analysis" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+  </div>
+
+  <!-- Tips -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-3 text-sm">💡 Tips &amp; Recommendations</h3>
+    <div id="tips-container" class="space-y-3"></div>
+  </div>
+
+  <!-- Entities table -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-3 text-sm">🏷️ Entity States</h3>
+    <div class="scrolltable sticky-header">
+      <table class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="bg-gray-50 text-gray-600">
+            <th class="border border-gray-200 px-2 py-1 text-left">Entity ID</th>
+            <th class="border border-gray-200 px-2 py-1 text-left">State</th>
+            <th class="border border-gray-200 px-2 py-1 text-left">Attributes</th>
+          </tr>
+        </thead>
+        <tbody id="entities-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /dashboard -->
+
+<!-- ═══════════════════════════════════════════════════════════ SIMULATOR -->
+<section class="bg-white rounded-xl border border-gray-200 p-6">
+  <div class="flex items-start justify-between mb-1">
+    <h2 class="text-lg font-bold text-gray-900">🔬 DP Optimizer Simulator</h2>
+    <button id="sim-load-diag" class="hidden text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+      ← Pre-fill from diagnostics
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-5">
+    Run the same dynamic programming optimizer as the integration, entirely in your browser.
+    Adjust battery parameters and forecast data, then click <strong>Run Optimizer</strong>.
+  </p>
+
+  <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+
+    <!-- Left: battery params -->
+    <div class="space-y-3">
+      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Battery Parameters</h3>
+      <label class="block"><span class="kv-label">Capacity (kWh)</span>
+        <input id="sp-capacity" type="number" value="10" step="0.1" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Min SoC (%)</span>
+        <input id="sp-min-soc" type="number" value="10" step="1" min="0" max="50" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Max SoC (%)</span>
+        <input id="sp-max-soc" type="number" value="90" step="1" min="50" max="100" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Max charge power (kW)</span>
+        <input id="sp-charge-kw" type="number" value="5" step="0.1" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Max discharge power (kW)</span>
+        <input id="sp-discharge-kw" type="number" value="5" step="0.1" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Round-trip efficiency</span>
+        <input id="sp-rte" type="number" value="0.90" step="0.01" min="0.5" max="1.0" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Current SoC (kWh)</span>
+        <input id="sp-soc-kwh" type="number" value="5" step="0.1" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Degradation cost (€/kWh)</span>
+        <input id="sp-degradation" type="number" value="0.03" step="0.005" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Min price spread (€/kWh)</span>
+        <input id="sp-spread" type="number" value="0.05" step="0.01" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Step duration (hours)</span>
+        <input id="sp-step-h" type="number" value="0.25" step="0.0833" min="0.0833" max="1" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Terminal shadow price (€/kWh, 0=auto)</span>
+        <input id="sp-terminal" type="number" value="0" step="0.01" class="sim-input mt-0.5"></label>
+
+      <div class="pt-2">
+        <button id="sim-run" class="w-full py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 active:bg-blue-800 transition-colors">
+          ▶ Run Optimizer
+        </button>
+        <div id="sim-status" class="text-xs text-gray-400 mt-1 text-center"></div>
+      </div>
+    </div>
+
+    <!-- Right: forecast table -->
+    <div class="lg:col-span-3">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Forecast Input (one row = one time step)</h3>
+        <div class="flex gap-2">
+          <button id="sim-add-rows" class="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200">+ 4 rows</button>
+          <button id="sim-clear-rows" class="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200">Clear</button>
+        </div>
+      </div>
+      <div class="scrolltable sticky-header" style="max-height: 400px;">
+        <table class="w-full text-xs border-collapse" id="sim-fc-table">
+          <thead>
+            <tr class="bg-gray-50 text-gray-600">
+              <th class="border border-gray-200 px-2 py-1">#</th>
+              <th class="border border-gray-200 px-2 py-1 text-purple-700">Buy (€/kWh)</th>
+              <th class="border border-gray-200 px-2 py-1 text-green-700">Feed-in (€/kWh)</th>
+              <th class="border border-gray-200 px-2 py-1 text-yellow-600">PV (kW)</th>
+              <th class="border border-gray-200 px-2 py-1 text-red-600">Consump (kW)</th>
+              <th class="border border-gray-200 px-1 py-1"></th>
+            </tr>
+          </thead>
+          <tbody id="sim-fc-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Simulator results -->
+  <div id="sim-results" class="hidden mt-6 border-t border-gray-200 pt-6 space-y-5">
+    <h3 class="font-semibold text-gray-900">Simulation Results</h3>
+
+    <!-- Cost summary -->
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div class="bg-gray-50 rounded-lg p-3 border border-gray-200">
+        <div class="text-xs text-gray-500">Baseline cost</div>
+        <div id="sr-baseline" class="text-lg font-bold text-gray-800 mt-0.5">—</div>
+      </div>
+      <div class="bg-blue-50 rounded-lg p-3 border border-blue-100">
+        <div class="text-xs text-blue-600">Optimized cost</div>
+        <div id="sr-total" class="text-lg font-bold text-blue-800 mt-0.5">—</div>
+      </div>
+      <div class="bg-green-50 rounded-lg p-3 border border-green-100">
+        <div class="text-xs text-green-600">Savings</div>
+        <div id="sr-savings" class="text-lg font-bold text-green-700 mt-0.5">—</div>
+      </div>
+      <div class="bg-purple-50 rounded-lg p-3 border border-purple-100">
+        <div class="text-xs text-purple-600">Shadow price λ</div>
+        <div id="sr-shadow" class="text-lg font-bold text-purple-800 mt-0.5">—</div>
+      </div>
+      <div class="bg-amber-50 rounded-lg p-3 border border-amber-100">
+        <div class="text-xs text-amber-600">Terminal price</div>
+        <div id="sr-terminal" class="text-lg font-bold text-amber-800 mt-0.5">—</div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
+        <h4 class="text-sm font-medium text-gray-700 mb-2">Power Schedule &amp; SoC</h4>
+        <div class="chart-container"><canvas id="sim-chart-schedule"></canvas></div>
+      </div>
+      <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
+        <h4 class="text-sm font-medium text-gray-700 mb-2">Price Forecast with Actions</h4>
+        <div class="chart-container"><canvas id="sim-chart-prices"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Schedule table -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-700 mb-2">Detailed Schedule</h4>
+      <div class="scrolltable sticky-header">
+        <table class="w-full text-xs border-collapse">
+          <thead>
+            <tr class="bg-gray-50 text-gray-600">
+              <th class="border border-gray-200 px-2 py-1">Step</th>
+              <th class="border border-gray-200 px-2 py-1">Mode</th>
+              <th class="border border-gray-200 px-2 py-1">Power (kW)</th>
+              <th class="border border-gray-200 px-2 py-1">SoC before (kWh)</th>
+              <th class="border border-gray-200 px-2 py-1">SoC after (kWh)</th>
+              <th class="border border-gray-200 px-2 py-1">Buy price</th>
+              <th class="border border-gray-200 px-2 py-1">Feed-in</th>
+              <th class="border border-gray-200 px-2 py-1">Step cost (€)</th>
+              <th class="border border-gray-200 px-2 py-1">Disc profit</th>
+              <th class="border border-gray-200 px-2 py-1">Chg profit</th>
+            </tr>
+          </thead>
+          <tbody id="sim-result-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- What-if analysis -->
+    <div>
+      <h4 class="text-sm font-medium text-gray-700 mb-2">What-if: Terminal Price Sensitivity</h4>
+      <p class="text-xs text-gray-400 mb-2">Shows how different terminal prices would change the break-even discharge price vs. the maximum price in your forecast.</p>
+      <div class="scrolltable">
+        <table class="w-full text-xs border-collapse">
+          <thead>
+            <tr class="bg-gray-50 text-gray-600">
+              <th class="border border-gray-200 px-2 py-1">Terminal price (λ)</th>
+              <th class="border border-gray-200 px-2 py-1">Break-even discharge</th>
+              <th class="border border-gray-200 px-2 py-1">Max forecast price</th>
+              <th class="border border-gray-200 px-2 py-1">Discharge possible?</th>
+            </tr>
+          </thead>
+          <tbody id="sim-whatif-table"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="mt-8 border-t border-gray-200 bg-white py-4 text-center text-xs text-gray-400">
+  Battery Controller Analyzer · GitHub Pages ·
+  <a href="https://github.com/bvweerd/battery_controller" class="text-blue-500 hover:underline" target="_blank">Source</a>
+</footer>
+
+<script>
+// ══════════════════════════════════════════════════════════════════
+// CONSTANTS (mirroring Python const.py)
+// ══════════════════════════════════════════════════════════════════
+const SOC_RES_WH   = 25.0;
+const POWER_STEP_W = 100;
+const DC_TO_AC_EFF = 0.96;
+const MIN_PV_SURPLUS_KW   = 0.05;
+const POWER_IDLE_THRESHOLD_W = 1.0;
+
+// ══════════════════════════════════════════════════════════════════
+// DP OPTIMIZER  (faithful JS port of simulate_diagnostics.py)
+// ══════════════════════════════════════════════════════════════════
+
+function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
+    pvW, consumW, rte, degradCostPerKwh, pvDcCoupled, pvDcW, pvDcEfficiency, maxGridPowerKw, maxSocWh) {
+  const sqrtRte = Math.sqrt(rte);
+  const chargeEff   = sqrtRte;
+  const dischargeEff= sqrtRte;
+  const dcEff = pvDcCoupled ? pvDcEfficiency : sqrtRte;
+
+  pvW   = Math.max(0, pvW);
+  pvDcW = Math.max(0, pvDcW || 0);
+
+  let gridToBatteryW = 0, throughputKwh = 0;
+  let dcPvExcessW = pvDcW;
+
+  if (actionW > 0) {
+    // Charging
+    const dcChargeW  = Math.min(actionW, pvDcW * dcEff);
+    const acChargeW  = actionW - dcChargeW;
+    const dcPvUsedW  = dcEff > 0 ? dcChargeW / dcEff : 0;
+    dcPvExcessW      = Math.max(0, pvDcW - dcPvUsedW);
+    gridToBatteryW   = acChargeW > 0 ? acChargeW / chargeEff : 0;
+    throughputKwh    = actionW * stepH / 1000;
+  } else if (actionW < 0) {
+    // Discharging
+    dcPvExcessW       = pvDcW;
+    const usablePowerW= Math.abs(actionW) * dischargeEff;
+    gridToBatteryW    = -usablePowerW;
+    throughputKwh     = Math.abs(actionW) * stepH / 1000;
+  } else {
+    // Idle
+    gridToBatteryW = 0;
+    if (pvDcCoupled && pvDcW > 0 && maxSocWh !== undefined) {
+      const headroomWh     = Math.max(0, maxSocWh - socWh);
+      const passiveChargeWh= Math.min(pvDcW * dcEff * stepH, headroomWh);
+      const passiveChargeW = stepH > 0 ? passiveChargeWh / stepH : 0;
+      const dcPvConsumedW  = dcEff > 0 ? passiveChargeW / dcEff : 0;
+      dcPvExcessW   = Math.max(0, pvDcW - dcPvConsumedW);
+      throughputKwh = passiveChargeWh / 1000;
+    }
+  }
+
+  const dcPvToAcW   = dcPvExcessW > 0 ? dcPvExcessW * DC_TO_AC_EFF : 0;
+  const totalAcPvW  = pvW + dcPvToAcW;
+  let netGridW      = consumW - totalAcPvW + gridToBatteryW;
+  if (maxGridPowerKw > 0) {
+    const capW = maxGridPowerKw * 1000;
+    netGridW = Math.max(-capW, Math.min(capW, netGridW));
+  }
+
+  const energyKwh = Math.abs(netGridW) * stepH / 1000;
+  const gridCost  = netGridW > 0 ? energyKwh * gridPrice : -energyKwh * feedInPrice;
+  const degradCost= throughputKwh * degradCostPerKwh;
+  return gridCost + degradCost;
+}
+
+function findNearestSocIdx(socWh, socStates) {
+  if (socStates.length <= 1) return 0;
+  const step = socStates[1] - socStates[0];
+  const idx  = Math.round((socWh - socStates[0]) / step);
+  return Math.max(0, Math.min(idx, socStates.length - 1));
+}
+
+function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
+               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice) {
+
+  const rte = cfg.rte;
+  const sqrtRte = Math.sqrt(rte);
+  const minSocWh = Math.round(cfg.minSocKwh * 1000);
+  const maxSocWh = Math.round(cfg.maxSocKwh * 1000);
+
+  const nSteps = Math.min(priceFc.length, pvFc.length, consumFc.length);
+  if (!stepDurations || stepDurations.length === 0)
+    stepDurations = new Array(nSteps).fill(0.25);
+  while (stepDurations.length < nSteps)
+    stepDurations.push(stepDurations[stepDurations.length - 1]);
+  if (!pvDcFc) pvDcFc = new Array(nSteps).fill(0);
+  if (!feedInFc || feedInFc.length === 0) feedInFc = [...priceFc];
+
+  const minStepH  = Math.min(...stepDurations.slice(0, nSteps));
+  const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
+  const socResWh  = Math.max(SOC_RES_WH, POWER_STEP_W * minStepH);
+  const alignedStepW = socResWh / fullStepH;
+  const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
+
+  const nSocStates = Math.round((maxSocWh - minSocWh) / socResWh) + 1;
+  const socStates  = [];
+  for (let i = 0; i < nSocStates; i++) socStates.push(minSocWh + i * socResWh);
+
+  // Terminal value
+  let terminalPrice;
+  if (terminalShadowPrice !== null && terminalShadowPrice !== undefined && terminalShadowPrice >= 0) {
+    terminalPrice = terminalShadowPrice;
+  } else if (feedInFc.length > 0) {
+    const lookback = Math.min(6, feedInFc.length);
+    let sum = 0;
+    for (let i = feedInFc.length - lookback; i < feedInFc.length; i++) sum += feedInFc[i];
+    const avgTail = sum / lookback;
+    terminalPrice = Math.min(feedInFc[feedInFc.length - 1], avgTail);
+  } else {
+    terminalPrice = 0;
+  }
+
+  // V and policy as flat arrays for performance
+  const V      = [];
+  const policy = [];
+  for (let t = 0; t <= nSteps; t++) {
+    V.push(new Float64Array(nSocStates).fill(Infinity));
+    if (t < nSteps) policy.push(new Float32Array(nSocStates));
+  }
+  // Terminal values
+  for (let s = 0; s < nSocStates; s++) {
+    const storedKwh = (socStates[s] - minSocWh) / 1000;
+    V[nSteps][s] = -storedKwh * terminalPrice;
+  }
+
+  // Action list: discharge first (negative), then charge (positive)
+  const maxChargeW    = Math.round(cfg.maxChargeKw * 1000);
+  const maxDischargeW = Math.round(cfg.maxDischargeKw * 1000);
+  const chargeSteps   = Math.floor(maxChargeW    / powerStepW);
+  const dischargeSteps= Math.floor(maxDischargeW / powerStepW);
+  const actions = [];
+  for (let i = dischargeSteps; i >= 1; i--) actions.push(-i * powerStepW);
+  for (let i = chargeSteps; i >= 0; i--)   actions.push(i * powerStepW); // includes 0
+
+  // Backward pass
+  for (let t = nSteps - 1; t >= 0; t--) {
+    const stepH       = stepDurations[t];
+    const gridPrice   = priceFc[t];
+    const feedIn      = t < feedInFc.length ? feedInFc[t] : gridPrice;
+    const pvW         = t < pvFc.length    ? pvFc[t] * 1000  : 0;
+    const pvDcW       = t < pvDcFc.length  ? pvDcFc[t] * 1000 : 0;
+    const consumW     = t < consumFc.length ? consumFc[t] * 1000 : 0;
+    const Vnext       = V[t + 1];
+
+    for (let s = 0; s < nSocStates; s++) {
+      const socWh    = socStates[s];
+      let bestCost   = Infinity;
+      let bestAction = 0;
+
+      for (let ai = 0; ai < actions.length; ai++) {
+        const actionW = actions[ai];
+        let newSocWh;
+        if (actionW > 0) {
+          newSocWh = socWh + actionW * stepH;
+          if (newSocWh > maxSocWh) continue;
+        } else if (actionW < 0) {
+          newSocWh = socWh - Math.abs(actionW) * stepH;
+          if (newSocWh < minSocWh) continue;
+        } else {
+          newSocWh = socWh;
+        }
+
+        const newSocIdx = findNearestSocIdx(newSocWh, socStates);
+        if (actionW !== 0 && newSocIdx === s) continue; // no-move filter
+
+        const stepCost = calculateStepCost(
+          stepH, socWh, actionW, gridPrice, feedIn,
+          pvW, consumW, rte, degradCost,
+          cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+        );
+        const totalCost = stepCost + Vnext[newSocIdx];
+        if (totalCost < bestCost) {
+          bestCost   = totalCost;
+          bestAction = actionW;
+        }
+      }
+      V[t][s]      = isFinite(bestCost) ? bestCost : Vnext[s];
+      policy[t][s] = bestAction;
+    }
+  }
+
+  return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh, terminalPrice, nSteps };
+}
+
+function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
+  const { policy, socStates, stepDurations, minSocWh, maxSocWh, nSteps } = dpResult;
+  let curSocWh = currentSocKwh * 1000;
+  const powerKw = [], modes = [], socKwh = [currentSocKwh];
+
+  for (let t = 0; t < nSteps; t++) {
+    const stepH  = stepDurations[t];
+    const sIdx   = findNearestSocIdx(curSocWh, socStates);
+    const actionW= policy[t][sIdx];
+    const pvDcW  = pvDcFc && t < pvDcFc.length ? pvDcFc[t] * 1000 : 0;
+
+    powerKw.push(actionW / 1000);
+    if (actionW > 0) {
+      modes.push('charging');
+      curSocWh = Math.min(curSocWh + actionW * stepH, maxSocWh);
+    } else if (actionW < 0) {
+      modes.push('discharging');
+      curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH, minSocWh);
+    } else {
+      if (cfg.pvDcCoupled && pvDcW > 0) {
+        const dcEff = cfg.pvDcEfficiency;
+        const headroomWh = Math.max(0, maxSocWh - curSocWh);
+        const passiveWh  = Math.min(pvDcW * dcEff * stepH, headroomWh);
+        curSocWh += passiveWh;
+      }
+      modes.push('idle');
+    }
+    socKwh.push(curSocWh / 1000);
+  }
+  return { powerKw, modes, socKwh };
+}
+
+function computeShadowPrice(V, socStates, currentSocKwh) {
+  if (socStates.length < 3) return 0;
+  const idx     = findNearestSocIdx(currentSocKwh * 1000, socStates);
+  const clamped = Math.max(1, Math.min(socStates.length - 2, idx));
+  const dV      = V[0][clamped - 1] - V[0][clamped + 1];
+  const dSocKwh = (socStates[clamped + 1] - socStates[clamped - 1]) / 1000;
+  return dSocKwh !== 0 ? -dV / dSocKwh : 0;
+}
+
+function computeTotalCost(powerKw, socKwh, inputs, cfg) {
+  let total = 0, baseline = 0;
+  const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost, pvDcFc } = inputs;
+  for (let t = 0; t < powerKw.length; t++) {
+    const stepH = stepDurations[t] || 0.25;
+    const feedIn = feedInFc && feedInFc[t] !== undefined ? feedInFc[t] : priceFc[t];
+    const pvW   = pvFc   && pvFc[t]   !== undefined ? pvFc[t]   * 1000 : 0;
+    const consumW= consumFc && consumFc[t] !== undefined ? consumFc[t] * 1000 : 0;
+    const pvDcW = pvDcFc  && pvDcFc[t]  !== undefined ? pvDcFc[t]  * 1000 : 0;
+    const maxSocWhC = cfg.maxSocKwh * 1000;
+    total += calculateStepCost(
+      stepH, socKwh[t] * 1000, powerKw[t] * 1000,
+      priceFc[t], feedIn, pvW, consumW,
+      cfg.rte, degradCost, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
+    );
+    baseline += calculateStepCost(
+      stepH, socKwh[t] * 1000, 0,
+      priceFc[t], feedIn, pvW, consumW,
+      cfg.rte, 0, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
+    );
+  }
+  return { total, baseline };
+}
+
+function runOptimizer(cfg, currentSocKwh, inputs) {
+  const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost,
+          minPriceSpread, pvDcFc, terminalShadowPrice } = inputs;
+
+  const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
+                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice);
+  const { powerKw, modes, socKwh } = forwardPass(dp, cfg, currentSocKwh, pvDcFc);
+  const shadow = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);
+  const { total, baseline } = computeTotalCost(powerKw, socKwh, inputs, cfg);
+
+  return {
+    powerKw, modes, socKwh,
+    totalCost: total, baselineCost: baseline, savings: baseline - total,
+    shadowPrice: shadow, terminalPrice: dp.terminalPrice,
+    nSocStates: dp.socStates.length, powerStepW: dp.powerStepW, socResWh: dp.socResWh,
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// CHART HELPERS
+// ══════════════════════════════════════════════════════════════════
+const charts = {};
+function mkChart(id, config) {
+  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+  const ctx = document.getElementById(id).getContext('2d');
+  charts[id] = new Chart(ctx, config);
+}
+
+function timeLabels(n, startIso, stepH) {
+  const labels = [];
+  let d = startIso ? new Date(startIso) : new Date();
+  d.setSeconds(0, 0);
+  for (let i = 0; i < n; i++) {
+    labels.push(d.toLocaleTimeString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+    d = new Date(d.getTime() + (stepH || 0.25) * 3600000);
+  }
+  return labels;
+}
+
+function modeBarColors(modes) {
+  return modes.map(m =>
+    m === 'charging'    ? 'rgba(59,130,246,0.75)'
+    : m === 'discharging'? 'rgba(249,115,22,0.75)'
+    : 'rgba(156,163,175,0.4)');
+}
+
+function chartSchedule(id, powerKw, modes, socKwh, labels) {
+  mkChart(id, {
+    data: {
+      labels,
+      datasets: [
+        { type:'bar',  label:'Power (kW)',  data: powerKw,               backgroundColor: modeBarColors(modes), yAxisID:'y',  order:2 },
+        { type:'line', label:'SoC (kWh)',   data: socKwh.slice(0, powerKw.length),
+          borderColor:'#14b8a6', borderWidth:2, pointRadius:0, fill:false, tension:0.3, yAxisID:'y2', order:1 },
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top'}, tooltip:{mode:'index'} },
+      scales:{
+        y:  { title:{display:true,text:'Power (kW)'}, grid:{color:'rgba(0,0,0,0.04)'} },
+        y2: { title:{display:true,text:'SoC (kWh)'}, position:'right', grid:{display:false} },
+        x:  { ticks:{ maxTicksLimit:12 } }
+      }
+    }
+  });
+}
+
+function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels, priceMdl) {
+  // Background highlighting for charge/discharge steps
+  const buyData  = priceFc;
+  const feedData = feedInFc || priceFc;
+  const shadowLine = shadowPrice ? new Array(priceFc.length).fill(shadowPrice) : null;
+  const datasets = [
+    { label:'Buy (€/kWh)',    data:buyData,  borderColor:'#8b5cf6', borderWidth:2, pointRadius:0, tension:0.3 },
+    { label:'Feed-in (€/kWh)',data:feedData, borderColor:'#22c55e', borderWidth:2, pointRadius:0, tension:0.3, borderDash:[4,2] },
+  ];
+  if (priceMdl && priceMdl.length > 0)
+    datasets.push({ label:'Price model (historical)', data:priceMdl, borderColor:'#94a3b8', borderWidth:1.5, pointRadius:0, borderDash:[3,3], tension:0.3 });
+  if (shadowLine) datasets.push({ label:'Shadow price λ', data:shadowLine, borderColor:'#f59e0b', borderWidth:1.5, pointRadius:0, borderDash:[6,3] });
+  mkChart(id, {
+    type:'line', data:{ labels, datasets },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top'}, tooltip:{mode:'index'} },
+      scales:{ y:{title:{display:true,text:'€/kWh'}, grid:{color:'rgba(0,0,0,0.04)'}}, x:{ticks:{maxTicksLimit:12}} }
+    }
+  });
+}
+
+function chartPv(id, pvFc, consumFc, pvDcFc, labels) {
+  const net = pvFc.map((v,i) => v - (consumFc[i]||0));
+  const datasets = [
+    { label:'PV AC (kW)',      data:pvFc,   borderColor:'#eab308', backgroundColor:'rgba(234,179,8,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 },
+    { label:'Consumption (kW)',data:consumFc,borderColor:'#ef4444', borderWidth:2, pointRadius:0, tension:0.3 },
+    { label:'Net (PV−consump)',data:net,    borderColor:'#3b82f6', borderWidth:1.5, pointRadius:0, borderDash:[4,2], tension:0.3 },
+  ];
+  if (pvDcFc && pvDcFc.some(v => v > 0))
+    datasets.push({ label:'PV DC (kW)', data:pvDcFc, borderColor:'#f97316', borderWidth:1.5, pointRadius:0, borderDash:[2,2], tension:0.3 });
+  mkChart(id, {
+    type:'line', data:{ labels, datasets },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{position:'top'}, tooltip:{mode:'index'} },
+      scales:{ y:{title:{display:true,text:'kW'}, grid:{color:'rgba(0,0,0,0.04)'}}, x:{ticks:{maxTicksLimit:12}} }
+    }
+  });
+}
+
+function chartCosts(id, baseline, total) {
+  const savings = baseline - total;
+  mkChart(id, {
+    type:'bar',
+    data:{
+      labels:['Without battery','With optimizer','Savings'],
+      datasets:[{ data:[baseline,total,savings],
+        backgroundColor:['rgba(107,114,128,0.6)','rgba(59,130,246,0.7)','rgba(34,197,94,0.7)'],
+        borderRadius:6 }]
+    },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:c=>`€ ${c.raw.toFixed(5)}`}} },
+      scales:{ y:{title:{display:true,text:'€ (horizon)'}, grid:{color:'rgba(0,0,0,0.04)'}} }
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TIPS ENGINE
+// ══════════════════════════════════════════════════════════════════
+function generateTips(d) {
+  const bc   = d.battery_config || {};
+  const opt  = d.optimization   || {};
+  const bs   = opt.battery_state || {};
+  const sched= opt.schedule      || {};
+  const fc   = d.forecast        || {};
+  const opts = d.config_entry?.options || {};
+  const tips = [];
+
+  const rte     = bc.round_trip_efficiency || 0.9;
+  const sqrtRte = Math.sqrt(rte);
+  const degrad  = opts.degradation_cost_per_kwh || 0.03;
+  const spread  = opts.min_price_spread         || 0.05;
+  const savings = opt.savings   || 0;
+  const baseline= opt.baseline_cost || 0;
+  const savPct  = baseline > 0 ? savings / baseline * 100 : 0;
+  const prices  = sched.price_forecast || [];
+  const maxP    = prices.length > 0 ? Math.max(...prices) : 0;
+  const minP    = prices.length > 0 ? Math.min(...prices) : 0;
+  const actualSpread = maxP - minP;
+  const minArb  = (2 * degrad + spread) / sqrtRte;
+
+  // 0. Failure reason
+  if (opt.failure_reason) {
+    tips.push({ t:'err', title:'Optimization coordinator failed',
+      text:`Last failure: <code>${opt.failure_reason}</code><br>The optimizer may be running on stale data.
+      Check Home Assistant logs for details and resolve the underlying error.`});
+  }
+
+  // 0b. Price forecast source
+  const priceSrc = opt.price_forecast_source || '';
+  if (priceSrc === 'current_only') {
+    tips.push({ t:'err', title:'Price forecast is current price only — no future prices',
+      text:`Price forecast source: <b>current_only</b>. The optimizer only has the current price,
+      not a multi-hour forecast. This severely limits arbitrage scheduling.<br>
+      Fix: connect a dynamic price sensor (Nordpool, ENTSO-E, or an entity that exposes a list/forecast).`});
+  } else if (priceSrc === 'historical_model') {
+    tips.push({ t:'warn', title:'Price forecast using historical model (no live data)',
+      text:`Price forecast source: <b>historical_model</b>. No live price sensor is connected —
+      the optimizer uses a learned daily pattern instead of actual tariff data.
+      For dynamic tariffs, connect a Nordpool / ENTSO-E sensor for better results.`});
+  } else if (priceSrc === 'live+historical_model') {
+    tips.push({ t:'info', title:'Price forecast: live + historical model fill',
+      text:`Live price data is available but not covering the full horizon — the historical model fills the gap.
+      This is normal for day-ahead prices before they publish (usually afternoon).`});
+  }
+
+  // 1. RTE
+  if (rte < 0.82) {
+    tips.push({ t:'err', title:'Very low round-trip efficiency (RTE)',
+      text:`RTE = ${(rte*100).toFixed(0)}%. Energy loss per cycle is ${((1-rte)*100).toFixed(0)}%.
+      This makes arbitrage much harder to be profitable. Check inverter settings, cable quality,
+      and battery health. LFP typical: 93–96%, NMC: 89–93%.`});
+  } else if (rte < 0.88) {
+    tips.push({ t:'warn', title:'Below-average round-trip efficiency',
+      text:`RTE = ${(rte*100).toFixed(0)}%. Could be accurate (older battery, warm conditions)
+      but worth verifying. Check manufacturer specs vs measured values.`});
+  } else if (rte > 0.98) {
+    tips.push({ t:'warn', title:'Unrealistically high RTE',
+      text:`RTE = ${(rte*100).toFixed(0)}% is above typical maximum. This will cause the optimizer to overestimate savings. Typical max is 96–97%.`});
+  }
+
+  // 2. Price spread vs minimum needed
+  if (prices.length > 0) {
+    if (actualSpread < minArb) {
+      tips.push({ t:'warn', title:'Price spread below arbitrage threshold',
+        text:`Forecast spread: ${(actualSpread*100).toFixed(1)} ct/kWh.
+        Minimum needed for profitable arbitrage: ${(minArb*100).toFixed(1)} ct/kWh
+        (2×degradation + min_price_spread, divided by √RTE).
+        The optimizer correctly schedules idle. If your real tariff has higher peaks,
+        check if your price sensor is up-to-date.`});
+    } else {
+      const margin = actualSpread - minArb;
+      tips.push({ t:'ok', title:'Price spread sufficient for arbitrage',
+        text:`Spread ${(actualSpread*100).toFixed(1)} ct/kWh vs minimum ${(minArb*100).toFixed(1)} ct/kWh.
+        Margin: ${(margin*100).toFixed(1)} ct. Potential max profit per full cycle: €${(margin*(bc.max_soc_kwh||0)-(bc.min_soc_kwh||0)).toFixed(3)}.`});
+    }
+  }
+
+  // 3. Min price spread setting
+  if (spread > 0.12) {
+    tips.push({ t:'warn', title:'min_price_spread is high',
+      text:`Set to ${(spread*100).toFixed(0)} ct/kWh. This aggressively blocks arbitrage — any charge/discharge
+      pair with a spread below ${(minArb*100).toFixed(1)} ct is suppressed.
+      Consider reducing to 3–5 ct if your forecast is accurate.`});
+  }
+
+  // 4. Control mode
+  const mode = opt.control_mode || '';
+  if (mode === 'manual') {
+    tips.push({ t:'err', title:'Manual mode: optimizer is disabled',
+      text:`The battery is being controlled manually. Automatic cost optimization is off.
+      Switch to follow_schedule, hybrid, or zero_grid in integration options.`});
+  }
+  if (mode === 'follow_schedule') {
+    tips.push({ t:'info', title:'Consider switching to hybrid mode',
+      text:`follow_schedule mode executes the DP schedule exactly. Hybrid mode additionally applies
+      real-time zero-grid balancing between optimization runs, which handles unexpected
+      PV/consumption swings. Recommended for variable households.`});
+  }
+
+  // 5. Feed-in sensor
+  const hasFeedInSensor = opts.feed_in_price_sensor && !String(opts.feed_in_price_sensor).includes('REDACTED') && opts.feed_in_price_sensor !== '';
+  const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
+  if (!hasFeedInSensor) {
+    tips.push({ t:'info', title:'No live feed-in price sensor',
+      text:`Feed-in tariff uses fixed fallback: €${fixedFeedIn.toFixed(3)}/kWh.
+      If your energy contract has a dynamic feed-in tariff (e.g. Nordpool-linked),
+      connecting a sensor improves PV and export timing decisions.`});
+  }
+
+  // 6. SoC boundary hits
+  const socVals = sched.soc_schedule_kwh || [];
+  const maxSoc  = bc.max_soc_kwh || Infinity;
+  const minSoc  = bc.min_soc_kwh || 0;
+  if (socVals.length > 2) {
+    const atMax = socVals.filter(s => s >= maxSoc - 0.15).length / socVals.length;
+    const atMin = socVals.filter(s => s <= minSoc + 0.15).length / socVals.length;
+    if (atMax > 0.4) {
+      tips.push({ t:'info', title:`Battery at max SoC ${(atMax*100).toFixed(0)}% of the time`,
+        text:`Frequent saturation may indicate: (1) PV production exceeds battery capacity,
+        (2) max_soc_percent too conservative, or (3) not enough discharge windows to make room.`});
+    }
+    if (atMin > 0.35) {
+      tips.push({ t:'info', title:`Battery at minimum SoC ${(atMin*100).toFixed(0)}% of the time`,
+        text:`Battery is frequently depleted. Could indicate undersized capacity vs discharge demand,
+        or min_soc_percent too high. Consider whether this is intentional (backup reserve) or not.`});
+    }
+  }
+
+  // 7. All idle
+  const modes = sched.mode_schedule || [];
+  if (modes.length > 0 && modes.every(m => m === 'idle')) {
+    tips.push({ t:'warn', title:'Entire schedule is idle — no arbitrage scheduled',
+      text:`The optimizer finds no profitable charge/discharge opportunities.
+      Check: (1) price spread vs threshold above, (2) freshness of price sensor,
+      (3) min_price_spread setting, (4) battery may already be at optimal SoC.`});
+  }
+
+  // 8. Stale optimization
+  const ts = opt.timestamp;
+  if (ts) {
+    const ageMin = (Date.now() - new Date(ts)) / 60000;
+    if (ageMin > 60) {
+      tips.push({ t:'err', title:`Optimization data is ${ageMin.toFixed(0)} minutes old`,
+        text:`Expected refresh every 15 minutes. Check if Home Assistant and the integration
+        are running. Possible issues: HA restart, coordinator error, or connection problem.`});
+    }
+  }
+
+  // 9. DC-coupled PV
+  if (bc.pv_dc_coupled) {
+    const dcEff = bc.pv_dc_efficiency || 0;
+    if (dcEff < 0.93) {
+      tips.push({ t:'warn', title:'Low DC PV efficiency configured',
+        text:`DC efficiency = ${(dcEff*100).toFixed(0)}%. Expected 95–98% for modern MPPT charge controllers.
+        Low value may cause optimizer to undervalue DC PV, reducing self-consumption efficiency.`});
+    }
+  } else {
+    tips.push({ t:'info', title:'AC-coupled PV',
+      text:`AC-coupled PV goes through inverter (~85% efficiency). DC-coupled PV (panels directly
+      on battery inverter) achieves ~97% and enables passive battery charging when idle —
+      consider DC coupling if your hardware supports it.`});
+  }
+
+  // 10. Savings summary
+  if (savings > 0 && baseline > 0) {
+    tips.push({ t:'ok', title:`Saving €${savings.toFixed(4)} over this horizon (${savPct.toFixed(1)}%)`,
+      text:`Extrapolated: ~€${(savings * 96).toFixed(2)}/day (assuming similar price pattern 24h).
+      Actual savings depend on price volatility throughout the day.`});
+  }
+
+  if (tips.filter(t => t.t !== 'ok').length === 0) {
+    tips.push({ t:'ok', title:'Configuration looks well-tuned', text:'No issues detected.' });
+  }
+  return tips;
+}
+
+function renderTips(tips) {
+  const el = document.getElementById('tips-container');
+  el.innerHTML = '';
+  const cls = { warn:'tip-warn', err:'tip-err', info:'tip-info', ok:'tip-ok' };
+  const icon = { warn:'⚠️', err:'🚨', info:'ℹ️', ok:'✅' };
+  tips.forEach(tip => {
+    const d = document.createElement('div');
+    d.className = `${cls[tip.t]} rounded-r-lg p-4`;
+    d.innerHTML = `<div class="font-semibold text-sm text-gray-800">${icon[tip.t]} ${tip.title}</div>
+      <div class="text-sm text-gray-600 mt-1 leading-relaxed">${tip.text}</div>`;
+    el.appendChild(d);
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SPREAD ANALYSIS
+// ══════════════════════════════════════════════════════════════════
+function renderSpreadAnalysis(bc, opts, prices) {
+  const rte    = bc.round_trip_efficiency || 0.9;
+  const sqrtRte= Math.sqrt(rte);
+  const degrad = opts.degradation_cost_per_kwh || 0.03;
+  if (!prices || prices.length === 0) return;
+  const minP   = Math.min(...prices);
+  const maxP   = Math.max(...prices);
+  const spread = maxP - minP;
+  const rteLoss= minP * (1/rte - 1);
+  const degLoss= 2 * degrad / sqrtRte;
+  const deltaMin= rteLoss + degLoss;
+  const profitable = spread >= deltaMin;
+
+  const el = document.getElementById('spread-analysis');
+  el.innerHTML = `
+    <div class="space-y-2 text-sm">
+      <div class="kv-row"><span class="kv-label">Forecast price range</span>
+        <span class="kv-value">${(minP*100).toFixed(1)} – ${(maxP*100).toFixed(1)} ct/kWh</span></div>
+      <div class="kv-row"><span class="kv-label">Actual spread</span>
+        <span class="kv-value font-semibold ${profitable?'text-green-700':'text-red-700'}">${(spread*100).toFixed(2)} ct/kWh</span></div>
+      <div class="kv-row"><span class="kv-label">RTE energy loss</span><span class="kv-value">${(rteLoss*100).toFixed(2)} ct/kWh</span></div>
+      <div class="kv-row"><span class="kv-label">Degradation (2×/√RTE)</span><span class="kv-value">${(degLoss*100).toFixed(2)} ct/kWh</span></div>
+      <div class="kv-row"><span class="kv-label">Minimum Δ required</span>
+        <span class="kv-value font-bold">${(deltaMin*100).toFixed(2)} ct/kWh</span></div>
+      <div class="mt-2 p-2 rounded-lg ${profitable?'bg-green-50 text-green-800':'bg-red-50 text-red-800'} text-xs font-medium">
+        ${profitable
+          ? `✓ PROFITABLE — margin ${((spread-deltaMin)*100).toFixed(2)} ct/kWh · max cycle profit €${((spread-deltaMin)*(bc.max_soc_kwh||10)).toFixed(3)}`
+          : `✗ NOT PROFITABLE — shortfall ${((deltaMin-spread)*100).toFixed(2)} ct/kWh`}
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs border-collapse">
+        <thead><tr class="bg-gray-50 text-gray-600">
+          <th class="border border-gray-200 px-2 py-1">Buy price</th>
+          <th class="border border-gray-200 px-2 py-1">Δ_min</th>
+          <th class="border border-gray-200 px-2 py-1">Min sell price</th>
+          <th class="border border-gray-200 px-2 py-1">Achievable?</th>
+        </tr></thead>
+        <tbody>
+          ${[minP, 0.10, 0.15, 0.20, 0.25, maxP].filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>a-b).map(p=>{
+            const d = p*(1/rte-1) + 2*degrad/sqrtRte;
+            const ok = maxP >= p+d;
+            return `<tr class="${ok?'':'bg-red-50'}">
+              <td class="border border-gray-200 px-2 py-1">${(p*100).toFixed(1)} ct</td>
+              <td class="border border-gray-200 px-2 py-1">${(d*100).toFixed(2)} ct</td>
+              <td class="border border-gray-200 px-2 py-1">${((p+d)*100).toFixed(2)} ct</td>
+              <td class="border border-gray-200 px-2 py-1 font-medium ${ok?'text-green-700':'text-red-700'}">${ok?'✓':'✗'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PROFITABILITY TABLE
+// ══════════════════════════════════════════════════════════════════
+function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, modes, socKwh, stepTimes, bc, opts, terminalPrice) {
+  const rte    = bc.round_trip_efficiency || 0.9;
+  const sqrtRte= Math.sqrt(rte);
+  const degrad = opts.degradation_cost_per_kwh || 0.03;
+  const breakeven = (terminalPrice + degrad) / sqrtRte;
+  const breakevenChg = (terminalPrice - degrad) * sqrtRte;
+
+  document.getElementById('terminal-price-label').textContent    = terminalPrice.toFixed(4);
+  document.getElementById('breakeven-discharge-label').textContent= breakeven.toFixed(4);
+  document.getElementById('breakeven-charge-label').textContent   = breakevenChg.toFixed(4);
+
+  const tbody = document.getElementById('profitability-table');
+  tbody.innerHTML = '';
+  const n = Math.min(prices.length, powerKw.length);
+  for (let t = 0; t < n; t++) {
+    const price  = prices[t];
+    const feedIn = feedInFc && feedInFc[t] !== undefined ? feedInFc[t] : price;
+    const pv     = pvFc    && pvFc[t]    !== undefined ? pvFc[t]    : 0;
+    const cons   = consumFc && consumFc[t] !== undefined ? consumFc[t] : 0;
+    const pvSurplus = pv - cons;
+    const effChargePrice = pvSurplus > MIN_PV_SURPLUS_KW ? feedIn : price;
+    const chgProfit  = terminalPrice - effChargePrice / sqrtRte - degrad;
+    const discProfit = price * sqrtRte - terminalPrice - degrad;
+    const mode = modes[t] || 'idle';
+    const soc  = socKwh[t] || 0;
+    const pw   = powerKw[t] || 0;
+    const timeStr = stepTimes && stepTimes[t]
+      ? (stepTimes[t].includes('T') ? stepTimes[t].slice(5,16).replace('T',' ') : stepTimes[t])
+      : `step ${t}`;
+
+    const isMissedDischarge = discProfit > 0 && mode !== 'discharging';
+    let rowClass = '';
+    if (mode === 'charging')    rowClass = 'row-charge';
+    else if (mode === 'discharging') rowClass = 'row-discharge';
+    else if (isMissedDischarge) rowClass = 'bg-red-50';
+
+    const tr = document.createElement('tr');
+    tr.className = `${rowClass} border-b border-gray-100 text-right`;
+    tr.innerHTML = `
+      <td class="border border-gray-200 px-2 py-0.5 text-left text-gray-500">${t}</td>
+      <td class="border border-gray-200 px-2 py-0.5 text-left text-gray-500 whitespace-nowrap">${timeStr}</td>
+      <td class="border border-gray-200 px-2 py-0.5">${(price*100).toFixed(2)}ct</td>
+      <td class="border border-gray-200 px-2 py-0.5">${(feedIn*100).toFixed(2)}ct</td>
+      <td class="border border-gray-200 px-2 py-0.5">${pv.toFixed(2)}</td>
+      <td class="border border-gray-200 px-2 py-0.5">${cons.toFixed(2)}</td>
+      <td class="border border-gray-200 px-2 py-0.5 font-medium ${pw>0?'text-blue-700':pw<0?'text-orange-700':'text-gray-400'}">${pw>0?'+':''}${pw.toFixed(3)}</td>
+      <td class="border border-gray-200 px-2 py-0.5"><span class="badge badge-${mode}">${mode}</span></td>
+      <td class="border border-gray-200 px-2 py-0.5">${soc.toFixed(3)}</td>
+      <td class="border border-gray-200 px-2 py-0.5 font-medium ${discProfit>0?'text-green-700':'text-red-700'}">${discProfit>=0?'+':''}${(discProfit*100).toFixed(2)}ct</td>
+      <td class="border border-gray-200 px-2 py-0.5 font-medium ${chgProfit>0?'text-green-700':'text-gray-400'}">${chgProfit>=0?'+':''}${(chgProfit*100).toFixed(2)}ct</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// DIAGNOSTICS RENDERER
+// ══════════════════════════════════════════════════════════════════
+function kv(label, value) {
+  return `<div class="kv-row"><span class="kv-label">${label}</span><span class="kv-value">${value ?? '—'}</span></div>`;
+}
+function badge(text, cls) { return `<span class="badge badge-${cls}">${text}</span>`; }
+
+function renderDiagnostics(raw) {
+  // Support both wrapped {"home_assistant":...,"data":{...}} and bare {"battery_config":...}
+  const d = raw.data || raw;
+
+  const bc   = d.battery_config || {};
+  const opt  = d.optimization   || {};
+  const bs   = opt.battery_state || {};
+  const sched= opt.schedule      || {};
+  const fc   = d.forecast        || {};
+  const wx   = d.weather         || {};
+  const opts = d.config_entry?.options || {};
+
+  // ── Summary bar
+  const socPct = bs.soc_percent || 0;
+  document.getElementById('s-soc').textContent     = `${socPct.toFixed(1)}%`;
+  document.getElementById('s-soc-kwh').textContent = bs.soc_kwh !== undefined ? `${bs.soc_kwh.toFixed(3)} kWh` : '';
+  const modeEl = document.getElementById('s-mode');
+  modeEl.innerHTML = bs.mode ? badge(bs.mode, bs.mode) : '—';
+  document.getElementById('s-power').textContent   = bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '';
+  const savings = opt.savings || 0;
+  const base = opt.baseline_cost || 0;
+  document.getElementById('s-savings').textContent    = `€ ${savings.toFixed(4)}`;
+  document.getElementById('s-savings-pct').textContent= base > 0 ? `${(savings/base*100).toFixed(1)}% vs baseline` : '';
+  // Shadow price: use directly from diagnostics if present, else compute after DP re-run
+  if (opt.shadow_price_eur_kwh !== undefined && opt.shadow_price_eur_kwh !== null) {
+    document.getElementById('s-shadow').textContent = `€ ${opt.shadow_price_eur_kwh.toFixed(4)}/kWh`;
+  } else {
+    document.getElementById('s-shadow').textContent = '—';
+  }
+  document.getElementById('s-ctrl').textContent       = opt.control_mode || '—';
+  document.getElementById('s-ts').textContent         = opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '';
+
+  // ── Config cards
+  document.getElementById('cfg-hw').innerHTML =
+    kv('Capacity', `${bc.capacity_kwh?.toFixed(2)} kWh`) +
+    kv('Usable capacity', `${bc.usable_capacity_kwh?.toFixed(2)} kWh`) +
+    kv('Min SoC', `${bc.min_soc_percent?.toFixed(0)}% · ${bc.min_soc_kwh?.toFixed(2)} kWh`) +
+    kv('Max SoC', `${bc.max_soc_percent?.toFixed(0)}% · ${bc.max_soc_kwh?.toFixed(2)} kWh`) +
+    kv('Max charge', `${bc.max_charge_power_kw?.toFixed(2)} kW`) +
+    kv('Max discharge', `${bc.max_discharge_power_kw?.toFixed(2)} kW`);
+
+  document.getElementById('cfg-eff').innerHTML =
+    kv('Round-trip efficiency', `${((bc.round_trip_efficiency||0)*100).toFixed(1)}%`) +
+    kv('Charge eff (√RTE)', `${((bc.charge_efficiency||0)*100).toFixed(2)}%`) +
+    kv('Discharge eff (√RTE)', `${((bc.discharge_efficiency||0)*100).toFixed(2)}%`) +
+    kv('Degradation cost', opts.degradation_cost_per_kwh !== undefined ? `€ ${opts.degradation_cost_per_kwh}/kWh` : '—') +
+    kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
+    kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
+
+  const srcBadge = opt.price_forecast_source
+    ? `<span class="badge ${opt.price_forecast_source==='live'?'badge-ok':opt.price_forecast_source==='current_only'?'badge-fail':'badge-idle'}">${opt.price_forecast_source}</span>`
+    : '—';
+  const discThr = opt.discharge_threshold_eur_kwh;
+  const chgThr  = opt.charge_threshold_eur_kwh;
+  document.getElementById('cfg-pv').innerHTML =
+    kv('PV coupling', bc.pv_dc_coupled ? 'DC-coupled' : 'AC-coupled') +
+    (bc.pv_dc_coupled ? kv('DC peak power', `${bc.pv_dc_peak_power_kwp?.toFixed(2)} kWp`) : '') +
+    (bc.pv_dc_coupled ? kv('DC efficiency', `${((bc.pv_dc_efficiency||0)*100).toFixed(1)}%`) : '') +
+    kv('Control mode', opt.control_mode || '—') +
+    kv('Price forecast source', srcBadge) +
+    kv('Time step', opts.time_step_minutes ? `${opts.time_step_minutes} min` : '—') +
+    kv('Current price', opt.current_price !== undefined ? `€ ${opt.current_price.toFixed(4)}/kWh` : '—') +
+    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+    kv('Discharge threshold (λ·√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
+    kv('Charge threshold (λ/√RTE)', chgThr !== undefined ? `€ ${chgThr.toFixed(4)}/kWh` : '—') +
+    kv('Optimal action', opt.optimal_mode ? `${opt.optimal_mode} @ ${opt.optimal_power_kw?.toFixed(3)} kW` : '—');
+
+  // ── Coordinator status
+  const failureHtml = opt.failure_reason
+    ? `<div class="mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">⚠ ${opt.failure_reason}</div>` : '';
+  document.getElementById('coord-status').innerHTML = `
+    ${kv('Weather coordinator', `<span class="badge ${wx.last_update_success?'badge-ok':'badge-fail'}">${wx.last_update_success?'OK':'Failed'}</span>`)}
+    ${kv('Weather timestamp', wx.timestamp ? new Date(wx.timestamp).toLocaleString() : '—')}
+    ${kv('Forecast coordinator', `<span class="badge ${fc.last_update_success?'badge-ok':'badge-fail'}">${fc.last_update_success?'OK':'Failed'}</span>`)}
+    ${kv('Forecast timestamp', fc.timestamp ? new Date(fc.timestamp).toLocaleString() : '—')}
+    ${kv('Optimization coordinator', `<span class="badge ${opt.last_update_success?'badge-ok':'badge-fail'}">${opt.last_update_success?'OK':'Failed'}</span>`)}
+    ${kv('Optimization timestamp', opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '—')}
+    ${kv('GHI (irradiance)', fc.current_ghi_wm2 !== undefined ? `${fc.current_ghi_wm2} W/m²` : '—')}
+    ${kv('Wind speed', fc.current_wind_speed_ms !== undefined ? `${fc.current_wind_speed_ms} m/s` : '—')}
+    ${failureHtml}`;
+
+  document.getElementById('current-values').innerHTML =
+    kv('PV AC production', `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
+    kv('PV DC production', `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
+    kv('Consumption', `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +
+    kv('Net load', `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
+    kv('Battery SoC', `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
+    kv('Battery power', bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
+    kv('Battery mode', bs.mode ? badge(bs.mode, bs.mode) : '—') +
+    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+    // Per-array PV breakdown
+    (() => {
+      const arrays = fc.per_pv_array_forecasts || {};
+      const keys = Object.keys(arrays);
+      if (keys.length < 2) return '';
+      return keys.map(k => kv(`PV array ${k.slice(0,8)}… now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
+    })();
+
+  // ── Charts
+  const prices    = sched.price_forecast || [];
+  const feedInFc  = sched.feed_in_price_forecast || null; // new field; null = use buy price
+  const pvFc      = sched.pv_forecast_kw || sched.pv_forecast || fc.pv_forecast_kw || [];
+  const consumFc  = sched.consumption_forecast_kw || sched.consumption_forecast || fc.consumption_forecast_kw || [];
+  const pvDcFc    = fc.pv_dc_forecast_kw || [];
+  const powerKw   = sched.power_schedule_kw || [];
+  const modes     = sched.mode_schedule    || [];
+  const socKwh    = sched.soc_schedule_kwh || [];
+  const priceMdl  = sched.price_forecast_model || null;
+
+  // Step timing: prefer new schedule fields, fall back to entity attributes
+  let resolvedStepTimes = sched.step_start_times_iso || [];
+  let resolvedStepDurs  = sched.step_durations_hours  || [];
+  if ((!resolvedStepTimes.length || !resolvedStepDurs.length) && d.entities) {
+    for (const ent of d.entities) {
+      const attrs = ent.attributes || {};
+      if (!resolvedStepTimes.length && attrs.step_start_times_iso) resolvedStepTimes = attrs.step_start_times_iso;
+      if (!resolvedStepDurs.length  && attrs.step_durations_hours) resolvedStepDurs  = attrs.step_durations_hours;
+      if (resolvedStepTimes.length && resolvedStepDurs.length) break;
+    }
+  }
+
+  const startIso = resolvedStepTimes[0] || wx.forecast_start_utc || opt.timestamp;
+  const stepH    = resolvedStepDurs[0]  || 0.25;
+  const labels   = resolvedStepTimes.length > 0
+    ? resolvedStepTimes.map(t => t.includes('T') ? t.slice(5,16).replace('T',' ') : t)
+    : timeLabels(prices.length, startIso, stepH);
+
+  if (powerKw.length > 0) chartSchedule('chart-schedule', powerKw, modes, socKwh, labels);
+  if (prices.length   > 0) {
+    const shadowForChart = opt.shadow_price_eur_kwh ?? null;
+    chartPrices('chart-prices', prices, feedInFc, shadowForChart, modes, labels, priceMdl);
+  }
+  if (pvFc.length > 0 || consumFc.length > 0) chartPv('chart-pv', pvFc, consumFc, pvDcFc, labels);
+  if (opt.total_cost !== undefined) {
+    chartCosts('chart-costs', opt.baseline_cost || 0, opt.total_cost || 0);
+    const totalH = resolvedStepDurs.length
+      ? resolvedStepDurs.reduce((a, b) => a + b, 0)
+      : prices.length * stepH;
+    document.getElementById('cost-details').innerHTML = `
+      <div class="text-xs space-y-1">
+        ${kv('Baseline (no battery)', `€ ${(opt.baseline_cost||0).toFixed(5)}`)}
+        ${kv('Optimized total cost', `€ ${(opt.total_cost||0).toFixed(5)}`)}
+        ${kv('Savings', `<span class="text-green-600 font-bold">€ ${(opt.savings||0).toFixed(5)}</span>`)}
+        ${kv('Horizon', `${totalH.toFixed(1)} h (${prices.length} steps)`)}
+      </div>`;
+  }
+
+  // ── Profitability table: re-run DP with actual feed-in forecast if available
+  if (prices.length > 0) {
+    const cfg2 = {
+      rte: bc.round_trip_efficiency || 0.9,
+      minSocKwh: bc.min_soc_kwh || 0,
+      maxSocKwh: bc.max_soc_kwh || 10,
+      maxChargeKw: bc.max_charge_power_kw || 5,
+      maxDischargeKw: bc.max_discharge_power_kw || 5,
+      pvDcCoupled: bc.pv_dc_coupled || false,
+      pvDcEfficiency: bc.pv_dc_efficiency || 0.97,
+      maxGridPowerKw: opts.max_grid_power_kw || 0,
+    };
+    const feedInForDp = feedInFc || prices;
+    const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, feedInForDp,
+      pvFc.length ? pvFc : new Array(prices.length).fill(0),
+      consumFc.length ? consumFc : new Array(prices.length).fill(0),
+      resolvedStepDurs.length ? resolvedStepDurs : null,
+      opts.degradation_cost_per_kwh || 0.03, opts.min_price_spread || 0.05,
+      null, sched.terminal_shadow_price ?? null);
+    // Use shadow price from diagnostics if available; otherwise compute from V
+    if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
+      const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
+      document.getElementById('s-shadow').textContent = `€ ${shadow.toFixed(4)}/kWh`;
+    }
+    renderProfitabilityTable(prices, feedInForDp, pvFc, consumFc, powerKw, modes, socKwh,
+      resolvedStepTimes, bc, opts, dp2.terminalPrice);
+    renderSpreadAnalysis(bc, opts, prices);
+  }
+
+  // ── Entity table
+  const entTbody = document.getElementById('entities-table');
+  entTbody.innerHTML = '';
+  (d.entities || []).forEach(ent => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-gray-100 hover:bg-gray-50';
+    const attrsStr = Object.entries(ent.attributes || {})
+      .filter(([k]) => !['step_start_times_iso','step_durations_hours','power_schedule_kw','soc_schedule_kwh','mode_schedule'].includes(k))
+      .map(([k,v]) => `<span class="mr-2 text-gray-400">${k}: <span class="text-gray-700">${typeof v === 'object' ? JSON.stringify(v).slice(0,40) : String(v).slice(0,40)}</span></span>`)
+      .join('');
+    tr.innerHTML = `
+      <td class="border border-gray-200 px-2 py-1 font-mono">${ent.entity_id || '—'}</td>
+      <td class="border border-gray-200 px-2 py-1 font-medium">${ent.state ?? '—'}</td>
+      <td class="border border-gray-200 px-2 py-1 text-xs">${attrsStr || '—'}</td>`;
+    entTbody.appendChild(tr);
+  });
+
+  // ── Tips
+  renderTips(generateTips(d));
+
+  // ── Pre-fill simulator
+  prefillSim(d);
+  document.getElementById('sim-load-diag').classList.remove('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  document.getElementById('header-status').textContent = '✓ Diagnostics loaded';
+  document.getElementById('header-status').classList.remove('hidden');
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SIMULATOR UI
+// ══════════════════════════════════════════════════════════════════
+function addFcRow(price=0.15, feedIn=0.07, pv=0, consump=1.5, idx=null) {
+  const tbody = document.getElementById('sim-fc-body');
+  const n = idx !== null ? idx : tbody.rows.length;
+  const tr = document.createElement('tr');
+  tr.className = 'border-b border-gray-100';
+  tr.innerHTML = `
+    <td class="border border-gray-200 px-1 py-0 text-center text-gray-400 select-none">${n+1}</td>
+    <td class="border border-gray-200 fc-cell"><input type="number" value="${price.toFixed(4)}" step="0.001" class="focus:bg-blue-50"></td>
+    <td class="border border-gray-200 fc-cell"><input type="number" value="${feedIn.toFixed(4)}" step="0.001" class="focus:bg-green-50"></td>
+    <td class="border border-gray-200 fc-cell"><input type="number" value="${pv.toFixed(3)}"   step="0.01"  class="focus:bg-yellow-50"></td>
+    <td class="border border-gray-200 fc-cell"><input type="number" value="${consump.toFixed(3)}" step="0.01" class="focus:bg-red-50"></td>
+    <td class="border border-gray-200 px-1 py-0 text-center">
+      <button onclick="this.closest('tr').remove();renumberFcRows()" class="text-red-300 hover:text-red-600 text-xs leading-none">✕</button>
+    </td>`;
+  tbody.appendChild(tr);
+}
+
+function renumberFcRows() {
+  const rows = document.getElementById('sim-fc-body').rows;
+  for (let i = 0; i < rows.length; i++) rows[i].cells[0].textContent = i+1;
+}
+
+function getFcRows() {
+  const rows  = document.getElementById('sim-fc-body').rows;
+  const price=[], feedIn=[], pv=[], consump=[];
+  for (const row of rows) {
+    const inp = row.querySelectorAll('input');
+    price.push(parseFloat(inp[0].value)  || 0);
+    feedIn.push(parseFloat(inp[1].value) || 0);
+    pv.push(parseFloat(inp[2].value)     || 0);
+    consump.push(parseFloat(inp[3].value)|| 0);
+  }
+  return { price, feedIn, pv, consump };
+}
+
+function getSimParams() {
+  const g = id => parseFloat(document.getElementById(id).value) || 0;
+  const capacity  = g('sp-capacity');
+  const minSocPct = g('sp-min-soc');
+  const maxSocPct = g('sp-max-soc');
+  const rte       = g('sp-rte');
+  return {
+    rte,
+    minSocKwh:     capacity * minSocPct / 100,
+    maxSocKwh:     capacity * maxSocPct / 100,
+    maxChargeKw:   g('sp-charge-kw'),
+    maxDischargeKw:g('sp-discharge-kw'),
+    pvDcCoupled:   false,
+    pvDcEfficiency:0.97,
+    maxGridPowerKw:0,
+    currentSocKwh: g('sp-soc-kwh'),
+    degradation:   g('sp-degradation'),
+    minPriceSpread:g('sp-spread'),
+    stepH:         g('sp-step-h') || 0.25,
+    terminalShadowPrice: g('sp-terminal') || null,
+  };
+}
+
+function prefillSim(d) {
+  const bc   = d.battery_config || {};
+  const opt  = d.optimization   || {};
+  const bs   = opt.battery_state|| {};
+  const sched= opt.schedule     || {};
+  const fc   = d.forecast       || {};
+  const opts = d.config_entry?.options || {};
+  const set = (id, val) => { if (val !== undefined && val !== null) document.getElementById(id).value = val; };
+
+  set('sp-capacity',    bc.capacity_kwh);
+  set('sp-min-soc',     bc.min_soc_percent);
+  set('sp-max-soc',     bc.max_soc_percent);
+  set('sp-charge-kw',   bc.max_charge_power_kw);
+  set('sp-discharge-kw',bc.max_discharge_power_kw);
+  set('sp-rte',         bc.round_trip_efficiency);
+  set('sp-soc-kwh',     bs.soc_kwh);
+  set('sp-degradation', opts.degradation_cost_per_kwh);
+  set('sp-spread',      opts.min_price_spread);
+  let stepDursArr = sched.step_durations_hours || [];
+  if (!stepDursArr.length && d.entities) {
+    for (const ent of d.entities) {
+      const a = ent.attributes || {};
+      if (a.step_durations_hours) { stepDursArr = a.step_durations_hours; break; }
+    }
+  }
+  const stepH = stepDursArr[1] || stepDursArr[0] || (opts.time_step_minutes ? opts.time_step_minutes/60 : 0.25);
+  set('sp-step-h', stepH);
+
+  let prices = sched.price_forecast || [];
+  let pvFc   = sched.pv_forecast_kw || sched.pv_forecast || [];
+  let consumFc = sched.consumption_forecast_kw || sched.consumption_forecast || [];
+  // Also check entity attributes (schedule entity has richer data)
+  if (d.entities) {
+    for (const ent of d.entities) {
+      const a = ent.attributes || {};
+      if (!prices.length && a.price_forecast)         prices   = a.price_forecast;
+      if (!pvFc.length   && a.pv_forecast_kw)         pvFc     = a.pv_forecast_kw;
+      if (!consumFc.length && a.consumption_forecast_kw) consumFc = a.consumption_forecast_kw;
+      if (prices.length && pvFc.length && consumFc.length) break;
+    }
+  }
+  if (!pvFc.length)     pvFc     = fc.pv_forecast_kw  || [];
+  if (!consumFc.length) consumFc = fc.consumption_forecast_kw || [];
+
+  const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
+  const feedInFcSim = sched.feed_in_price_forecast || null;
+  if (prices.length > 0) {
+    document.getElementById('sim-fc-body').innerHTML = '';
+    for (let i = 0; i < prices.length; i++) {
+      const feedInVal = feedInFcSim && feedInFcSim[i] !== undefined ? feedInFcSim[i] : fixedFeedIn;
+      addFcRow(prices[i]||0.15, feedInVal, pvFc[i]||0, consumFc[i]||1.5);
+    }
+  }
+  // Pre-fill terminal shadow price from previous DP run (stored in schedule)
+  if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
+    set('sp-terminal', sched.terminal_shadow_price);
+  }
+}
+
+function runSimulator() {
+  const statusEl = document.getElementById('sim-status');
+  statusEl.textContent = 'Running…';
+  document.getElementById('sim-results').classList.add('hidden');
+
+  setTimeout(() => {
+    try {
+      const p   = getSimParams();
+      const { price, feedIn, pv, consump } = getFcRows();
+      if (price.length < 2) { statusEl.textContent = '⚠ Add at least 2 rows'; return; }
+
+      const stepH   = p.stepH || 0.25;
+      const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
+      const inputs  = {
+        priceFc: price, feedInFc: feedIn, pvFc: pv, consumFc: consump,
+        stepDurations: new Array(price.length).fill(stepH),
+        degradCost: p.degradation, minPriceSpread: p.minPriceSpread,
+        pvDcFc: null, terminalShadowPrice: termSP,
+      };
+
+      const t0  = performance.now();
+      const res = runOptimizer(p, p.currentSocKwh, inputs);
+      const ms  = (performance.now() - t0).toFixed(0);
+      statusEl.textContent = `Done in ${ms} ms · ${res.nSocStates} SoC states · ${res.powerStepW} W steps`;
+
+      // Cost summary
+      document.getElementById('sr-baseline').textContent = `€ ${res.baselineCost.toFixed(5)}`;
+      document.getElementById('sr-total').textContent    = `€ ${res.totalCost.toFixed(5)}`;
+      document.getElementById('sr-savings').textContent  = `€ ${res.savings.toFixed(5)}`;
+      document.getElementById('sr-shadow').textContent   = `€ ${res.shadowPrice.toFixed(4)}/kWh`;
+      document.getElementById('sr-terminal').textContent = `€ ${res.terminalPrice.toFixed(4)}/kWh`;
+
+      const labels = timeLabels(price.length, null, stepH);
+      chartSchedule('sim-chart-schedule', res.powerKw, res.modes, res.socKwh, labels);
+      chartPrices('sim-chart-prices', price, feedIn, res.shadowPrice, res.modes, labels);
+
+      // Schedule table
+      const tbody = document.getElementById('sim-result-table');
+      tbody.innerHTML = '';
+      const sqrtRte = Math.sqrt(p.rte);
+      const degrad  = p.degradation;
+      for (let t = 0; t < res.powerKw.length; t++) {
+        const feedIn2 = feedIn[t] || price[t];
+        const pvSurp  = (pv[t]||0) - (consump[t]||0);
+        const effCp   = pvSurp > MIN_PV_SURPLUS_KW ? feedIn2 : price[t];
+        const discP   = price[t] * sqrtRte - res.terminalPrice - degrad;
+        const chgP    = res.terminalPrice - effCp / sqrtRte - degrad;
+        const stepCost= calculateStepCost(
+          stepH, res.socKwh[t]*1000, res.powerKw[t]*1000, price[t], feedIn2,
+          (pv[t]||0)*1000, (consump[t]||0)*1000, p.rte, degrad,
+          false, 0, 0.97, 0, p.maxSocKwh * 1000
+        );
+        const mode = res.modes[t];
+        const tr = document.createElement('tr');
+        tr.className = `border-b border-gray-100 text-right ${mode==='charging'?'row-charge':mode==='discharging'?'row-discharge':''}`;
+        tr.innerHTML = `
+          <td class="border border-gray-200 px-2 py-0.5 text-center text-gray-500">${t+1}</td>
+          <td class="border border-gray-200 px-2 py-0.5 text-center"><span class="badge badge-${mode}">${mode}</span></td>
+          <td class="border border-gray-200 px-2 py-0.5 font-medium ${res.powerKw[t]>0?'text-blue-700':res.powerKw[t]<0?'text-orange-700':'text-gray-400'}">${res.powerKw[t]>0?'+':''}${res.powerKw[t].toFixed(3)}</td>
+          <td class="border border-gray-200 px-2 py-0.5">${res.socKwh[t].toFixed(3)}</td>
+          <td class="border border-gray-200 px-2 py-0.5">${(res.socKwh[t+1]||res.socKwh[t]).toFixed(3)}</td>
+          <td class="border border-gray-200 px-2 py-0.5">${(price[t]*100).toFixed(2)}ct</td>
+          <td class="border border-gray-200 px-2 py-0.5">${(feedIn2*100).toFixed(2)}ct</td>
+          <td class="border border-gray-200 px-2 py-0.5 font-medium ${stepCost<0?'text-green-600':stepCost>0.001?'text-red-600':'text-gray-400'}">€ ${stepCost.toFixed(5)}</td>
+          <td class="border border-gray-200 px-2 py-0.5 font-medium ${discP>0?'text-green-700':'text-red-700'}">${discP>=0?'+':''}${(discP*100).toFixed(2)}ct</td>
+          <td class="border border-gray-200 px-2 py-0.5 ${chgP>0?'text-green-700':'text-gray-400'}">${chgP>=0?'+':''}${(chgP*100).toFixed(2)}ct</td>`;
+        tbody.appendChild(tr);
+      }
+
+      // What-if table
+      const wbody = document.getElementById('sim-whatif-table');
+      wbody.innerHTML = '';
+      const maxP2 = Math.max(...price);
+      const tpActual = res.terminalPrice;
+      const testTPs = [0.04, 0.07, 0.10, tpActual, tpActual*0.8, tpActual*0.6,
+                       (maxP2 * sqrtRte - degrad) * 0.99].map(v=>Math.round(v*10000)/10000);
+      [...new Set(testTPs)].sort((a,b)=>a-b).forEach(tp => {
+        const be = (tp + degrad) / sqrtRte;
+        const ok = maxP2 >= be;
+        const isActual = Math.abs(tp - tpActual) < 1e-5;
+        const tr2 = document.createElement('tr');
+        tr2.className = `border-b border-gray-100 text-right ${isActual?'bg-amber-50 font-semibold':''}`;
+        tr2.innerHTML = `
+          <td class="border border-gray-200 px-2 py-1">€ ${tp.toFixed(4)}${isActual?' ← actual':''}</td>
+          <td class="border border-gray-200 px-2 py-1">€ ${be.toFixed(4)}</td>
+          <td class="border border-gray-200 px-2 py-1">€ ${maxP2.toFixed(4)}</td>
+          <td class="border border-gray-200 px-2 py-1 font-medium ${ok?'text-green-700':'text-red-700'}">${ok?'✓ YES':'✗ NO'}</td>`;
+        wbody.appendChild(tr2);
+      });
+
+      document.getElementById('sim-results').classList.remove('hidden');
+    } catch(e) {
+      statusEl.textContent = `Error: ${e.message}`;
+      console.error(e);
+    }
+  }, 20);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// EVENT HANDLERS & INIT
+// ══════════════════════════════════════════════════════════════════
+function parseAndLoad(text) {
+  try {
+    const json = JSON.parse(text);
+    window._diagData = json;
+    document.getElementById('parse-error').classList.add('hidden');
+    renderDiagnostics(json);
+    // Update drop zone
+    document.getElementById('drop-zone').innerHTML =
+      '<div class="text-3xl mb-2">✅</div><p class="text-green-700 font-semibold">diagnostics.json loaded</p>' +
+      '<p class="text-xs text-gray-400 mt-1">Drop a new file to replace</p>';
+  } catch(e) {
+    const el = document.getElementById('parse-error');
+    el.textContent = `Parse error: ${e.message}`;
+    el.classList.remove('hidden');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Default simulator rows (24 steps × 15min = 6h)
+  const dflt = [
+    [0.08,0.04,0,1.0],[0.07,0.04,0,0.9],[0.07,0.03,0,0.8],[0.08,0.04,0,0.9],
+    [0.10,0.05,0,1.1],[0.13,0.06,0.3,1.3],[0.18,0.07,1.0,1.5],[0.22,0.08,2.0,1.8],
+    [0.24,0.09,2.5,2.0],[0.20,0.08,2.8,1.9],[0.18,0.07,2.3,1.7],[0.15,0.06,1.5,1.5],
+    [0.14,0.06,1.0,1.4],[0.16,0.06,0.5,1.6],[0.20,0.08,0.2,1.8],[0.26,0.10,0,2.1],
+    [0.28,0.10,0,2.2],[0.25,0.09,0,2.0],[0.22,0.08,0,1.8],[0.18,0.07,0,1.6],
+    [0.14,0.06,0,1.3],[0.11,0.05,0,1.1],[0.09,0.04,0,1.0],[0.08,0.04,0,0.9],
+  ];
+  dflt.forEach(([p,f,pv,c]) => addFcRow(p,f,pv,c));
+
+  // File drop
+  const dz = document.getElementById('drop-zone');
+  const fi = document.getElementById('file-input');
+  dz.addEventListener('click', () => fi.click());
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) { const r = new FileReader(); r.onload = ev => parseAndLoad(ev.target.result); r.readAsText(f); }
+  });
+  fi.addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) { const r = new FileReader(); r.onload = ev => parseAndLoad(ev.target.result); r.readAsText(f); }
+  });
+
+  // Paste
+  document.getElementById('paste-toggle').addEventListener('click', () =>
+    document.getElementById('paste-area').classList.toggle('hidden'));
+  document.getElementById('parse-btn').addEventListener('click', () =>
+    parseAndLoad(document.getElementById('json-input').value));
+
+  // Simulator
+  document.getElementById('sim-add-rows').addEventListener('click', () => {
+    for (let i=0;i<4;i++) addFcRow();
+  });
+  document.getElementById('sim-clear-rows').addEventListener('click', () => {
+    document.getElementById('sim-fc-body').innerHTML = '';
+    document.getElementById('sim-results').classList.add('hidden');
+  });
+  document.getElementById('sim-load-diag').addEventListener('click', () => {
+    const raw = window._diagData;
+    if (raw) prefillSim(raw.data || raw);
+  });
+  document.getElementById('sim-run').addEventListener('click', runSimulator);
+});
+
+</script>
+</body>
+</html>
