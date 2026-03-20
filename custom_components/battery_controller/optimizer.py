@@ -69,10 +69,15 @@ def calculate_step_cost(
     Cost calculation with RTE, degradation, and DC-coupled PV:
 
     1. RTE Effect (AC path):
+       - action_w is the AC power setpoint (what the inverter is told to do)
        - charge_efficiency = sqrt(RTE) ~ 0.95 for RTE=0.90
        - discharge_efficiency = sqrt(RTE) ~ 0.95
-       - Charging: grid_energy = battery_energy / charge_eff
-       - Discharging: usable_energy = battery_energy * discharge_eff
+       - Charging: grid draws the AC setpoint directly; losses are internal to
+         the inverter, captured in the SoC transition (battery stores action_w * sqrt_rte)
+       - Discharging: AC output = abs(action_w) (the setpoint); battery-side draw
+         is action_w / sqrt_rte (also captured in SoC transition)
+       - Throughput for degradation: charging = action_w * sqrt_rte * dt / 1000 (Wh
+         actually stored); discharging = abs(action_w) / sqrt_rte * dt / 1000 (Wh drawn)
        - When overrides are provided (from calculate_efficiency), these include
          C-rate and SoC derating on top of the base sqrt(RTE).
 
@@ -143,20 +148,25 @@ def calculate_step_cost(
         dc_pv_used_w = dc_charge_w / dc_eff if dc_eff > 0 else 0.0
         dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_used_w)
 
-        # AC charging needs grid energy (with AC charge efficiency losses)
-        grid_to_battery_w = ac_charge_w / charge_eff if ac_charge_w > 0 else 0.0
+        # AC charging: grid draws the AC setpoint directly; losses are internal
+        # to the inverter, captured in the SoC transition
+        grid_to_battery_w = ac_charge_w  # grid draws AC setpoint power
 
-        throughput_kwh = action_w * time_step_hours / 1000
+        throughput_kwh = (
+            action_w * time_step_hours * charge_eff / 1000
+        )  # actual stored Wh
 
     elif action_w < 0:  # DISCHARGING
         # All DC PV excess goes to AC side when discharging
         dc_pv_excess_w = pv_dc_production_w
 
-        # Energy from battery to home (including discharge losses)
-        usable_power_w = abs(action_w) * discharge_eff
+        # AC output = discharge setpoint (no multiplier needed)
+        usable_power_w = abs(action_w)  # AC output = discharge setpoint
         grid_to_battery_w = -usable_power_w  # Negative = to home
 
-        throughput_kwh = abs(action_w) * time_step_hours / 1000
+        throughput_kwh = (
+            abs(action_w) * time_step_hours / discharge_eff / 1000
+        )  # actual battery-drawn Wh
 
     else:  # IDLE (action_w == 0)
         grid_to_battery_w = 0.0

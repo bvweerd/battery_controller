@@ -230,7 +230,7 @@
     },
     "number": {
       "degradation_cost": {
-        "name": "Degradation Cost"
+        "name": "Degradation Cost per Cycle"
       },
       "min_price_spread": {
         "name": "Minimum Price Spread"
