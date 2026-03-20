@@ -113,6 +113,8 @@ async def async_get_config_entry_diagnostics(
             "optimal_power_kw": data.get("optimal_power_kw"),
             "schedule_mode": data.get("schedule_mode"),
             "schedule_power_kw": data.get("schedule_power_kw"),
+            "control_action": data.get("control_action"),
+            "battery_setpoints": data.get("battery_setpoints"),
             "total_cost": data.get("total_cost"),
             "baseline_cost": data.get("baseline_cost"),
             "savings": data.get("savings"),
@@ -124,6 +126,14 @@ async def async_get_config_entry_diagnostics(
             "charge_threshold_eur_kwh": round(
                 shadow_price / sqrt_rte if sqrt_rte > 0 else 0.0, 4
             ),
+            "commitment_state": {
+                "action": getattr(optimization_coord, "_committed_action", None),
+                "power_kw": getattr(optimization_coord, "_committed_power", None),
+                "price": getattr(optimization_coord, "_committed_price", None),
+                "step_start": getattr(
+                    optimization_coord, "_committed_step_start", None
+                ),
+            },
             "timestamp": str(data.get("timestamp")),
         }
 
