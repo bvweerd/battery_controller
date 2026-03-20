@@ -54,6 +54,10 @@ async def test_diagnostics_dataclass_access(
         "optimal_power_kw": 0.0,
         "control_action": {"target_power_kw": 0.0, "action_mode": "idle"},
         "battery_setpoints": {"bat1": 0.0},
+        "raw_total_cost": -1.23,
+        "raw_savings": 0.45,
+        "raw_shadow_price_eur_kwh": 0.33,
+        "shadow_price_source": "raw_dp",
         "timestamp": "2024-01-01T00:00:00",
         "optimization_result": MagicMock(
             power_schedule_kw=[0.0],
@@ -121,6 +125,10 @@ async def test_diagnostics_dataclass_access(
     assert diagnostics["optimization"]["battery_setpoints"] == {"bat1": 0.0}
     assert diagnostics["optimization"]["commitment_state"]["action"] == "charging"
     assert diagnostics["optimization"]["commitment_state"]["power_kw"] == 1.2
+    assert diagnostics["optimization"]["raw_total_cost"] == -1.23
+    assert diagnostics["optimization"]["raw_savings"] == 0.45
+    assert diagnostics["optimization"]["raw_shadow_price_eur_kwh"] == 0.33
+    assert diagnostics["optimization"]["shadow_price_source"] == "raw_dp"
     assert diagnostics["optimization"]["schedule"]["power_schedule_kw"] == [0.0]
     assert diagnostics["optimization"]["battery_state"]["mode"] == "idle"
 

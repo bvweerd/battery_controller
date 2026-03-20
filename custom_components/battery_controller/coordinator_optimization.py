@@ -1497,6 +1497,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "baseline_cost": result.baseline_cost,
             "savings": round(result.savings, 2),
             "shadow_price_eur_kwh": round(result.shadow_price_eur_kwh, 4),
+            "raw_total_cost": result.raw_total_cost,
+            "raw_savings": result.raw_savings,
+            "raw_shadow_price_eur_kwh": result.raw_shadow_price_eur_kwh,
+            "shadow_price_source": result.shadow_price_source,
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
             "current_feed_in_price": (
                 resampled_feed_in[0]
