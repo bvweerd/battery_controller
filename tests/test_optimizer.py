@@ -10,6 +10,8 @@ from custom_components.battery_controller.optimizer import (
     calculate_step_cost,
     optimize_battery_schedule,
     _find_nearest_soc_idx,
+    _filter_micro_cycles,
+    _filter_oscillations,
 )
 
 
@@ -760,6 +762,49 @@ class TestOscillationPrevention:
         assert charge_count > 0, "Should charge during PV surplus to use later"
         assert discharge_count > 0, "Should discharge during expensive evening"
 
+    def test_oscillation_filter_uses_feed_in_for_export_value(self, battery_config):
+        """Export-only discharge should be valued at feed-in, not buy price."""
+        power, mode, soc = _filter_oscillations(
+            power_schedule_kw=[1.0, -1.0],
+            mode_schedule=["charging", "discharging"],
+            soc_schedule_kwh=[5.0],
+            price_forecast=[0.30, 0.30],
+            min_price_spread=0.05,
+            degradation_cost_per_kwh=0.03,
+            rte=battery_config.round_trip_efficiency,
+            step_durations_hours=[0.25, 0.25],
+            min_soc_kwh=battery_config.min_soc_kwh,
+            max_soc_kwh=battery_config.max_soc_kwh,
+            pv_forecast=[2.0, 0.0],
+            consumption_forecast=[0.5, 0.0],
+            feed_in_forecast=[0.05, 0.05],
+        )
+
+        assert mode[0] == "idle"
+        assert power[0] == 0.0
+        assert soc[1] == 5.0
+
+
+class TestMicroCycleFilter:
+    """Tests for micro-cycle post-processing."""
+
+    def test_micro_cycle_filter_recomputes_soc_schedule(self, battery_config):
+        """Removing a micro-cycle must also remove its SoC movement."""
+        power, mode, soc = _filter_micro_cycles(
+            power_schedule_kw=[0.1, 0.0],
+            mode_schedule=["charging", "idle"],
+            soc_schedule_kwh=[5.0, 5.0237, 5.0237],
+            step_durations_hours=[0.25, 0.25],
+            rte=battery_config.round_trip_efficiency,
+            min_soc_kwh=battery_config.min_soc_kwh,
+            max_soc_kwh=battery_config.max_soc_kwh,
+            min_cycle_kwh=0.2,
+        )
+
+        assert power == [0.0, 0.0]
+        assert mode == ["idle", "idle"]
+        assert soc == [5.0, 5.0, 5.0]
+
 
 class TestTerminalShadowPrice:
     """Tests for terminal_shadow_price parameter."""
@@ -874,3 +919,26 @@ class TestTerminalShadowPrice:
         assert 0.0 <= lambda2 <= max_price * 2, (
             f"Shadow price {lambda2} after feedback is outside reasonable bounds"
         )
+
+
+class TestReportedMetrics:
+    """Tests for raw vs post-processed optimizer metrics."""
+
+    def test_result_exposes_raw_dp_metrics(self, battery_config):
+        """Optimizer should expose raw DP metrics separately from reported totals."""
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.10] * 4 + [0.30] * 4,
+            feed_in_forecast=[0.07] * 8,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+        assert result.raw_total_cost is not None
+        assert result.raw_savings is not None
+        assert result.raw_shadow_price_eur_kwh is not None
+        assert result.shadow_price_source == "raw_dp"
