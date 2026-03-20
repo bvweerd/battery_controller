@@ -17,7 +17,7 @@ from .const import (
     BATTERY_SUBENTRY_TYPE,
     CONF_CAPACITY_KWH,
     CONF_CONTROL_MODE,
-    CONF_DEGRADATION_COST_PER_KWH,
+    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
@@ -53,7 +53,7 @@ _MANIFEST: dict[str, Any] = json.loads(
 # the coordinators are re-initialised with the new structural configuration.
 _NO_RELOAD_KEYS = frozenset(
     {
-        CONF_DEGRADATION_COST_PER_KWH,
+        CONF_DEGRADATION_COST_PER_CYCLE,
         CONF_MIN_PRICE_SPREAD,
         CONF_ZERO_GRID_DEADBAND_W,
         CONF_MANUAL_POWER_SETPOINT_W,

@@ -68,7 +68,7 @@ CONF_POWER_PRODUCTION_SENSORS = "power_production_sensors"
 # Configuration keys - Advanced settings
 CONF_TIME_STEP_MINUTES = "time_step_minutes"
 CONF_OPTIMIZATION_INTERVAL_MINUTES = "optimization_interval_minutes"
-CONF_DEGRADATION_COST_PER_KWH = "degradation_cost_per_kwh"
+CONF_DEGRADATION_COST_PER_CYCLE = "degradation_cost_per_cycle"
 CONF_MIN_PRICE_SPREAD = "min_price_spread"
 
 # Configuration keys - Manual control
@@ -108,7 +108,7 @@ DEFAULT_PV_DC_EFFICIENCY = 0.97
 # Default values - Advanced settings
 DEFAULT_TIME_STEP_MINUTES = 15
 DEFAULT_OPTIMIZATION_INTERVAL_MINUTES = 15
-DEFAULT_DEGRADATION_COST_PER_KWH = 0.03  # EUR/kWh throughput
+DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.04  # EUR per full charge+discharge cycle
 DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
 
 # Default values - Manual control
