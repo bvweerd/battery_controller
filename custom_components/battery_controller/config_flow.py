@@ -17,7 +17,7 @@ from .const import (
     CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
-    CONF_DEGRADATION_COST_PER_KWH,
+    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
@@ -558,7 +558,7 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
             else:
                 # Preserve number entity values managed outside the config flow
                 for key in (
-                    CONF_DEGRADATION_COST_PER_KWH,
+                    CONF_DEGRADATION_COST_PER_CYCLE,
                     CONF_MIN_PRICE_SPREAD,
                     CONF_ZERO_GRID_DEADBAND_W,
                 ):

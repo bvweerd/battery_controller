@@ -12,13 +12,13 @@ from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    CONF_DEGRADATION_COST_PER_KWH,
+    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MIN_PRICE_SPREAD,
     CONF_ZERO_GRID_DEADBAND_W,
-    DEFAULT_DEGRADATION_COST_PER_KWH,
+    DEFAULT_DEGRADATION_COST_PER_CYCLE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MAX_CHARGE_POWER_KW,
     DEFAULT_MAX_DISCHARGE_POWER_KW,
@@ -86,14 +86,14 @@ class BatteryControllerNumber(NumberEntity):
 
 
 class DegradationCostNumber(BatteryControllerNumber):
-    """Number entity for degradation cost."""
+    """Number entity for degradation cost per cycle."""
 
     _attr_translation_key = "degradation_cost"
     _attr_name = "Degradation Cost"
     _attr_native_min_value = 0.0
-    _attr_native_max_value = 0.20
-    _attr_native_step = 0.005
-    _attr_native_unit_of_measurement = "EUR/kWh"
+    _attr_native_max_value = 1.00
+    _attr_native_step = 0.01
+    _attr_native_unit_of_measurement = "EUR/cycle"
     _attr_mode = NumberMode.BOX
 
     def __init__(self, hass, entry, device, config):
@@ -102,11 +102,11 @@ class DegradationCostNumber(BatteryControllerNumber):
     @property
     def native_value(self) -> float:
         return self._get_runtime_value(
-            CONF_DEGRADATION_COST_PER_KWH, DEFAULT_DEGRADATION_COST_PER_KWH
+            CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
         )
 
     async def async_set_native_value(self, value: float) -> None:
-        await self._set_runtime_value(CONF_DEGRADATION_COST_PER_KWH, value)
+        await self._set_runtime_value(CONF_DEGRADATION_COST_PER_CYCLE, value)
         self.async_write_ha_state()
 
 

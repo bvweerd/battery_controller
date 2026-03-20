@@ -21,7 +21,7 @@ from .const import (
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_CONTROL_MODE,
-    CONF_DEGRADATION_COST_PER_KWH,
+    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MANUAL_POWER_SETPOINT_W,
@@ -31,7 +31,7 @@ from .const import (
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
     DEFAULT_CONTROL_MODE,
-    DEFAULT_DEGRADATION_COST_PER_KWH,
+    DEFAULT_DEGRADATION_COST_PER_CYCLE,
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
@@ -987,9 +987,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         live_options = live_entry.options if live_entry is not None else {}
         degradation_cost = float(
             live_options.get(
-                CONF_DEGRADATION_COST_PER_KWH,
+                CONF_DEGRADATION_COST_PER_CYCLE,
                 self.config.get(
-                    CONF_DEGRADATION_COST_PER_KWH, DEFAULT_DEGRADATION_COST_PER_KWH
+                    CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
                 ),
             )
         )
@@ -1215,6 +1215,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if self._last_shadow_price is not None
             else "none (first run, using feed-in tail)",
         )
+        # Convert degradation cost from per-cycle to per-kWh throughput for the optimizer.
+        # One cycle = max_soc_kwh - min_soc_kwh (usable capacity).
+        usable_kwh = battery_config.max_soc_kwh - battery_config.min_soc_kwh
+        degradation_cost_per_kwh = (
+            degradation_cost / usable_kwh if usable_kwh > 0 else degradation_cost
+        )
+
         result = await self.hass.async_add_executor_job(
             optimize_battery_schedule,
             battery_config,
@@ -1224,7 +1231,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             pv_forecast,
             consumption_forecast,
             step_durations_hours,
-            degradation_cost,
+            degradation_cost_per_kwh,
             min_spread,
             pv_dc_forecast,
             self._last_shadow_price,
@@ -1352,7 +1359,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # as the post-DP oscillation filter in optimizer.py).
         if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
             sqrt_rte = battery_config.round_trip_efficiency**0.5
-            commit_spread = degradation_cost * 2.0 / sqrt_rte + min_spread
+            commit_spread = degradation_cost_per_kwh * 2.0 / sqrt_rte + min_spread
             current_price = resampled_prices[0] if resampled_prices else 0.0
             soc_at_limit = (
                 battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
