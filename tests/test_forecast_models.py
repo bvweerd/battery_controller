@@ -485,29 +485,31 @@ class TestPriceForecastModelForecast:
 
     def test_uses_weather_pattern_when_available(self):
         model = self._model_with_data()
-        # GHI=600 → bin 3, wind=10 → bin 2 → should use weather pattern (avg 0.10)
+        # GHI=600 → bin 3, wind=10 → bin 2 → weather pattern [0.08, 0.12]
+        # avg=0.10, std=0.02, below overall(0.25) → 0.10 - 0.5*0.02 = 0.09
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
             ghi_forecast=[600.0],
             wind_forecast=[10.0],
         )
-        assert result[0] == pytest.approx(0.10)
+        assert result[0] == pytest.approx(0.09)
 
     def test_falls_back_to_simple_when_weather_bin_sparse(self):
         model = self._model_with_data()
         # GHI=10 → bin 0, wind=1 → bin 0 → no weather pattern for (10,0,0,0) → simple
+        # simple [0.28, 0.32]: avg=0.30, std=0.02, above overall(0.25) → 0.30 + 0.5*0.02 = 0.31
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
             ghi_forecast=[10.0],
             wind_forecast=[1.0],
         )
-        assert result[0] == pytest.approx(0.30)
+        assert result[0] == pytest.approx(0.31)
 
     def test_falls_back_to_overall_avg_when_no_pattern(self):
         model = self._model_with_data()
-        # hour=15 has no (15, 0) entry → falls back to overall avg (0.25)
+        # hour=15 has no (15, 0) entry → falls back to overall avg (0.25), no std correction
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 15, 0, tzinfo=timezone.utc),
@@ -517,11 +519,12 @@ class TestPriceForecastModelForecast:
     def test_no_weather_args_uses_simple_pattern(self):
         model = self._model_with_data()
         # No GHI/wind provided → skips weather lookup → uses simple pattern
+        # simple [0.28, 0.32]: avg=0.30, std=0.02, above overall(0.25) → 0.30 + 0.5*0.02 = 0.31
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
         )
-        assert result[0] == pytest.approx(0.30)
+        assert result[0] == pytest.approx(0.31)
 
     def test_forecast_24_hours(self):
         hass = MagicMock()

@@ -96,7 +96,17 @@ def extract_inputs(diag: dict) -> tuple:
             if step_start_times and step_durations_hours:
                 break
 
-    degradation_cost = options.get("degradation_cost_per_kwh", 0.04)
+    degradation_cost_per_cycle = options.get(
+        "degradation_cost_per_cycle",
+        options.get("degradation_cost_per_kwh", 0.04),  # fallback for old diagnostics
+    )
+    # Convert per-cycle to per-kWh for the DP (same as coordinator)
+    usable_kwh = battery.max_soc_kwh - battery.min_soc_kwh
+    degradation_cost = (
+        degradation_cost_per_cycle / usable_kwh
+        if usable_kwh > 0
+        else degradation_cost_per_cycle
+    )
     min_price_spread = options.get("min_price_spread", 0.0)
     fixed_feed_in_price = options.get("fixed_feed_in_price", 0.04)
 
@@ -169,13 +179,17 @@ def calculate_step_cost(
         ac_charge_w = action_w - dc_charge_w
         dc_pv_used_w = dc_charge_w / dc_eff if dc_eff > 0 else 0.0
         dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_used_w)
-        grid_to_battery_w = ac_charge_w / charge_eff if ac_charge_w > 0 else 0.0
-        throughput_kwh = action_w * time_step_hours / 1000
+        grid_to_battery_w = ac_charge_w  # grid draws AC setpoint power
+        throughput_kwh = (
+            action_w * time_step_hours * charge_eff / 1000
+        )  # actual stored Wh
     elif action_w < 0:
         dc_pv_excess_w = pv_dc_production_w
-        usable_power_w = abs(action_w) * discharge_eff
+        usable_power_w = abs(action_w)  # AC output = discharge setpoint
         grid_to_battery_w = -usable_power_w
-        throughput_kwh = abs(action_w) * time_step_hours / 1000
+        throughput_kwh = (
+            abs(action_w) * time_step_hours / discharge_eff / 1000
+        )  # actual battery-drawn Wh
     else:
         grid_to_battery_w = 0.0
         if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
@@ -248,7 +262,7 @@ def run_dp(
         ] * (n_steps - len(step_durations_hours))
 
     min_step_hours = min(step_durations_hours[:n_steps])
-    soc_resolution_wh = max(float(SOC_RESOLUTION_WH), POWER_STEP_W * min_step_hours)
+    soc_resolution_wh = float(SOC_RESOLUTION_WH)
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
     )
@@ -257,6 +271,7 @@ def run_dp(
 
     min_soc_wh = round(battery_config.min_soc_kwh * 1000)
     max_soc_wh = round(battery_config.max_soc_kwh * 1000)
+    sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
@@ -303,12 +318,12 @@ def run_dp(
 
             for action_w in actions:
                 if action_w > 0:
-                    energy_change_wh = action_w * time_step_hours
+                    energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
-                    energy_change_wh = abs(action_w) * time_step_hours
+                    energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
@@ -366,6 +381,7 @@ def forward_pass(
     pv_dc_forecast,
 ):
     """Execute the forward pass to get the schedule."""
+    sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
     current_soc = float(
         soc_states[_find_nearest_soc_idx(int(current_soc_kwh * 1000), soc_states)]
     )
@@ -386,12 +402,13 @@ def forward_pass(
         if action_w > 0:
             mode_schedule.append("charging")
             current_soc = min(
-                current_soc + action_w * time_step_hours, float(max_soc_wh)
+                current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
             )
         elif action_w < 0:
             mode_schedule.append("discharging")
             current_soc = max(
-                current_soc - abs(action_w) * time_step_hours, float(min_soc_wh)
+                current_soc - abs(action_w) * time_step_hours / sqrt_rte,
+                float(min_soc_wh),
             )
         else:
             if battery_config.pv_dc_coupled and pv_dc_w > 0:
@@ -612,7 +629,11 @@ def print_summary(
     print(
         f"  RTE:                      {battery.round_trip_efficiency:.2f}  (√RTE = {sqrt_rte:.4f})"
     )
-    print(f"  Degradation cost:         {degradation_cost:.4f} €/kWh")
+    usable_kwh_disp = battery.max_soc_kwh - battery.min_soc_kwh
+    print(
+        f"  Degradation cost:         {degradation_cost:.4f} €/kWh"
+        f"  ({degradation_cost * usable_kwh_disp:.4f} €/cycle, usable={usable_kwh_disp:.3f} kWh)"
+    )
     print()
     print(f"  Terminal price (last step): {terminal_price:.4f} €/kWh")
     print(

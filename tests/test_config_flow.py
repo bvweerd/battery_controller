@@ -637,7 +637,7 @@ async def test_options_flow_preserves_number_entity_values(
     """Number entity values in options (degradation, spread) survive an options round-trip."""
     hass.config_entries.async_update_entry(
         v4_config_entry,
-        options={"degradation_cost_per_kwh": 0.025, "min_price_spread": 0.08},
+        options={"degradation_cost_per_cycle": 0.025, "min_price_spread": 0.08},
     )
 
     result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
@@ -648,7 +648,7 @@ async def test_options_flow_preserves_number_entity_values(
         },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert v4_config_entry.options["degradation_cost_per_kwh"] == 0.025
+    assert v4_config_entry.options["degradation_cost_per_cycle"] == 0.025
     assert v4_config_entry.options["min_price_spread"] == 0.08
 
 

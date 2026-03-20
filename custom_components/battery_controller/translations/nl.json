@@ -292,7 +292,7 @@
         "name": "Maximum SoC"
       },
       "degradation_cost": {
-        "name": "Degradatiekosten"
+        "name": "Degradatiekosten per cyclus"
       },
       "min_price_spread": {
         "name": "Minimale Prijsspread"

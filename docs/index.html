@@ -251,8 +251,8 @@
         <input id="sp-rte" type="number" value="0.90" step="0.01" min="0.5" max="1.0" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Current SoC (kWh)</span>
         <input id="sp-soc-kwh" type="number" value="5" step="0.1" class="sim-input mt-0.5"></label>
-      <label class="block"><span class="kv-label">Degradation cost (€/kWh)</span>
-        <input id="sp-degradation" type="number" value="0.03" step="0.005" class="sim-input mt-0.5"></label>
+      <label class="block"><span class="kv-label">Degradation cost (€/cycle)</span>
+        <input id="sp-degradation" type="number" value="0.04" step="0.01" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Min price spread (€/kWh)</span>
         <input id="sp-spread" type="number" value="0.05" step="0.01" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Step duration (hours)</span>
@@ -420,14 +420,14 @@ function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
     const acChargeW  = actionW - dcChargeW;
     const dcPvUsedW  = dcEff > 0 ? dcChargeW / dcEff : 0;
     dcPvExcessW      = Math.max(0, pvDcW - dcPvUsedW);
-    gridToBatteryW   = acChargeW > 0 ? acChargeW / chargeEff : 0;
-    throughputKwh    = actionW * stepH / 1000;
+    gridToBatteryW   = acChargeW;  // grid draws AC setpoint directly
+    throughputKwh    = actionW * stepH * chargeEff / 1000;  // actual stored Wh
   } else if (actionW < 0) {
     // Discharging
     dcPvExcessW       = pvDcW;
-    const usablePowerW= Math.abs(actionW) * dischargeEff;
+    const usablePowerW= Math.abs(actionW);  // AC output = discharge setpoint
     gridToBatteryW    = -usablePowerW;
-    throughputKwh     = Math.abs(actionW) * stepH / 1000;
+    throughputKwh     = Math.abs(actionW) * stepH / dischargeEff / 1000;  // actual battery-drawn Wh
   } else {
     // Idle
     gridToBatteryW = 0;
@@ -480,7 +480,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
   const minStepH  = Math.min(...stepDurations.slice(0, nSteps));
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
-  const socResWh  = Math.max(SOC_RES_WH, POWER_STEP_W * minStepH);
+  const socResWh  = SOC_RES_WH;
   const alignedStepW = socResWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
@@ -543,10 +543,10 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         const actionW = actions[ai];
         let newSocWh;
         if (actionW > 0) {
-          newSocWh = socWh + actionW * stepH;
+          newSocWh = socWh + actionW * stepH * sqrtRte;
           if (newSocWh > maxSocWh) continue;
         } else if (actionW < 0) {
-          newSocWh = socWh - Math.abs(actionW) * stepH;
+          newSocWh = socWh - Math.abs(actionW) * stepH / sqrtRte;
           if (newSocWh < minSocWh) continue;
         } else {
           newSocWh = socWh;
@@ -576,6 +576,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
 function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
   const { policy, socStates, stepDurations, minSocWh, maxSocWh, nSteps } = dpResult;
+  const sqrtRte = Math.sqrt(cfg.rte);
   let curSocWh = currentSocKwh * 1000;
   const powerKw = [], modes = [], socKwh = [currentSocKwh];
 
@@ -588,10 +589,10 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
     powerKw.push(actionW / 1000);
     if (actionW > 0) {
       modes.push('charging');
-      curSocWh = Math.min(curSocWh + actionW * stepH, maxSocWh);
+      curSocWh = Math.min(curSocWh + actionW * stepH * sqrtRte, maxSocWh);
     } else if (actionW < 0) {
       modes.push('discharging');
-      curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH, minSocWh);
+      curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH / sqrtRte, minSocWh);
     } else {
       if (cfg.pvDcCoupled && pvDcW > 0) {
         const dcEff = cfg.pvDcEfficiency;
@@ -776,7 +777,9 @@ function generateTips(d) {
 
   const rte     = bc.round_trip_efficiency || 0.9;
   const sqrtRte = Math.sqrt(rte);
-  const degrad  = opts.degradation_cost_per_kwh || 0.03;
+  const usableKwh780 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
+  const degradCycle780 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
+  const degrad  = degradCycle780 != null ? degradCycle780 / usableKwh780 : 0.04 / usableKwh780;
   const spread  = opts.min_price_spread         || 0.05;
   const savings = opt.savings   || 0;
   const baseline= opt.baseline_cost || 0;
@@ -867,7 +870,8 @@ function generateTips(d) {
   }
 
   // 5. Feed-in sensor
-  const hasFeedInSensor = opts.feed_in_price_sensor && !String(opts.feed_in_price_sensor).includes('REDACTED') && opts.feed_in_price_sensor !== '';
+  const hasFeedInSensor = (opts.feed_in_price_sensor && opts.feed_in_price_sensor !== '') ||
+    (sched.feed_in_price_forecast && sched.feed_in_price_forecast.length > 0);
   const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
   if (!hasFeedInSensor) {
     tips.push({ t:'info', title:'No live feed-in price sensor',
@@ -963,7 +967,9 @@ function renderTips(tips) {
 function renderSpreadAnalysis(bc, opts, prices) {
   const rte    = bc.round_trip_efficiency || 0.9;
   const sqrtRte= Math.sqrt(rte);
-  const degrad = opts.degradation_cost_per_kwh || 0.03;
+  const usableKwh966 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
+  const degradCyc966 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
+  const degrad = degradCyc966 != null ? degradCyc966 / usableKwh966 : 0.04 / usableKwh966;
   if (!prices || prices.length === 0) return;
   const minP   = Math.min(...prices);
   const maxP   = Math.max(...prices);
@@ -1020,7 +1026,9 @@ function renderSpreadAnalysis(bc, opts, prices) {
 function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, modes, socKwh, stepTimes, bc, opts, terminalPrice) {
   const rte    = bc.round_trip_efficiency || 0.9;
   const sqrtRte= Math.sqrt(rte);
-  const degrad = opts.degradation_cost_per_kwh || 0.03;
+  const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
+  const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
+  const degrad = degradCyc1024 != null ? degradCyc1024 / usableKwh1024 : 0.04 / usableKwh1024;
   const breakeven = (terminalPrice + degrad) / sqrtRte;
   const breakevenChg = (terminalPrice - degrad) * sqrtRte;
 
@@ -1125,7 +1133,7 @@ function renderDiagnostics(raw) {
     kv('Round-trip efficiency', `${((bc.round_trip_efficiency||0)*100).toFixed(1)}%`) +
     kv('Charge eff (√RTE)', `${((bc.charge_efficiency||0)*100).toFixed(2)}%`) +
     kv('Discharge eff (√RTE)', `${((bc.discharge_efficiency||0)*100).toFixed(2)}%`) +
-    kv('Degradation cost', opts.degradation_cost_per_kwh !== undefined ? `€ ${opts.degradation_cost_per_kwh}/kWh` : '—') +
+    kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
     kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
 
@@ -1240,11 +1248,14 @@ function renderDiagnostics(raw) {
       maxGridPowerKw: opts.max_grid_power_kw || 0,
     };
     const feedInForDp = feedInFc || prices;
+    const usableKwhDp = (cfg2.maxSocKwh - cfg2.minSocKwh) || 1;
+    const degradCycleOpts = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
+    const degradPerKwhDp = degradCycleOpts != null ? degradCycleOpts / usableKwhDp : 0.04 / usableKwhDp;
     const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, feedInForDp,
       pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
-      opts.degradation_cost_per_kwh || 0.03, opts.min_price_spread || 0.05,
+      degradPerKwhDp, opts.min_price_spread || 0.05,
       null, sched.terminal_shadow_price ?? null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
@@ -1361,7 +1372,7 @@ function prefillSim(d) {
   set('sp-discharge-kw',bc.max_discharge_power_kw);
   set('sp-rte',         bc.round_trip_efficiency);
   set('sp-soc-kwh',     bs.soc_kwh);
-  set('sp-degradation', opts.degradation_cost_per_kwh);
+  set('sp-degradation', opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh);
   set('sp-spread',      opts.min_price_spread);
   let stepDursArr = sched.step_durations_hours || [];
   if (!stepDursArr.length && d.entities) {
@@ -1417,10 +1428,12 @@ function runSimulator() {
 
       const stepH   = p.stepH || 0.25;
       const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
+      const simUsableKwh = (p.maxSocKwh - p.minSocKwh) || 1;
+      const degradPerKwhSim = p.degradation / simUsableKwh;
       const inputs  = {
         priceFc: price, feedInFc: feedIn, pvFc: pv, consumFc: consump,
         stepDurations: new Array(price.length).fill(stepH),
-        degradCost: p.degradation, minPriceSpread: p.minPriceSpread,
+        degradCost: degradPerKwhSim, minPriceSpread: p.minPriceSpread,
         pvDcFc: null, terminalShadowPrice: termSP,
       };
 
@@ -1444,7 +1457,7 @@ function runSimulator() {
       const tbody = document.getElementById('sim-result-table');
       tbody.innerHTML = '';
       const sqrtRte = Math.sqrt(p.rte);
-      const degrad  = p.degradation;
+      const degrad  = degradPerKwhSim;
       for (let t = 0; t < res.powerKw.length; t++) {
         const feedIn2 = feedIn[t] || price[t];
         const pvSurp  = (pv[t]||0) - (consump[t]||0);

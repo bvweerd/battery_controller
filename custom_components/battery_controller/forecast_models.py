@@ -419,13 +419,15 @@ class PriceForecastModel:
     _WIND_THRESHOLDS = (4.0, 8.0)
     # Minimum samples required to use a bin (avoids noise from sparse data)
     _MIN_SAMPLES = 2
+    # Amplification factor for std deviation: sharpens peaks/valleys relative to overall avg
+    _STD_AMPLIFICATION = 0.5
 
     def __init__(
         self,
         hass: HomeAssistant,
         price_sensor_id: str,
         entry_id: str | None = None,
-        history_days: int = 30,
+        history_days: int = 7,
     ) -> None:
         """Initialize price forecast model."""
         self.hass = hass
@@ -619,6 +621,10 @@ class PriceForecastModel:
         2. (hour, dow) simple historical average
         3. Overall average price across all recorded hours
 
+        Each bin price is sharpened with std deviation: avg ± _STD_AMPLIFICATION × std,
+        where direction follows whether the bin avg is above or below the overall average.
+        This restores peak/valley structure that plain averaging flattens out.
+
         Args:
             hours: Number of hours to forecast.
             start_time: Start time (default: current hour, rounded down).
@@ -630,6 +636,16 @@ class PriceForecastModel:
         """
         if start_time is None:
             start_time = dt_util.now().replace(minute=0, second=0, microsecond=0)
+
+        overall = self._overall_avg or 0.20
+
+        def _sharpen(vals: list[float]) -> float:
+            """Return avg ± k×std, direction based on deviation from overall avg."""
+            avg = sum(vals) / len(vals)
+            variance = sum((v - avg) ** 2 for v in vals) / len(vals)
+            std = variance**0.5
+            direction = 1.0 if avg >= overall else -1.0
+            return avg + direction * self._STD_AMPLIFICATION * std
 
         result = []
         for h in range(hours):
@@ -649,17 +665,17 @@ class PriceForecastModel:
                 wb = self._wind_bin(wind_forecast[h])
                 vals = self._weather_pattern.get((hour, dow, gb, wb), [])
                 if len(vals) >= self._MIN_SAMPLES:
-                    price = sum(vals) / len(vals)
+                    price = _sharpen(vals)
 
             # 2. Simple (hour, dow) historical average
             if price is None:
                 vals = self._simple_pattern.get((hour, dow), [])
                 if len(vals) >= self._MIN_SAMPLES:
-                    price = sum(vals) / len(vals)
+                    price = _sharpen(vals)
 
             # 3. Overall average (last resort)
             if price is None:
-                price = self._overall_avg or 0.20
+                price = overall
 
             result.append(round(price, 4))
 
