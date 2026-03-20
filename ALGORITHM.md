@@ -318,13 +318,15 @@ for each step i:
 
 When there is a **PV surplus** at a charging step (PV production > consumption), the charge cost is the feed-in opportunity cost (what could have been earned by exporting that PV) rather than the grid buy price.
 
+**DC-coupled PV**: For systems with DC-coupled PV, passive charging from the DC PV array occurs even when the battery is idle. The oscillation filter accounts for this by subtracting the passive DC PV contribution from the active charge power when calculating charge cost. If all charging would come from passive DC PV anyway, the effective cost is zero and the charge step is never suppressed.
+
 The window size is `max(2 h, battery_capacity / max_discharge_power)` — larger batteries need a wider window because a full charge/discharge cycle takes longer.
 
 After suppression, the SoC schedule is recalculated to remain consistent.
 
 ### 8.2 Micro-Cycle Filter
 
-Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle.
+Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
 
 ---
 
@@ -342,6 +344,8 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 **Interpretation**:
 - If the current grid buy price is less than `λ / sqrt(RTE)`, it is profitable to charge — the stored energy is worth more than its purchase cost.
 - If the current feed-in price is greater than `λ × sqrt(RTE)`, it is profitable to discharge/export.
+
+The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
 **Use as terminal condition**: λ is passed to the next optimizer run as `terminal_shadow_price`, replacing the end-of-horizon feed-in price in the terminal condition. This makes consecutive 15-minute runs consistent with each other (rolling-horizon stability).
 
@@ -382,6 +386,19 @@ Several implementation details prevent subtle correctness bugs:
 | Horizon-end discharge | Terminal condition `V[T][s] = -stored_kwh × terminal_price` prevents horizon-end drain |
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | RTE symmetry | `charge_eff = discharge_eff = sqrt(RTE)` ensures `charge_eff × discharge_eff = RTE` exactly |
+
+## 12. Baseline Cost and Savings
+
+The **baseline cost** represents the electricity cost without any battery. In this scenario:
+- All consumption is met directly from the grid
+- All AC PV surplus is exported at the feed-in price
+- DC-coupled PV panels still produce, but without a battery to absorb the DC output, all DC PV goes through the inverter to AC (at `DC_TO_AC_INVERTER_EFFICIENCY`)
+
+**Raw vs processed costs**: The optimizer reports both raw (DP-derived) and post-processed costs:
+- `raw_total_cost`: V[0][current_soc_idx] from the DP value function
+- `total_cost`: Recalculated from the filtered schedule via `_calculate_schedule_total_cost`
+- The difference shows the impact of post-processing filters (typically < 0.01 EUR when no actions are filtered, due to floating-point differences in SoC reconstruction)
+- `savings = baseline_cost - initial_terminal_value - total_cost`
 
 ---
 

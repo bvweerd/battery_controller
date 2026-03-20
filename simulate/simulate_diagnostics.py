@@ -7,6 +7,8 @@ Usage:
     python simulate_diagnostics.py [diagnostics.json]
 
 Helps diagnose why the optimizer made certain charge/discharge decisions.
+If diagnostics include `control_action`, that published controller target can be
+compared with the raw optimizer schedule.
 """
 
 import json
@@ -917,6 +919,21 @@ def main():
         price_forecast,
         feed_in_forecast,
     )
+
+    # Raw vs processed cost comparison from diagnostics
+    raw_total = opt_data.get("raw_total_cost")
+    raw_sav = opt_data.get("raw_savings")
+    proc_total = opt_data.get("total_cost")
+    proc_sav = opt_data.get("savings")
+    if raw_total is not None and proc_total is not None:
+        print("\n  ── Raw vs processed costs (from diagnostics) ──")
+        print(f"  Raw DP total cost:     {raw_total:.5f} €")
+        print(f"  Processed total cost:  {proc_total:.5f} €")
+        print(f"  Δ cost (filter impact): {proc_total - raw_total:+.5f} €")
+        if raw_sav is not None and proc_sav is not None:
+            print(f"  Raw savings:           {raw_sav:.5f} €")
+            print(f"  Processed savings:     {proc_sav:.5f} €")
+            print(f"  Δ savings:             {proc_sav - raw_sav:+.5f} €")
 
     print_schedule(
         step_times=step_start_times,
