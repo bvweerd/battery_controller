@@ -864,9 +864,11 @@ function generateTips(d) {
   }
   if (mode === 'follow_schedule') {
     tips.push({ t:'info', title:'Consider switching to hybrid mode',
-      text:`follow_schedule mode executes the DP schedule exactly. Hybrid mode additionally applies
-      real-time zero-grid balancing between optimization runs, which handles unexpected
-      PV/consumption swings. Recommended for variable households.`});
+      text:`follow_schedule mode executes the committed DP schedule. Within the same price
+      period, the commitment filter may keep an active charge/discharge step locked, and
+      that lock is reflected in the published controller setpoint as well. Hybrid mode
+      additionally applies real-time zero-grid balancing between optimization runs, which
+      handles unexpected PV/consumption swings. Recommended for variable households.`});
   }
 
   // 5. Feed-in sensor
@@ -1142,6 +1144,9 @@ function renderDiagnostics(raw) {
     : '—';
   const discThr = opt.discharge_threshold_eur_kwh;
   const chgThr  = opt.charge_threshold_eur_kwh;
+  const publishedSetpointKw = opt.control_action && opt.control_action.target_power_kw !== undefined
+    ? Number(opt.control_action.target_power_kw)
+    : null;
   document.getElementById('cfg-pv').innerHTML =
     kv('PV coupling', bc.pv_dc_coupled ? 'DC-coupled' : 'AC-coupled') +
     (bc.pv_dc_coupled ? kv('DC peak power', `${bc.pv_dc_peak_power_kwp?.toFixed(2)} kWp`) : '') +
@@ -1153,7 +1158,8 @@ function renderDiagnostics(raw) {
     kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
     kv('Discharge threshold (λ·√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
     kv('Charge threshold (λ/√RTE)', chgThr !== undefined ? `€ ${chgThr.toFixed(4)}/kWh` : '—') +
-    kv('Optimal action', opt.optimal_mode ? `${opt.optimal_mode} @ ${opt.optimal_power_kw?.toFixed(3)} kW` : '—');
+    kv('Optimizer action', opt.optimal_mode ? `${opt.optimal_mode} @ ${opt.optimal_power_kw?.toFixed(3)} kW` : '—') +
+    kv('Published setpoint', publishedSetpointKw !== null && !Number.isNaN(publishedSetpointKw) ? `${publishedSetpointKw.toFixed(3)} kW` : '—');
 
   // ── Coordinator status
   const failureHtml = opt.failure_reason
@@ -1226,11 +1232,18 @@ function renderDiagnostics(raw) {
     const totalH = resolvedStepDurs.length
       ? resolvedStepDurs.reduce((a, b) => a + b, 0)
       : prices.length * stepH;
+    const rawCost = opt.raw_total_cost;
+    const rawSavings = opt.raw_savings;
+    const filterImpact = (rawSavings != null && opt.savings != null)
+      ? (rawSavings - opt.savings) : null;
     document.getElementById('cost-details').innerHTML = `
       <div class="text-xs space-y-1">
         ${kv('Baseline (no battery)', `€ ${(opt.baseline_cost||0).toFixed(5)}`)}
         ${kv('Optimized total cost', `€ ${(opt.total_cost||0).toFixed(5)}`)}
         ${kv('Savings', `<span class="text-green-600 font-bold">€ ${(opt.savings||0).toFixed(5)}</span>`)}
+        ${rawCost != null ? kv('Raw DP cost', `€ ${rawCost.toFixed(5)}`) : ''}
+        ${rawSavings != null ? kv('Raw DP savings', `€ ${rawSavings.toFixed(5)}`) : ''}
+        ${filterImpact != null ? kv('Filter cost', `<span class="text-orange-500">${filterImpact >= 0 ? '+' : ''}€ ${filterImpact.toFixed(5)}</span>`) : ''}
         ${kv('Horizon', `${totalH.toFixed(1)} h (${prices.length} steps)`)}
       </div>`;
   }

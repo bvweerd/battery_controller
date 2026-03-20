@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Compare HA optimizer (with efficiency in SoC transitions) vs simulator (without).
-Diagnoses why HA doesn't schedule today's charge/discharge cycle."""
+
+Diagnoses why HA doesn't schedule today's charge/discharge cycle.
+If diagnostics include `control_action`, this script also shows the published
+controller target next to the raw optimizer recommendation.
+"""
 
 import json
 import math
@@ -51,6 +55,8 @@ def load_inputs(path):
     min_price_spread = options.get("min_price_spread", 0.0)
     terminal_shadow_price = sched.get("terminal_shadow_price")
 
+    control_action = diag["data"]["optimization"].get("control_action", {})
+
     return (
         battery,
         current_soc_kwh,
@@ -63,6 +69,7 @@ def load_inputs(path):
         degradation_cost,
         min_price_spread,
         terminal_shadow_price,
+        control_action,
     )
 
 
@@ -80,6 +87,7 @@ def main():
         degradation_cost,
         min_price_spread,
         terminal_shadow_price,
+        control_action,
     ) = load_inputs(path)
 
     sqrt_rte = math.sqrt(battery.round_trip_efficiency)
@@ -97,6 +105,12 @@ def main():
         f"Degradation: {degradation_cost:.4f} €/kWh, Min spread: {min_price_spread:.4f}"
     )
     print(f"Terminal shadow price: {terminal_shadow_price}")
+    if control_action:
+        print(
+            "Published control action: "
+            f"{control_action.get('action_mode', 'unknown')} @ "
+            f"{control_action.get('target_power_kw', 0.0):.4f} kW"
+        )
     print()
 
     # Run the ACTUAL HA optimizer
@@ -154,6 +168,11 @@ def main():
     print(f"\nSavings: {result.savings:.4f} €")
     print(f"Total cost: {result.total_cost:.4f} €")
     print(f"Baseline cost: {result.baseline_cost:.4f} €")
+    if result.raw_total_cost is not None:
+        print(f"Raw total cost (DP): {result.raw_total_cost:.4f} €")
+        print(f"Raw savings (DP): {result.raw_savings:.4f} €")
+        filter_impact = (result.raw_savings or 0) - result.savings
+        print(f"Filter impact: {filter_impact:+.4f} € (raw_savings - savings)")
 
     # Now analyze specific profitable steps
     print("\n" + "=" * 80)

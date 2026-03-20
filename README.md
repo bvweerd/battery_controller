@@ -308,7 +308,10 @@ The main configuration covers global sensors and advanced settings, organised in
 ## Control Modes
 
 - **Zero Grid**: Minimize grid exchange in real-time using the battery.
-- **Follow Schedule**: Execute the DP-optimized schedule exactly.
+- **Follow Schedule**: Execute the DP-optimized schedule exactly. When the commitment
+  filter keeps an active charge/discharge locked within the same price period, that
+  lock applies to the published controller setpoint too, not just the diagnostic
+  `optimal_power` value.
 - **Hybrid** (recommended): DP schedule for arbitrage, zero-grid for self-consumption.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
@@ -318,11 +321,15 @@ Change the active mode with the **Control Mode** select entity, or use a service
 
 ## Controlling Your Battery
 
-Use an automation to read `Battery Setpoint` (or `Optimal Power`) and send commands to your inverter.
+Use an automation to read the controller power target and send commands to your inverter.
+In `follow_schedule`, `optimal_power` is the optimizer recommendation and
+`battery_setpoint` is the actual published controller target; under normal operation
+they match, and if the commitment filter locks a charge/discharge step within the
+same price period, the lock is reflected in `battery_setpoint` as well.
 
 | Control Mode | Optimal Mode | Power Sensor to Use |
 |-------------|-------------|---------------------|
-| `follow_schedule` | `charging` / `discharging` | `sensor.battery_controller_optimal_power` (W) |
+| `follow_schedule` | `charging` / `discharging` | `sensor.battery_controller_battery_setpoint` (W) |
 | `hybrid` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
 
 ### Example Automation
