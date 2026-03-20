@@ -52,6 +52,8 @@ async def test_diagnostics_dataclass_access(
         "control_mode": "hybrid",
         "optimal_mode": "idle",
         "optimal_power_kw": 0.0,
+        "control_action": {"target_power_kw": 0.0, "action_mode": "idle"},
+        "battery_setpoints": {"bat1": 0.0},
         "timestamp": "2024-01-01T00:00:00",
         "optimization_result": MagicMock(
             power_schedule_kw=[0.0],
@@ -66,6 +68,10 @@ async def test_diagnostics_dataclass_access(
         ),
     }
     optimization_coord.last_update_success = True
+    optimization_coord._committed_action = "charging"
+    optimization_coord._committed_power = 1.2
+    optimization_coord._committed_price = 0.25
+    optimization_coord._committed_step_start = "2024-01-01T00:00:00+00:00"
     optimization_coord.battery_config = MagicMock(
         capacity_kwh=10.0,
         usable_capacity_kwh=8.0,
@@ -111,6 +117,10 @@ async def test_diagnostics_dataclass_access(
     assert diagnostics["weather"]["last_update_success"] is True
     assert diagnostics["forecast"]["consumption_hourly_pattern"] == {"12_0": 0.5}
     assert diagnostics["optimization"]["control_mode"] == "hybrid"
+    assert diagnostics["optimization"]["control_action"]["target_power_kw"] == 0.0
+    assert diagnostics["optimization"]["battery_setpoints"] == {"bat1": 0.0}
+    assert diagnostics["optimization"]["commitment_state"]["action"] == "charging"
+    assert diagnostics["optimization"]["commitment_state"]["power_kw"] == 1.2
     assert diagnostics["optimization"]["schedule"]["power_schedule_kw"] == [0.0]
     assert diagnostics["optimization"]["battery_state"]["mode"] == "idle"
 

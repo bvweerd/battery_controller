@@ -141,13 +141,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._last_shadow_price: float | None = None
         self._effective_mode: str = "idle"
         self._effective_power: float = 0.0
-        self._dp_schedule_w: float = 0.0
+        # Schedule power currently sent to the controller after all mode resolution
+        # and commitment filtering. This is not necessarily the raw optimizer output.
+        self._controller_schedule_w: float = 0.0
 
         # Commitment filter: prevent switching active charge/discharge to idle unless
         # the price has moved enough to make the change economically justified.
         self._committed_action: str = "idle"
         self._committed_price: float = 0.0
         self._committed_power: float = 0.0
+        self._committed_step_start: str | None = None
 
         # Failure tracking and cascade listeners
         self._last_failure_reason: str | None = None
@@ -431,19 +434,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # real-time loop immediately, without waiting for the next 15-min run.
         if self._control_mode == MODE_ZERO_GRID:
             rt_effective_mode = "zero_grid"
-            dp_schedule_w = 0.0
+            controller_schedule_w = 0.0
         elif self._control_mode == MODE_MANUAL:
             rt_effective_mode = "manual"
-            dp_schedule_w = self._get_manual_setpoint_w()
+            controller_schedule_w = self._get_manual_setpoint_w()
         elif (
             self._control_mode == MODE_FOLLOW_SCHEDULE and self._last_result is not None
         ):
-            rt_effective_mode = self._last_result.optimal_mode
-            dp_schedule_w = self._last_result.optimal_power_kw * 1000
+            # Use the committed schedule cached by the last optimisation run, not
+            # the raw DP result. Otherwise the real-time loop bypasses the
+            # commitment filter and republishes jittery setpoints.
+            rt_effective_mode = self._effective_mode
+            controller_schedule_w = self._controller_schedule_w
         else:
             # Hybrid (or no result yet): use cached values from last optimisation run
             rt_effective_mode = self._effective_mode
-            dp_schedule_w = self._dp_schedule_w
+            controller_schedule_w = self._controller_schedule_w
 
         controller_mode = self._resolve_controller_mode(
             rt_effective_mode, current_grid_w
@@ -454,7 +460,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             current_grid_w=current_grid_w,
             current_soc_kwh=battery_state.soc_kwh,
             current_battery_w=battery_state.power_kw * 1000,
-            dp_schedule_w=dp_schedule_w,
+            dp_schedule_w=controller_schedule_w,
             mode=controller_mode,
         )
 
@@ -1255,7 +1261,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 current_consumption_kw - total_pv_kw + battery_state.power_kw
             ) * 1000  # Convert to W
 
-        dp_schedule_w = result.optimal_power_kw * 1000
+        current_step_start = step_start_times_iso[0] if step_start_times_iso else None
 
         # Determine effective mode/power based on control mode
         if self._control_mode == MODE_ZERO_GRID:
@@ -1265,7 +1271,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             manual_w = self._get_manual_setpoint_w()
             effective_mode = "manual"
             effective_power = manual_w / 1000  # kW for output sensors
-            dp_schedule_w = manual_w
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
             if result.optimal_mode == "idle":
@@ -1365,6 +1370,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
                 or battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98
             )
+            same_price_period = (
+                current_step_start is not None
+                and current_step_start == self._committed_step_start
+            )
             direction_flip = (
                 self._committed_action == "charging" and effective_mode == "discharging"
             ) or (
@@ -1379,6 +1388,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
             if (
                 self._committed_action in ("charging", "discharging")
+                and same_price_period
                 and not price_jumped
                 and not soc_at_limit
                 and not direction_flip
@@ -1412,15 +1422,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     self._committed_action = effective_mode
                     self._committed_price = current_price
                     self._committed_power = effective_power
+                    self._committed_step_start = current_step_start
             else:
                 self._committed_action = effective_mode
                 self._committed_price = current_price
                 self._committed_power = effective_power
+                self._committed_step_start = current_step_start
+
+        if effective_mode == "manual":
+            controller_schedule_w = effective_power * 1000
+        elif effective_mode in ("charging", "discharging"):
+            # Feed the controller the post-commit schedule so the published
+            # setpoint is part of the commitment filter too, not just the
+            # reported effective mode/power.
+            controller_schedule_w = effective_power * 1000
+        else:
+            controller_schedule_w = 0.0
 
         # Store for real-time control loop
         self._effective_mode = effective_mode
         self._effective_power = effective_power
-        self._dp_schedule_w = dp_schedule_w
+        self._controller_schedule_w = controller_schedule_w
 
         # Calculate zero-grid control action using the resolved effective mode
         controller_mode = self._resolve_controller_mode(effective_mode, current_grid)
@@ -1429,7 +1451,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             current_grid_w=current_grid,
             current_soc_kwh=battery_state.soc_kwh,
             current_battery_w=battery_state.power_kw * 1000,
-            dp_schedule_w=dp_schedule_w,
+            dp_schedule_w=controller_schedule_w,
             mode=controller_mode,
         )
 

@@ -7,6 +7,8 @@ Usage:
     python simulate_diagnostics.py [diagnostics.json]
 
 Helps diagnose why the optimizer made certain charge/discharge decisions.
+If diagnostics include `control_action`, that published controller target can be
+compared with the raw optimizer schedule.
 """
 
 import json
