@@ -124,8 +124,6 @@ async def async_get_config_entry_diagnostics(
             "shadow_price_eur_kwh": data.get("shadow_price_eur_kwh"),
             "raw_total_cost": data.get("raw_total_cost"),
             "raw_savings": data.get("raw_savings"),
-            "raw_shadow_price_eur_kwh": data.get("raw_shadow_price_eur_kwh"),
-            "shadow_price_source": data.get("shadow_price_source"),
             "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte, 4),
             "charge_threshold_eur_kwh": round(
                 shadow_price / sqrt_rte if sqrt_rte > 0 else 0.0, 4

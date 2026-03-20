@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,8 +57,6 @@ async def test_diagnostics_dataclass_access(
         "battery_setpoints": {"bat1": 0.0},
         "raw_total_cost": -1.23,
         "raw_savings": 0.45,
-        "raw_shadow_price_eur_kwh": 0.33,
-        "shadow_price_source": "raw_dp",
         "timestamp": "2024-01-01T00:00:00",
         "optimization_result": MagicMock(
             power_schedule_kw=[0.0],
@@ -75,7 +74,7 @@ async def test_diagnostics_dataclass_access(
     optimization_coord._committed_action = "charging"
     optimization_coord._committed_power = 1.2
     optimization_coord._committed_price = 0.25
-    optimization_coord._committed_step_start = "2024-01-01T00:00:00+00:00"
+    optimization_coord._committed_step_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     optimization_coord.battery_config = MagicMock(
         capacity_kwh=10.0,
         usable_capacity_kwh=8.0,
@@ -127,8 +126,6 @@ async def test_diagnostics_dataclass_access(
     assert diagnostics["optimization"]["commitment_state"]["power_kw"] == 1.2
     assert diagnostics["optimization"]["raw_total_cost"] == -1.23
     assert diagnostics["optimization"]["raw_savings"] == 0.45
-    assert diagnostics["optimization"]["raw_shadow_price_eur_kwh"] == 0.33
-    assert diagnostics["optimization"]["shadow_price_source"] == "raw_dp"
     assert diagnostics["optimization"]["schedule"]["power_schedule_kw"] == [0.0]
     assert diagnostics["optimization"]["battery_state"]["mode"] == "idle"
 

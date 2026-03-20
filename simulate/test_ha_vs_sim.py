@@ -168,6 +168,11 @@ def main():
     print(f"\nSavings: {result.savings:.4f} €")
     print(f"Total cost: {result.total_cost:.4f} €")
     print(f"Baseline cost: {result.baseline_cost:.4f} €")
+    if result.raw_total_cost is not None:
+        print(f"Raw total cost (DP): {result.raw_total_cost:.4f} €")
+        print(f"Raw savings (DP): {result.raw_savings:.4f} €")
+        filter_impact = (result.raw_savings or 0) - result.savings
+        print(f"Filter impact: {filter_impact:+.4f} € (raw_savings - savings)")
 
     # Now analyze specific profitable steps
     print("\n" + "=" * 80)

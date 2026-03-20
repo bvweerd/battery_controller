@@ -48,8 +48,6 @@ class OptimizationResult:
     consumption_forecast: list[float]
     raw_total_cost: float | None = None
     raw_savings: float | None = None
-    raw_shadow_price_eur_kwh: float | None = None
-    shadow_price_source: str = "raw_dp"
 
 
 def _rebuild_schedule(
@@ -125,7 +123,12 @@ def _calculate_baseline_cost(
     step_durations_hours: list[float],
     pv_dc_forecast: list[float],
 ) -> float:
-    """Calculate horizon cost without battery action."""
+    """Calculate horizon cost without battery action.
+
+    Baseline scenario: no battery exists. DC-coupled PV panels would still
+    produce power, but without a battery to absorb it, all DC PV goes through
+    the inverter to AC (at DC_TO_AC_INVERTER_EFFICIENCY).
+    """
     baseline_cost = 0.0
     n_steps = min(len(price_forecast), len(pv_forecast), len(consumption_forecast))
     for t in range(n_steps):
@@ -161,7 +164,13 @@ def _calculate_schedule_total_cost(
     terminal_price: float,
     pv_dc_forecast: list[float] | None = None,
 ) -> float:
-    """Calculate total cost for the final post-processed schedule."""
+    """Calculate total cost for the final post-processed schedule.
+
+    Note: This rebuilds SoC step-by-step from the post-processed power schedule,
+    which may differ slightly from the DP's internal SoC due to floating-point
+    arithmetic. The difference is typically < 0.001 EUR and is inherent to the
+    discretisation — it cannot be eliminated without re-running the DP itself.
+    """
     if pv_dc_forecast is None:
         pv_dc_forecast = [0.0] * len(power_schedule_kw)
 
@@ -653,7 +662,7 @@ def optimize_battery_schedule(
     power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_oscillations(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
-        soc_schedule_kwh=soc_schedule_kwh,
+        initial_soc_kwh=soc_schedule_kwh[0],
         price_forecast=price_forecast[:n_steps],
         min_price_spread=min_price_spread,
         degradation_cost_per_kwh=degradation_cost_per_kwh,
@@ -676,7 +685,7 @@ def optimize_battery_schedule(
     power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_micro_cycles(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
-        soc_schedule_kwh=soc_schedule_kwh,
+        initial_soc_kwh=soc_schedule_kwh[0],
         step_durations_hours=step_durations_hours[:n_steps],
         rte=battery_config.round_trip_efficiency,
         min_soc_kwh=battery_config.min_soc_kwh,
@@ -780,14 +789,13 @@ def optimize_battery_schedule(
         consumption_forecast=list(consumption_forecast[:n_steps]),
         raw_total_cost=raw_total_cost,
         raw_savings=raw_savings,
-        raw_shadow_price_eur_kwh=raw_shadow_price_eur_kwh,
     )
 
 
 def _filter_oscillations(
     power_schedule_kw: list[float],
     mode_schedule: list[str],
-    soc_schedule_kwh: list[float],
+    initial_soc_kwh: float,
     price_forecast: list[float],
     min_price_spread: float,
     degradation_cost_per_kwh: float,
@@ -814,7 +822,7 @@ def _filter_oscillations(
     Args:
         power_schedule_kw: Power schedule in kW
         mode_schedule: Mode schedule
-        soc_schedule_kwh: SoC schedule in kWh
+        initial_soc_kwh: Initial SoC in kWh (only element [0] of soc_schedule is needed)
         price_forecast: Grid buy price forecast in EUR/kWh
         min_price_spread: Minimum price spread required
         degradation_cost_per_kwh: Degradation cost
@@ -830,7 +838,7 @@ def _filter_oscillations(
         Filtered (power_schedule, mode_schedule, soc_schedule)
     """
     if len(power_schedule_kw) == 0:
-        return power_schedule_kw, mode_schedule, soc_schedule_kwh
+        return power_schedule_kw, mode_schedule, [initial_soc_kwh]
 
     sqrt_rte = math.sqrt(rte)
     filtered_power = list(power_schedule_kw)
@@ -841,7 +849,11 @@ def _filter_oscillations(
     min_arbitrage_spread = (2 * degradation_cost_per_kwh + min_price_spread) / sqrt_rte
 
     def get_charge_cost(timestep: int, charge_power_kw: float) -> float:
-        """Get the marginal cost of charging for the actual commanded power."""
+        """Get the marginal cost of charging for the actual commanded power.
+
+        For DC-coupled PV: passive charging happens even at idle (free). Only the
+        portion of active charging above the passive DC PV contribution costs money.
+        """
         if (
             charge_power_kw <= 0
             or not pv_forecast
@@ -850,9 +862,31 @@ def _filter_oscillations(
         ):
             return price_forecast[timestep]
 
+        # DC PV passive charge at idle is free — only charge above this costs money
+        effective_charge_kw = charge_power_kw
+        if pv_dc_coupled and pv_dc_forecast:
+            step_h = (
+                step_durations_hours[timestep]
+                if timestep < len(step_durations_hours)
+                else step_durations_hours[-1]
+            )
+            passive_charge_kw = (
+                pv_dc_forecast[timestep] * pv_dc_efficiency
+                if timestep < len(pv_dc_forecast)
+                else 0.0
+            )
+            # Cap passive charge by available headroom (approximate using max_soc)
+            max_passive_kwh = (max_soc_kwh - min_soc_kwh) if step_h > 0 else 0.0
+            passive_charge_kw = (
+                min(passive_charge_kw, max_passive_kwh / step_h) if step_h > 0 else 0.0
+            )
+            effective_charge_kw = max(0.0, charge_power_kw - passive_charge_kw)
+            if effective_charge_kw <= 0:
+                return 0.0  # All charging is passive DC PV, no cost
+
         pv_surplus_kw = max(0.0, pv_forecast[timestep] - consumption_forecast[timestep])
-        from_pv_kw = min(charge_power_kw, pv_surplus_kw)
-        from_grid_kw = max(0.0, charge_power_kw - from_pv_kw)
+        from_pv_kw = min(effective_charge_kw, pv_surplus_kw)
+        from_grid_kw = max(0.0, effective_charge_kw - from_pv_kw)
         total_kw = from_pv_kw + from_grid_kw
         if total_kw <= 0:
             return price_forecast[timestep]
@@ -862,7 +896,12 @@ def _filter_oscillations(
         ) / total_kw
 
     def get_discharge_value(timestep: int, discharge_power_kw: float) -> float:
-        """Get the marginal value of discharging for the actual commanded power."""
+        """Get the marginal value of discharging for the actual commanded power.
+
+        For DC-coupled PV: discharging displaces energy that would otherwise come
+        from passive DC PV charging (opportunity cost). The effective value is
+        reduced by the portion that merely offsets free DC PV.
+        """
         if discharge_power_kw <= 0:
             return price_forecast[timestep]
         if not pv_forecast or not consumption_forecast or not feed_in_forecast:
@@ -924,7 +963,7 @@ def _filter_oscillations(
     return _rebuild_schedule(
         power_schedule_kw=filtered_power,
         step_durations_hours=step_durations_hours,
-        initial_soc_kwh=soc_schedule_kwh[0],
+        initial_soc_kwh=initial_soc_kwh,
         min_soc_kwh=min_soc_kwh,
         max_soc_kwh=max_soc_kwh,
         rte=rte,
@@ -937,7 +976,7 @@ def _filter_oscillations(
 def _filter_micro_cycles(
     power_schedule_kw: list[float],
     mode_schedule: list[str],
-    soc_schedule_kwh: list[float],
+    initial_soc_kwh: float,
     step_durations_hours: list[float],
     rte: float,
     min_soc_kwh: float,
@@ -956,7 +995,7 @@ def _filter_micro_cycles(
     Args:
         power_schedule_kw: Power schedule in kW
         mode_schedule: Mode schedule
-        soc_schedule_kwh: SoC schedule in kWh
+        initial_soc_kwh: Initial SoC in kWh
         step_durations_hours: Per-step duration in hours
         min_cycle_kwh: Minimum energy per charge/discharge block in kWh
 
@@ -964,10 +1003,11 @@ def _filter_micro_cycles(
         Filtered (power_schedule, mode_schedule, soc_schedule)
     """
     if not power_schedule_kw:
-        return power_schedule_kw, mode_schedule, soc_schedule_kwh
+        return power_schedule_kw, mode_schedule, [initial_soc_kwh]
 
     filtered_power = list(power_schedule_kw)
     filtered_mode = list(mode_schedule)
+    any_filtered = False
 
     i = 0
     while i < len(filtered_mode):
@@ -992,13 +1032,33 @@ def _filter_micro_cycles(
             for k in range(i, j):
                 filtered_power[k] = 0.0
                 filtered_mode[k] = "idle"
+            any_filtered = True
 
         i = j
+
+    if not any_filtered:
+        # Nothing changed; skip rebuild since oscillation filter already produced
+        # consistent power/mode/soc. Rebuild only needed to get soc_schedule.
+        return (
+            power_schedule_kw,
+            mode_schedule,
+            _rebuild_schedule(
+                power_schedule_kw=power_schedule_kw,
+                step_durations_hours=step_durations_hours,
+                initial_soc_kwh=initial_soc_kwh,
+                min_soc_kwh=min_soc_kwh,
+                max_soc_kwh=max_soc_kwh,
+                rte=rte,
+                pv_dc_forecast=pv_dc_forecast,
+                pv_dc_coupled=pv_dc_coupled,
+                pv_dc_efficiency=pv_dc_efficiency,
+            )[2],
+        )
 
     return _rebuild_schedule(
         power_schedule_kw=filtered_power,
         step_durations_hours=step_durations_hours,
-        initial_soc_kwh=soc_schedule_kwh[0],
+        initial_soc_kwh=initial_soc_kwh,
         min_soc_kwh=min_soc_kwh,
         max_soc_kwh=max_soc_kwh,
         rte=rte,
