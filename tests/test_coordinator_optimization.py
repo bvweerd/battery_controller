@@ -22,6 +22,8 @@ from custom_components.battery_controller.const import (
     CONF_PRICE_SENSOR,
     CONF_ROUND_TRIP_EFFICIENCY,
     MODE_FOLLOW_SCHEDULE,
+    MODE_HYBRID,
+    MODE_ZERO_GRID,
 )
 from custom_components.battery_controller.coordinator_optimization import (
     OptimizationCoordinator,
@@ -131,7 +133,7 @@ async def test_follow_schedule_commitment_locks_published_setpoint(hass, monkeyp
     coordinator._committed_action = "charging"
     coordinator._committed_power = 1.2
     coordinator._committed_price = 0.20
-    coordinator._committed_step_start = fixed_now.isoformat()
+    coordinator._committed_step_start = fixed_now
 
     results = [
         OptimizationResult(
@@ -163,3 +165,69 @@ async def test_follow_schedule_commitment_locks_published_setpoint(hass, monkeyp
     assert data["optimal_power_kw"] == 1.2
     assert data["control_action"]["target_power_kw"] == 1.2
     assert data["battery_setpoints"]["bat1"] == 1.2
+
+
+@pytest.mark.asyncio
+async def test_mode_switch_resets_commitment(hass):
+    """Switching control mode must reset commitment state to prevent stale locks."""
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0],
+        "consumption_forecast_kw": [0.0],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.0,
+    }
+
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_OPTIMIZATION_INTERVAL_MINUTES: 15,
+        CONF_FIXED_FEED_IN_PRICE: 0.04,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [
+            (
+                "bat1",
+                {
+                    CONF_MAX_CHARGE_POWER_KW: 1.2,
+                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                    CONF_ROUND_TRIP_EFFICIENCY: 0.90,
+                    CONF_MIN_SOC_PERCENT: 10.0,
+                    CONF_MAX_SOC_PERCENT: 100.0,
+                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                },
+            )
+        ],
+    }
+
+    coordinator = OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+
+    # Simulate active commitment from a follow_schedule run
+    fixed_now = datetime(2026, 3, 20, 11, 0, 0, tzinfo=timezone.utc)
+    coordinator._committed_action = "charging"
+    coordinator._committed_power = 1.2
+    coordinator._committed_price = 0.25
+    coordinator._committed_step_start = fixed_now
+
+    # Switch to hybrid mode
+    coordinator.control_mode = MODE_HYBRID
+
+    assert coordinator._committed_action == "idle"
+    assert coordinator._committed_power == 0.0
+    assert coordinator._committed_price == 0.0
+    assert coordinator._committed_step_start is None
+
+    # Switch to zero_grid mode
+    coordinator._committed_action = "discharging"
+    coordinator._committed_power = 0.8
+    coordinator.control_mode = MODE_ZERO_GRID
+
+    assert coordinator._committed_action == "idle"
+    assert coordinator._committed_power == 0.0

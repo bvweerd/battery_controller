@@ -1232,11 +1232,18 @@ function renderDiagnostics(raw) {
     const totalH = resolvedStepDurs.length
       ? resolvedStepDurs.reduce((a, b) => a + b, 0)
       : prices.length * stepH;
+    const rawCost = opt.raw_total_cost;
+    const rawSavings = opt.raw_savings;
+    const filterImpact = (rawSavings != null && opt.savings != null)
+      ? (rawSavings - opt.savings) : null;
     document.getElementById('cost-details').innerHTML = `
       <div class="text-xs space-y-1">
         ${kv('Baseline (no battery)', `€ ${(opt.baseline_cost||0).toFixed(5)}`)}
         ${kv('Optimized total cost', `€ ${(opt.total_cost||0).toFixed(5)}`)}
         ${kv('Savings', `<span class="text-green-600 font-bold">€ ${(opt.savings||0).toFixed(5)}</span>`)}
+        ${rawCost != null ? kv('Raw DP cost', `€ ${rawCost.toFixed(5)}`) : ''}
+        ${rawSavings != null ? kv('Raw DP savings', `€ ${rawSavings.toFixed(5)}`) : ''}
+        ${filterImpact != null ? kv('Filter cost', `<span class="text-orange-500">${filterImpact >= 0 ? '+' : ''}€ ${filterImpact.toFixed(5)}</span>`) : ''}
         ${kv('Horizon', `${totalH.toFixed(1)} h (${prices.length} steps)`)}
       </div>`;
   }

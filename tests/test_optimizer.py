@@ -767,7 +767,7 @@ class TestOscillationPrevention:
         power, mode, soc = _filter_oscillations(
             power_schedule_kw=[1.0, -1.0],
             mode_schedule=["charging", "discharging"],
-            soc_schedule_kwh=[5.0],
+            initial_soc_kwh=5.0,
             price_forecast=[0.30, 0.30],
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
@@ -793,7 +793,7 @@ class TestMicroCycleFilter:
         power, mode, soc = _filter_micro_cycles(
             power_schedule_kw=[0.1, 0.0],
             mode_schedule=["charging", "idle"],
-            soc_schedule_kwh=[5.0, 5.0237, 5.0237],
+            initial_soc_kwh=5.0,
             step_durations_hours=[0.25, 0.25],
             rte=battery_config.round_trip_efficiency,
             min_soc_kwh=battery_config.min_soc_kwh,
@@ -940,5 +940,93 @@ class TestReportedMetrics:
 
         assert result.raw_total_cost is not None
         assert result.raw_savings is not None
-        assert result.raw_shadow_price_eur_kwh is not None
-        assert result.shadow_price_source == "raw_dp"
+        # Shadow price is always the raw DP value (no post-processed variant)
+        assert result.shadow_price_eur_kwh != 0.0
+
+    def test_raw_vs_processed_cost_no_filter_delta(self, battery_config):
+        """When no actions are filtered, raw and processed costs should nearly match."""
+        # Use flat prices so oscillation/micro-cycle filters won't trigger
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.20] * 8,
+            feed_in_forecast=[0.07] * 8,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+        # With flat prices and no PV, the optimizer should idle (no arbitrage).
+        # Raw DP cost and post-processed cost should be very close.
+        assert result.raw_total_cost is not None
+        assert abs(result.raw_total_cost - result.total_cost) < 0.01
+
+
+class TestOscillationFilterDcPv:
+    """Tests for DC PV interaction with the oscillation filter."""
+
+    def test_oscillation_filter_dc_pv_passive_charge(self):
+        """Oscillation filter should account for passive DC PV when evaluating charge cost."""
+        from custom_components.battery_controller.optimizer import _filter_oscillations
+
+        # Scenario: charge at step 0, discharge at step 1. With DC PV,
+        # the charge at step 0 is partially free (passive DC PV charging).
+        # The filter should be less aggressive about removing this pair.
+        power_schedule = [1.0, -1.0, 0.0, 0.0]
+        mode_schedule = ["charging", "discharging", "idle", "idle"]
+        initial_soc = 1.0
+
+        # Prices: charge at 0.10, discharge at 0.15 — tight spread
+        prices = [0.10, 0.15, 0.10, 0.10]
+        feed_in = [0.07, 0.07, 0.07, 0.07]
+        step_durations = [0.25] * 4
+        pv_forecast = [0.0] * 4
+        consumption_forecast = [0.0] * 4
+
+        # Without DC PV: this pair should be filtered (spread too small)
+        result_no_dc = _filter_oscillations(
+            power_schedule_kw=list(power_schedule),
+            mode_schedule=list(mode_schedule),
+            initial_soc_kwh=initial_soc,
+            price_forecast=prices,
+            min_price_spread=0.02,
+            degradation_cost_per_kwh=0.03,
+            rte=0.90,
+            step_durations_hours=step_durations,
+            min_soc_kwh=0.5,
+            max_soc_kwh=5.0,
+            pv_forecast=pv_forecast,
+            consumption_forecast=consumption_forecast,
+            feed_in_forecast=feed_in,
+            pv_dc_forecast=[0.0] * 4,
+            pv_dc_coupled=False,
+        )
+
+        # With DC PV: passive charge reduces effective cost, making the pair more viable
+        result_with_dc = _filter_oscillations(
+            power_schedule_kw=list(power_schedule),
+            mode_schedule=list(mode_schedule),
+            initial_soc_kwh=initial_soc,
+            price_forecast=prices,
+            min_price_spread=0.02,
+            degradation_cost_per_kwh=0.03,
+            rte=0.90,
+            step_durations_hours=step_durations,
+            min_soc_kwh=0.5,
+            max_soc_kwh=5.0,
+            pv_forecast=pv_forecast,
+            consumption_forecast=consumption_forecast,
+            feed_in_forecast=feed_in,
+            pv_dc_forecast=[2.0, 0.0, 0.0, 0.0],  # 2 kW DC PV during charge step
+            pv_dc_coupled=True,
+            pv_dc_efficiency=0.97,
+        )
+
+        # With DC PV, the charge cost is lower (partially free), so the filter
+        # should be less likely to suppress the charge step.
+        # At minimum, verify the DC PV case preserves more charging than without.
+        no_dc_charge_steps = sum(1 for m in result_no_dc[1] if m == "charging")
+        dc_charge_steps = sum(1 for m in result_with_dc[1] if m == "charging")
+        assert dc_charge_steps >= no_dc_charge_steps
