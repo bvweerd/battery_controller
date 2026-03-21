@@ -1153,7 +1153,7 @@ function renderDiagnostics(raw) {
     (bc.pv_dc_coupled ? kv('DC efficiency', `${((bc.pv_dc_efficiency||0)*100).toFixed(1)}%`) : '') +
     kv('Control mode', opt.control_mode || '—') +
     kv('Price forecast source', srcBadge) +
-    kv('Time step', opts.time_step_minutes ? `${opts.time_step_minutes} min` : '—') +
+    kv('Time step', (sched.price_interval || opts.time_step_minutes) ? `${sched.price_interval || opts.time_step_minutes} min` : '—') +
     kv('Current price', opt.current_price !== undefined ? `€ ${opt.current_price.toFixed(4)}/kWh` : '—') +
     kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
     kv('Discharge threshold (λ·√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
