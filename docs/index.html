@@ -916,7 +916,7 @@ function generateTips(d) {
     const ageMin = (Date.now() - new Date(ts)) / 60000;
     if (ageMin > 60) {
       tips.push({ t:'err', title:`Optimization data is ${ageMin.toFixed(0)} minutes old`,
-        text:`Expected refresh every 15 minutes. Check if Home Assistant and the integration
+        text:`Expected refresh at each price period boundary (15–60 min depending on your price sensor). Check if Home Assistant and the integration
         are running. Possible issues: HA restart, coordinator error, or connection problem.`});
     }
   }

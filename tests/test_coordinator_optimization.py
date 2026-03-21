@@ -1,9 +1,9 @@
-"""Tests for OptimizationCoordinator commitment behavior."""
+"""Tests for OptimizationCoordinator commitment behavior and scheduling."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -231,3 +231,186 @@ async def test_mode_switch_resets_commitment(hass):
 
     assert coordinator._committed_action == "idle"
     assert coordinator._committed_power == 0.0
+
+
+def _make_coordinator(hass):
+    """Build a minimal OptimizationCoordinator for scheduling tests."""
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [
+            (
+                "bat1",
+                {
+                    CONF_MAX_CHARGE_POWER_KW: 1.2,
+                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                    CONF_ROUND_TRIP_EFFICIENCY: 0.92,
+                    CONF_MIN_SOC_PERCENT: 10.0,
+                    CONF_MAX_SOC_PERCENT: 100.0,
+                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                },
+            )
+        ],
+    }
+    return OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+
+
+@pytest.mark.asyncio
+async def test_price_period_boundary_triggers_optimization(hass, monkeypatch):
+    """A new price period (start_times[0] change) must trigger optimization."""
+    coordinator = _make_coordinator(hass)
+
+    period_a = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    period_b = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.20, 0.22], [period_b, period_b + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period_b,
+    )
+
+    coordinator._last_price = 0.20
+    coordinator._last_period_start = period_a  # previous period
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.20"
+    new_mock = MagicMock()
+    new_mock.state = "0.22"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called, "optimization should be triggered at period boundary"
+    assert coordinator._last_period_start == period_b
+
+
+@pytest.mark.asyncio
+async def test_same_period_no_trigger_below_threshold(hass, monkeypatch):
+    """Within the same price period, small price changes must not trigger optimization."""
+    coordinator = _make_coordinator(hass)
+
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coordinator._last_price = 0.20
+    coordinator._last_period_start = period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.201], [period], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period + timedelta(minutes=5),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.20"
+    new_mock = MagicMock()
+    new_mock.state = "0.201"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert not refresh_called, (
+        "small intra-period change should not trigger optimization"
+    )
+
+
+def test_schedule_mid_period_run_future(hass, monkeypatch):
+    """Mid-period timer is registered when mid-point is in the future."""
+    coordinator = _make_coordinator(hass)
+
+    period_start = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 21, 11, 5, 0, tzinfo=timezone.utc)  # 5 min into period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: now,
+    )
+
+    registered = []
+    with patch(
+        "custom_components.battery_controller.coordinator_optimization.async_track_point_in_time",
+        side_effect=lambda hass, cb, t: registered.append(t) or (lambda: None),
+    ):
+        coordinator._schedule_mid_period_run(period_start, 60)
+
+    assert len(registered) == 1
+    assert registered[0] == period_start + timedelta(minutes=30)
+
+
+def test_schedule_mid_period_run_past(hass, monkeypatch):
+    """Mid-period timer is skipped when mid-point is already past."""
+    coordinator = _make_coordinator(hass)
+
+    period_start = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 21, 11, 35, 0, tzinfo=timezone.utc)  # past the 30-min mid
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: now,
+    )
+
+    registered = []
+    with patch(
+        "custom_components.battery_controller.coordinator_optimization.async_track_point_in_time",
+        side_effect=lambda hass, cb, t: registered.append(t) or (lambda: None),
+    ):
+        coordinator._schedule_mid_period_run(period_start, 60)
+
+    assert not registered, "should not schedule a timer when mid-point is past"
+
+
+def test_schedule_mid_period_run_cancels_previous(hass, monkeypatch):
+    """Scheduling a new mid-period run cancels any existing timer."""
+    coordinator = _make_coordinator(hass)
+
+    cancelled = []
+    coordinator._unsub_mid_period_timer = lambda: cancelled.append(True)
+
+    period_start = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 21, 11, 5, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: now,
+    )
+
+    with patch(
+        "custom_components.battery_controller.coordinator_optimization.async_track_point_in_time",
+        return_value=lambda: None,
+    ):
+        coordinator._schedule_mid_period_run(period_start, 60)
+
+    assert cancelled, "previous mid-period timer must be cancelled"

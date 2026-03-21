@@ -199,12 +199,11 @@ def print_summary(results: list[ScenarioResult]) -> None:
             parts.append(f"{mode}:{power:+.2f}={count}")
         print(f"  offset {offset:>2} min -> " + ", ".join(parts))
 
-    unstable = [
-        r
-        for r in results
-        if r.is_partial_step0 and (r.optimal_power_kw != r.step0_power_kw)
-    ]
-    print(f"\nPartial-step fallback cases: {len(unstable)} / {len(results)}")
+    # Partial-step scenarios (first step < 90% of full interval).
+    # The optimizer now always uses step 0 directly; step 1 is no longer
+    # used as a proxy, so optimal_power_kw == step0_power_kw for all runs.
+    partial = [r for r in results if r.is_partial_step0]
+    print(f"\nPartial-step scenarios: {len(partial)} / {len(results)}")
 
     by_start = defaultdict(set)
     for row in results:
