@@ -387,7 +387,45 @@ Several implementation details prevent subtle correctness bugs:
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | RTE symmetry | `charge_eff = discharge_eff = sqrt(RTE)` ensures `charge_eff × discharge_eff = RTE` exactly |
 
-## 12. Baseline Cost and Savings
+## 12. Variable Price Intervals (15-min / 30-min / hourly)
+
+The DP is fully **interval-agnostic**: all energy quantities are scaled by `step_durations_hours[t]`, so the same algorithm handles 15-minute, 30-minute, and hourly prices without modification.
+
+### How the interval is detected
+
+`helpers.py` auto-detects the price interval from the sensor's attributes:
+
+1. **Sensors with per-entry timestamps** (`net_prices_today`, `raw_today`, etc.): the delta between the first two `start` timestamps determines the interval (15, 30, or 60 min).
+2. **Sensors without timestamps** (`today`, `tomorrow`, bare float lists): defaults to 60 min.
+
+Detection happens in `_detect_interval_from_entries()`. The result flows into:
+- `extract_price_forecast_with_timestamps()` → returns `(prices, start_times, interval_minutes)`
+- `compute_step_durations_hours()` → computes per-step durations aligned to price boundaries
+
+### Step duration alignment
+
+The first DP step covers only the **remaining time** within the current price slot (partial interval). All subsequent steps are full intervals. This prevents energy miscalculation at price boundaries.
+
+| Price interval | Steps per day | First step | Full steps | DP table size |
+|---|---|---|---|---|
+| 60 min | 24 | ≤ 60 min | 1 h = 1.0 h each | 24 × SoC states |
+| 30 min | 48 | ≤ 30 min | 0.5 h each | 48 × SoC states |
+| 15 min | 96 | ≤ 15 min | 0.25 h each | 96 × SoC states |
+
+### PV and consumption resampling
+
+PV production and household consumption forecasts are always computed at 60-minute resolution (the open-meteo weather API delivers hourly data). When the price interval is finer, these are resampled to match:
+
+- `resample_forecast(pv_forecast_kw, 60, price_interval)` — weighted-average downsampling
+- Each 15-min slot within an hour gets the same kW value as the parent hour
+
+### Past-entry exclusion for timestamp-bearing sensors
+
+For sensors like Nordpool `raw_today` (96 entries per day with explicit `start` timestamps), past entries are skipped by comparing each entry's `start + interval` against `now`. This is identical to the `net_prices_today` handling and correctly excludes elapsed 15-min slots regardless of the current minute within an hour.
+
+---
+
+## 13. Baseline Cost and Savings
 
 The **baseline cost** represents the electricity cost without any battery. In this scenario:
 - All consumption is met directly from the grid
@@ -402,7 +440,7 @@ The **baseline cost** represents the electricity cost without any battery. In th
 
 ---
 
-## Summary
+## 14. Summary
 
 ```
 Inputs: SoC, price/PV/consumption forecasts, battery config
