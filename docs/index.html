@@ -1394,7 +1394,12 @@ function prefillSim(d) {
       if (a.step_durations_hours) { stepDursArr = a.step_durations_hours; break; }
     }
   }
-  const stepH = stepDursArr[1] || stepDursArr[0] || (opts.time_step_minutes ? opts.time_step_minutes/60 : 0.25);
+  // Prefer price_interval (authoritative) over step_durations_hours[1] (may be wrong
+  // in old diagnostics where interval detection was not yet implemented).
+  const priceIntervalMin = sched.price_interval || null;
+  const stepH = priceIntervalMin
+    ? priceIntervalMin / 60
+    : (stepDursArr[1] || stepDursArr[0] || (opts.time_step_minutes ? opts.time_step_minutes/60 : 0.25));
   set('sp-step-h', stepH);
 
   let prices = sched.price_forecast || [];
