@@ -150,6 +150,7 @@ async def async_get_config_entry_diagnostics(
                 "pv_forecast": result.pv_forecast,
                 "consumption_forecast": result.consumption_forecast,
                 # Step timing — needed for exact DP reproduction
+                "price_interval": data.get("price_interval"),
                 "step_durations_hours": data.get("step_durations_hours"),
                 "step_start_times_iso": data.get("step_start_times_iso"),
                 # Feed-in and model forecasts — needed for full simulator fidelity
