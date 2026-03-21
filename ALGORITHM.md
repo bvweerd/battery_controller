@@ -382,7 +382,7 @@ Several implementation details prevent subtle correctness bugs:
 |-------|-----|
 | Floating-point SoC boundary | `min_soc_wh = round(capacity × min_pct / 100 × 1000)` — avoids `212.0 < 212.00000000000003` |
 | Sub-resolution actions | Skip any non-idle action that doesn't cross a SoC state boundary |
-| Partial first step | Use `step_durations_hours[1]` (not `min(step_durations_hours)`) to compute `power_step_w` |
+| Partial first step | Use `step_durations_hours[1]` (not `min(step_durations_hours)`) to compute `power_step_w`; optimizer always uses step 0 as the immediate setpoint (primary runs are at period boundaries so step 0 is full) |
 | Horizon-end discharge | Terminal condition `V[T][s] = -stored_kwh × terminal_price` prevents horizon-end drain |
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | RTE symmetry | `charge_eff = discharge_eff = sqrt(RTE)` ensures `charge_eff × discharge_eff = RTE` exactly |
@@ -402,9 +402,23 @@ Detection happens in `_detect_interval_from_entries()`. The result flows into:
 - `extract_price_forecast_with_timestamps()` → returns `(prices, start_times, interval_minutes)`
 - `compute_step_durations_hours()` → computes per-step durations aligned to price boundaries
 
+### Scheduling
+
+The optimizer runs are event-driven, synchronised to the price sensor:
+
+| Trigger | When | Purpose |
+|---------|------|---------|
+| `_handle_price_change` (period boundary) | `start_times[0]` changes | Primary run; step 0 is always a full interval |
+| Mid-period correction | `period_start + interval/2` | Corrects SoC drift from the primary run |
+| DC coordinator fallback | 60-min interval | Safety net if above triggers miss |
+
+For sensors without timestamp attributes the fallback is a >10% price-change threshold.
+
 ### Step duration alignment
 
 The first DP step covers only the **remaining time** within the current price slot (partial interval). All subsequent steps are full intervals. This prevents energy miscalculation at price boundaries.
+
+Because primary runs fire at period boundaries, step 0 is always (or nearly always) a full interval. The partial-step case only occurs on HA restarts mid-period or during mid-period correction runs; in both cases the DP step 0 action is used directly.
 
 | Price interval | Steps per day | First step | Full steps | DP table size |
 |---|---|---|---|---|

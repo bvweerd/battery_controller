@@ -755,24 +755,8 @@ def optimize_battery_schedule(
     )
     savings = baseline_cost - initial_terminal_value - total_cost
 
-    # When step 0 is a partial interval (shorter than the full interval duration),
-    # its DP-optimal action is unreliable: the short duration combined with SoC
-    # quantization leaves few valid actions and produces erratic setpoints that
-    # oscillate between runs as the SoC evolves.  Step 1 is always a full interval
-    # and gives the intended setpoint for the current price period, so we use it as
-    # the immediate recommendation whenever step 0 is a meaningful partial step.
-    full_step_h = (
-        step_durations_hours[1]
-        if len(step_durations_hours) > 1
-        else step_durations_hours[0]
-    )
-    is_partial_step0 = step_durations_hours[0] < full_step_h * 0.9
-    if is_partial_step0 and len(power_schedule_kw) > 1:
-        setpoint_power_kw = power_schedule_kw[1]
-        setpoint_mode = mode_schedule[1]
-    else:
-        setpoint_power_kw = power_schedule_kw[0] if power_schedule_kw else 0.0
-        setpoint_mode = mode_schedule[0] if mode_schedule else "idle"
+    setpoint_power_kw = power_schedule_kw[0] if power_schedule_kw else 0.0
+    setpoint_mode = mode_schedule[0] if mode_schedule else "idle"
 
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,

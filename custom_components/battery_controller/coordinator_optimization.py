@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
 from homeassistant.helpers.event import (
+    async_track_point_in_time,
     async_track_state_change_event,
     async_track_time_interval,
 )
@@ -26,7 +27,6 @@ from .const import (
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MIN_PRICE_SPREAD,
-    CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
@@ -35,7 +35,6 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
-    DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
@@ -77,18 +76,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         config: dict[str, Any],
     ):
         """Initialize the optimization coordinator."""
-        interval_minutes = int(
-            config.get(
-                CONF_OPTIMIZATION_INTERVAL_MINUTES,
-                DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-            )
-        )
-
+        # Use a 60-minute fallback interval for the DataUpdateCoordinator's own
+        # retry/backoff mechanism.  The primary scheduling is now event-driven:
+        # price-period boundary (via _handle_price_change) + one mid-period
+        # correction run.  The DC interval only fires when those triggers miss.
         super().__init__(
             hass,
             _LOGGER,
             name="Battery Controller Optimization",
-            update_interval=timedelta(minutes=interval_minutes),
+            update_interval=timedelta(minutes=60),
         )
 
         self.weather_coordinator = weather_coordinator
@@ -157,9 +153,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._last_success_time: datetime | None = None
         self._unsub_soc: Any | None = None
         self._unsub_forecast: Any | None = None
-        self._unsub_optimizer_timer: Any | None = None
+        self._unsub_mid_period_timer: Any | None = None
         self._unsub_price_model_refresh: Any | None = None
-        self._interval_minutes: int = interval_minutes
+        # Last seen price period start; used to detect period boundary transitions.
+        self._last_period_start: datetime | None = None
 
         # Historical price forecast model (fallback when day-ahead not yet published)
         self._price_model = PriceForecastModel(
@@ -177,7 +174,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         # Enabled flag: when False _async_update_data returns cached data immediately
-        # without re-running the optimizer. The 15-min scheduler keeps running so it
+        # without re-running the optimizer. The scheduler keeps running so it
         # is trivial to re-enable without manual intervention.
         self._optimization_enabled: bool = True
 
@@ -272,23 +269,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             _on_forecast_update
         )
 
-        # Guaranteed periodic timer using async_track_time_interval.
-        # DataUpdateCoordinator's own update_interval only reschedules when
-        # listeners are registered — which doesn't happen until platform entities
-        # call async_added_to_hass(). If the first refresh fails before entities
-        # register (common at HA startup when input sensors are unavailable) the
-        # coordinator's internal timer is never created and the optimizer never
-        # runs again. This timer fires unconditionally, bypassing that mechanism.
-        self._unsub_optimizer_timer = async_track_time_interval(
-            self.hass,
-            self._handle_optimization_interval,
-            timedelta(minutes=self._interval_minutes),
-        )
-        _LOGGER.debug(
-            "Optimization interval timer started: every %d minutes",
-            self._interval_minutes,
-        )
-
         # Set up real-time zero_grid control via a periodic timer.
         # A timer avoids the double-trigger problem that occurs when multiple
         # sensors (e.g. DSMR consumption + production) update simultaneously:
@@ -319,9 +299,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def _handle_price_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle price sensor state changes.
 
-        Triggers optimization when:
-        - The sensor becomes available for the first time (e.g. after HA restart)
-        - The price changes significantly (>10%)
+        Triggers optimization at each price period boundary and schedules a
+        single mid-period correction run for SoC drift.  For sensors without
+        timestamp attributes, falls back to a >10% threshold check.
         """
         new_state = event.data.get("new_state")
         if not new_state:
@@ -339,16 +319,37 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             or old_state.state in ("unknown", "unavailable")
         )
 
+        # Try to read the current period start from sensor timestamps.
+        try:
+            _, start_times, interval_minutes = extract_price_forecast_with_timestamps(
+                new_state
+            )
+            period_start: datetime | None = start_times[0] if start_times else None
+        except Exception:  # noqa: BLE001
+            period_start = None
+            interval_minutes = 60
+
         if was_unavailable:
-            # Sensor just became available — trigger a full optimization refresh
             _LOGGER.debug(
                 "Price sensor '%s' became available (%.4f), triggering optimization",
                 self._price_sensor,
                 new_price,
             )
             self._last_price = new_price
+            self._last_period_start = period_start
+            self._schedule_mid_period_run(period_start, interval_minutes)
+            self.hass.async_create_task(self.async_request_refresh())
+        elif period_start is not None and period_start != self._last_period_start:
+            # New price period — primary optimization trigger.
+            _LOGGER.debug(
+                "New price period started at %s, triggering optimization", period_start
+            )
+            self._last_price = new_price
+            self._last_period_start = period_start
+            self._schedule_mid_period_run(period_start, interval_minutes)
             self.hass.async_create_task(self.async_request_refresh())
         elif self._last_price is not None and self._last_price != 0:
+            # Same period or no timestamp info — fallback threshold check.
             change_pct = abs(new_price - self._last_price) / abs(self._last_price)
             if change_pct >= PRICE_CHANGE_REOPTIMIZE_THRESHOLD:
                 _LOGGER.debug(
@@ -358,16 +359,44 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self.hass.async_create_task(self.async_request_refresh())
             self._last_price = new_price
 
-    async def _handle_optimization_interval(self, now: datetime) -> None:
-        """Periodic optimization trigger via async_track_time_interval.
+    @callback
+    def _schedule_mid_period_run(
+        self, period_start: datetime | None, interval_minutes: int
+    ) -> None:
+        """Schedule a single mid-period correction run at period_start + interval/2.
 
-        This fires unconditionally every interval_minutes, independent of whether
-        DataUpdateCoordinator has any listeners registered.  It is the primary
-        scheduling mechanism; the coordinator's own update_interval is kept as a
-        fallback so that HA's built-in retry / backoff logic still applies.
+        Cancels any previously scheduled mid-period timer.  Skipped when the
+        mid-point is already in the past (e.g. HA restart late in a period).
         """
-        _LOGGER.debug("Optimization interval timer fired at %s", now)
-        await self.async_request_refresh()
+        if self._unsub_mid_period_timer:
+            self._unsub_mid_period_timer()
+            self._unsub_mid_period_timer = None
+
+        if period_start is None:
+            return
+
+        mid_point = period_start + timedelta(minutes=interval_minutes / 2)
+        now = dt_util.utcnow()
+        if mid_point <= now:
+            _LOGGER.debug(
+                "Mid-period correction point %s is already past, skipping", mid_point
+            )
+            return
+
+        @callback
+        def _fire(_now: datetime) -> None:
+            self._unsub_mid_period_timer = None
+            _LOGGER.debug("Mid-period correction run triggered at %s", _now)
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._unsub_mid_period_timer = async_track_point_in_time(
+            self.hass, _fire, mid_point
+        )
+        _LOGGER.debug(
+            "Mid-period correction scheduled for %s (%d min from now)",
+            mid_point,
+            int((mid_point - now).total_seconds() / 60),
+        )
 
     @callback
     def _handle_soc_available(self, event: Event[EventStateChangedData]) -> None:
@@ -634,9 +663,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_forecast:
             self._unsub_forecast()
             self._unsub_forecast = None
-        if self._unsub_optimizer_timer:
-            self._unsub_optimizer_timer()
-            self._unsub_optimizer_timer = None
+        if self._unsub_mid_period_timer:
+            self._unsub_mid_period_timer()
+            self._unsub_mid_period_timer = None
         if self._unsub_price_model_refresh:
             self._unsub_price_model_refresh()
             self._unsub_price_model_refresh = None
