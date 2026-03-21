@@ -255,7 +255,7 @@
         <input id="sp-degradation" type="number" value="0.04" step="0.01" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Min price spread (€/kWh)</span>
         <input id="sp-spread" type="number" value="0.05" step="0.01" class="sim-input mt-0.5"></label>
-      <label class="block"><span class="kv-label">Step duration (hours)</span>
+      <label class="block"><span class="kv-label">Step duration (hours) — 0.25 = 15 min, 1.0 = 60 min</span>
         <input id="sp-step-h" type="number" value="0.25" step="0.0833" min="0.0833" max="1" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Terminal shadow price (€/kWh, 0=auto)</span>
         <input id="sp-terminal" type="number" value="0" step="0.01" class="sim-input mt-0.5"></label>
@@ -1244,7 +1244,7 @@ function renderDiagnostics(raw) {
         ${rawCost != null ? kv('Raw DP cost', `€ ${rawCost.toFixed(5)}`) : ''}
         ${rawSavings != null ? kv('Raw DP savings', `€ ${rawSavings.toFixed(5)}`) : ''}
         ${filterImpact != null ? kv('Filter cost', `<span class="text-orange-500">${filterImpact >= 0 ? '+' : ''}€ ${filterImpact.toFixed(5)}</span>`) : ''}
-        ${kv('Horizon', `${totalH.toFixed(1)} h (${prices.length} steps)`)}
+        ${kv('Horizon', `${totalH.toFixed(1)} h · ${prices.length} steps · ${Math.round(stepH * 60)} min/step`)}
       </div>`;
   }
 
