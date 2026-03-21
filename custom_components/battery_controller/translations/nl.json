@@ -45,7 +45,6 @@
           "advanced": {
             "name": "Geavanceerde Instellingen",
             "data": {
-              "optimization_interval_minutes": "Optimalisatie-interval (minuten)",
               "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
               "zero_grid_enabled": "Nul-op-de-meter actief"
             }
@@ -125,7 +124,6 @@
           "advanced": {
             "name": "Geavanceerde Instellingen",
             "data": {
-              "optimization_interval_minutes": "Optimalisatie-interval (minuten)",
               "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
               "zero_grid_enabled": "Nul-op-de-meter actief"
             }

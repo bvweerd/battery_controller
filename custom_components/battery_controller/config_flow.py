@@ -28,7 +28,6 @@ from .const import (
     CONF_MAX_SOC_PERCENT,
     CONF_MIN_PRICE_SPREAD,
     CONF_MIN_SOC_PERCENT,
-    CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
@@ -44,7 +43,6 @@ from .const import (
     DEFAULT_MAX_DISCHARGE_POWER_KW,
     DEFAULT_MAX_SOC_PERCENT,
     DEFAULT_MIN_SOC_PERCENT,
-    DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
     DEFAULT_MAX_GRID_POWER_KW,
     DEFAULT_PV_DC_EFFICIENCY,
     DEFAULT_PV_ORIENTATION_DEG,
@@ -262,22 +260,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
 
     advanced_schema = vol.Schema(
         {
-            vol.Required(
-                CONF_OPTIMIZATION_INTERVAL_MINUTES,
-                default=d.get(
-                    CONF_OPTIMIZATION_INTERVAL_MINUTES,
-                    DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-                ),
-            ): selector(
-                {
-                    "number": {
-                        "min": 1,
-                        "max": 60,
-                        "mode": "box",
-                        "unit_of_measurement": "min",
-                    }
-                }
-            ),
             vol.Optional(
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),
@@ -343,13 +325,6 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         ),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
         # Advanced
-        CONF_OPTIMIZATION_INTERVAL_MINUTES: int(
-            _g(
-                adv,
-                CONF_OPTIMIZATION_INTERVAL_MINUTES,
-                DEFAULT_OPTIMIZATION_INTERVAL_MINUTES,
-            )
-        ),
         CONF_FIXED_FEED_IN_PRICE: float(
             _g(adv, CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)
         ),
