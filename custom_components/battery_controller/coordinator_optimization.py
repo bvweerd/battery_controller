@@ -1512,5 +1512,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "price_forecast_model": price_forecast_model,
             "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
+            "price_interval": price_interval,
             "timestamp": dt_util.utcnow(),
         }
