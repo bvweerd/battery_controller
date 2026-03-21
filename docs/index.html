@@ -989,7 +989,7 @@ function renderSpreadAnalysis(bc, opts, prices) {
       <div class="kv-row"><span class="kv-label">Actual spread</span>
         <span class="kv-value font-semibold ${profitable?'text-green-700':'text-red-700'}">${(spread*100).toFixed(2)} ct/kWh</span></div>
       <div class="kv-row"><span class="kv-label">RTE energy loss</span><span class="kv-value">${(rteLoss*100).toFixed(2)} ct/kWh</span></div>
-      <div class="kv-row"><span class="kv-label">Degradation (2×/√RTE)</span><span class="kv-value">${(degLoss*100).toFixed(2)} ct/kWh</span></div>
+      <div class="kv-row"><span class="kv-label">Degradation threshold</span><span class="kv-value">${(degLoss*100).toFixed(2)} ct/kWh</span></div>
       <div class="kv-row"><span class="kv-label">Minimum Δ required</span>
         <span class="kv-value font-bold">${(deltaMin*100).toFixed(2)} ct/kWh</span></div>
       <div class="mt-2 p-2 rounded-lg ${profitable?'bg-green-50 text-green-800':'bg-red-50 text-red-800'} text-xs font-medium">
