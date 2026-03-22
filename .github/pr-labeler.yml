@@ -1,0 +1,35 @@
+bug:
+  - changed-files:
+    - any-glob-to-any-file: []  # no file-based bug detection; use issue labels or manual
+
+enhancement:
+  - changed-files:
+    - any-glob-to-any-file:
+      - custom_components/battery_controller/optimizer.py
+      - custom_components/battery_controller/coordinator.py
+      - custom_components/battery_controller/zero_grid_controller.py
+      - custom_components/battery_controller/forecast_models.py
+      - custom_components/battery_controller/battery_model.py
+      - custom_components/battery_controller/config_flow.py
+      - custom_components/battery_controller/sensor.py
+      - custom_components/battery_controller/number.py
+      - custom_components/battery_controller/select.py
+      - custom_components/battery_controller/switch.py
+      - custom_components/battery_controller/binary_sensor.py
+      - custom_components/battery_controller/helpers.py
+      - custom_components/battery_controller/const.py
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "*.md"
+      - docs/**
+      - custom_components/battery_controller/translations/**
+      - custom_components/battery_controller/strings.json
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - requirements.txt
+      - custom_components/battery_controller/manifest.json
+      - setup.cfg
