@@ -907,10 +907,19 @@ def _filter_oscillations(
             + to_export_kw * feed_in_forecast[timestep]
         ) / total_kw
 
-    # Lookahead window: use first step duration as representative interval.
-    # The first step may be shorter (partial interval), making the window
-    # slightly larger in step count — this is conservative and safe.
-    ref_step_h = step_durations_hours[0] if step_durations_hours else 0.25
+    # Lookahead window: use the full interval step (index 1), not the partial
+    # first step (index 0).  The first step is artificially shortened to align
+    # with the current price-period boundary (e.g. 1 minute when running just
+    # before a 15-min tick).  Using it would inflate lookahead_steps by up to
+    # 15× for quarter-hour data (round(2.0 / 0.017) = 120 instead of 8),
+    # causing the filter to scan the entire 36-h horizon and pair charge steps
+    # with distant, unrelated discharge steps — incorrectly suppressing whole
+    # charge blocks.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
     lookahead_steps = max(1, round(oscillation_window_hours / ref_step_h))
 
     # Iterative scan: repeat until convergence so that suppressing one step
@@ -922,29 +931,49 @@ def _filter_oscillations(
         i = 0
         while i < len(filtered_mode) - 1:
             if filtered_mode[i] == ACTION_CHARGING:
-                # Look ahead for quick discharge
+                # Look ahead for a discharge within the oscillation window.
+                # Evaluate ALL discharges in the window: only suppress the
+                # charge if every discharge found is unprofitable.  Stopping
+                # at the *nearest* discharge was wrong for quarter-hour data:
+                # the DP can produce a complex schedule where a small
+                # intermediate discharge (low spread) precedes the main
+                # discharge (high spread).  Breaking on the first discharge
+                # caused the charge to be removed even though a profitable
+                # pairing existed slightly further in the window.
+                charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
+                has_discharge_in_window = False
+                has_profitable_discharge = False
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
                     if filtered_mode[j] == ACTION_DISCHARGING:
-                        charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
+                        has_discharge_in_window = True
                         discharge_price = get_discharge_value(j, abs(filtered_power[j]))
                         effective_spread = discharge_price - charge_cost / rte
-                        if effective_spread < min_arbitrage_spread:
-                            filtered_power[i] = 0.0
-                            filtered_mode[i] = ACTION_IDLE
-                            changed = True
-                        break
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_discharge = True
+                            break
+                if has_discharge_in_window and not has_profitable_discharge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = ACTION_IDLE
+                    changed = True
             elif filtered_mode[i] == ACTION_DISCHARGING:
-                # Look ahead for quick charge
+                # Look ahead for a charge within the oscillation window.
+                # Same logic: suppress only if every charge in the window
+                # would make this discharge unprofitable.
+                discharge_price = get_discharge_value(i, abs(filtered_power[i]))
+                has_charge_in_window = False
+                has_profitable_charge = False
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
                     if filtered_mode[j] == ACTION_CHARGING:
-                        discharge_price = get_discharge_value(i, abs(filtered_power[i]))
+                        has_charge_in_window = True
                         charge_cost = get_charge_cost(j, max(filtered_power[j], 0.0))
                         effective_spread = discharge_price - charge_cost / rte
-                        if effective_spread < min_arbitrage_spread:
-                            filtered_power[i] = 0.0
-                            filtered_mode[i] = ACTION_IDLE
-                            changed = True
-                        break
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_charge = True
+                            break
+                if has_charge_in_window and not has_profitable_charge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = ACTION_IDLE
+                    changed = True
             i += 1
 
     return _rebuild_schedule(
