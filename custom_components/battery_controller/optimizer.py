@@ -8,6 +8,9 @@ from dataclasses import dataclass
 
 from .battery_model import BatteryConfig
 from .const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
     POWER_IDLE_THRESHOLD_KW,
@@ -105,11 +108,11 @@ def _rebuild_schedule(
 
         rebuilt_power[t] = actual_power_kw
         if actual_power_kw > POWER_IDLE_THRESHOLD_KW:
-            rebuilt_mode.append("charging")
+            rebuilt_mode.append(ACTION_CHARGING)
         elif actual_power_kw < -POWER_IDLE_THRESHOLD_KW:
-            rebuilt_mode.append("discharging")
+            rebuilt_mode.append(ACTION_DISCHARGING)
         else:
-            rebuilt_mode.append("idle")
+            rebuilt_mode.append(ACTION_IDLE)
         soc_schedule.append(current_soc_kwh)
 
     return rebuilt_power, rebuilt_mode, soc_schedule
@@ -626,12 +629,12 @@ def optimize_battery_schedule(
         power_schedule_kw.append(power_kw)
 
         if action_w > 0:
-            mode_schedule.append("charging")
+            mode_schedule.append(ACTION_CHARGING)
             current_soc = min(
                 current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
             )
         elif action_w < 0:
-            mode_schedule.append("discharging")
+            mode_schedule.append(ACTION_DISCHARGING)
             current_soc = max(
                 current_soc - abs(action_w) * time_step_hours / sqrt_rte,
                 float(min_soc_wh),
@@ -643,7 +646,7 @@ def optimize_battery_schedule(
                 headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
                 passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
                 current_soc = current_soc + passive_wh
-            mode_schedule.append("idle")
+            mode_schedule.append(ACTION_IDLE)
 
         soc_schedule_kwh.append(current_soc / 1000)
 
@@ -756,7 +759,7 @@ def optimize_battery_schedule(
     savings = baseline_cost - initial_terminal_value - total_cost
 
     setpoint_power_kw = power_schedule_kw[0] if power_schedule_kw else 0.0
-    setpoint_mode = mode_schedule[0] if mode_schedule else "idle"
+    setpoint_mode = mode_schedule[0] if mode_schedule else ACTION_IDLE
 
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,
@@ -904,10 +907,19 @@ def _filter_oscillations(
             + to_export_kw * feed_in_forecast[timestep]
         ) / total_kw
 
-    # Lookahead window: use first step duration as representative interval.
-    # The first step may be shorter (partial interval), making the window
-    # slightly larger in step count — this is conservative and safe.
-    ref_step_h = step_durations_hours[0] if step_durations_hours else 0.25
+    # Lookahead window: use the full interval step (index 1), not the partial
+    # first step (index 0).  The first step is artificially shortened to align
+    # with the current price-period boundary (e.g. 1 minute when running just
+    # before a 15-min tick).  Using it would inflate lookahead_steps by up to
+    # 15× for quarter-hour data (round(2.0 / 0.017) = 120 instead of 8),
+    # causing the filter to scan the entire 36-h horizon and pair charge steps
+    # with distant, unrelated discharge steps — incorrectly suppressing whole
+    # charge blocks.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
     lookahead_steps = max(1, round(oscillation_window_hours / ref_step_h))
 
     # Iterative scan: repeat until convergence so that suppressing one step
@@ -918,30 +930,50 @@ def _filter_oscillations(
         changed = False
         i = 0
         while i < len(filtered_mode) - 1:
-            if filtered_mode[i] == "charging":
-                # Look ahead for quick discharge
+            if filtered_mode[i] == ACTION_CHARGING:
+                # Look ahead for a discharge within the oscillation window.
+                # Evaluate ALL discharges in the window: only suppress the
+                # charge if every discharge found is unprofitable.  Stopping
+                # at the *nearest* discharge was wrong for quarter-hour data:
+                # the DP can produce a complex schedule where a small
+                # intermediate discharge (low spread) precedes the main
+                # discharge (high spread).  Breaking on the first discharge
+                # caused the charge to be removed even though a profitable
+                # pairing existed slightly further in the window.
+                charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
+                has_discharge_in_window = False
+                has_profitable_discharge = False
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                    if filtered_mode[j] == "discharging":
-                        charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
+                    if filtered_mode[j] == ACTION_DISCHARGING:
+                        has_discharge_in_window = True
                         discharge_price = get_discharge_value(j, abs(filtered_power[j]))
                         effective_spread = discharge_price - charge_cost / rte
-                        if effective_spread < min_arbitrage_spread:
-                            filtered_power[i] = 0.0
-                            filtered_mode[i] = "idle"
-                            changed = True
-                        break
-            elif filtered_mode[i] == "discharging":
-                # Look ahead for quick charge
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_discharge = True
+                            break
+                if has_discharge_in_window and not has_profitable_discharge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = ACTION_IDLE
+                    changed = True
+            elif filtered_mode[i] == ACTION_DISCHARGING:
+                # Look ahead for a charge within the oscillation window.
+                # Same logic: suppress only if every charge in the window
+                # would make this discharge unprofitable.
+                discharge_price = get_discharge_value(i, abs(filtered_power[i]))
+                has_charge_in_window = False
+                has_profitable_charge = False
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                    if filtered_mode[j] == "charging":
-                        discharge_price = get_discharge_value(i, abs(filtered_power[i]))
+                    if filtered_mode[j] == ACTION_CHARGING:
+                        has_charge_in_window = True
                         charge_cost = get_charge_cost(j, max(filtered_power[j], 0.0))
                         effective_spread = discharge_price - charge_cost / rte
-                        if effective_spread < min_arbitrage_spread:
-                            filtered_power[i] = 0.0
-                            filtered_mode[i] = "idle"
-                            changed = True
-                        break
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_charge = True
+                            break
+                if has_charge_in_window and not has_profitable_charge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = ACTION_IDLE
+                    changed = True
             i += 1
 
     return _rebuild_schedule(
@@ -996,7 +1028,7 @@ def _filter_micro_cycles(
     i = 0
     while i < len(filtered_mode):
         current_dir = filtered_mode[i]
-        if current_dir not in ("charging", "discharging"):
+        if current_dir not in (ACTION_CHARGING, ACTION_DISCHARGING):
             i += 1
             continue
 
@@ -1015,7 +1047,7 @@ def _filter_micro_cycles(
         if total_energy_kwh < min_cycle_kwh:
             for k in range(i, j):
                 filtered_power[k] = 0.0
-                filtered_mode[k] = "idle"
+                filtered_mode[k] = ACTION_IDLE
             any_filtered = True
 
         i = j
@@ -1078,7 +1110,7 @@ def _empty_result(
         baseline_cost=0.0,
         savings=0.0,
         optimal_power_kw=0.0,
-        optimal_mode="idle",
+        optimal_mode=ACTION_IDLE,
         shadow_price_eur_kwh=0.0,
         price_forecast=[],
         pv_forecast=[],

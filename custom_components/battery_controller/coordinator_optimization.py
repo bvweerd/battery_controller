@@ -18,6 +18,9 @@ from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
@@ -135,7 +138,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Last optimization result and effective mode (persists between real-time updates)
         self._last_result: OptimizationResult | None = None
         self._last_shadow_price: float | None = None
-        self._effective_mode: str = "idle"
+        self._effective_mode: str = ACTION_IDLE
         self._effective_power: float = 0.0
         # Schedule power currently sent to the controller after all mode resolution
         # and commitment filtering. This is not necessarily the raw optimizer output.
@@ -143,7 +146,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Commitment filter: prevent switching active charge/discharge to idle unless
         # the price has moved enough to make the change economically justified.
-        self._committed_action: str = "idle"
+        self._committed_action: str = ACTION_IDLE
         self._committed_price: float = 0.0
         self._committed_power: float = 0.0
         self._committed_step_start: datetime | None = None
@@ -199,7 +202,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def control_mode(self, mode: str) -> None:
         """Set control mode and reset commitment state to prevent stale locks."""
         self._control_mode = mode
-        self._committed_action = "idle"
+        self._committed_action = ACTION_IDLE
         self._committed_price = 0.0
         self._committed_power = 0.0
         self._committed_step_start = None
@@ -588,17 +591,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # or manual, where idle must mean truly stop). Only when grid is actually
         # exporting (negative), i.e. real PV surplus — not just near-zero import noise.
         if (
-            effective_mode == "idle"
+            effective_mode == ACTION_IDLE
             and self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
             and current_grid_w < 0
             and has_power_sensors
         ):
             return "zero_grid"
-        if effective_mode == "idle":
-            return "idle"
+        if effective_mode == ACTION_IDLE:
+            return ACTION_IDLE
         if effective_mode == "manual":
             return "manual"
-        if effective_mode in ("charging", "discharging"):
+        if effective_mode in (ACTION_CHARGING, ACTION_DISCHARGING):
             return "follow_schedule"
         return self._control_mode
 
@@ -722,11 +725,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         power_w = power_kw * 1000
         if power_w > BATTERY_MODE_THRESHOLD_W:
-            mode = "charging"
+            mode = ACTION_CHARGING
         elif power_w < -BATTERY_MODE_THRESHOLD_W:
-            mode = "discharging"
+            mode = ACTION_DISCHARGING
         else:
-            mode = "idle"
+            mode = ACTION_IDLE
 
         return BatteryState(
             soc_kwh=soc_kwh, soc_percent=soc_percent, power_kw=power_kw, mode=mode
@@ -770,11 +773,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         power_w = total_power_kw * 1000
         if power_w > BATTERY_MODE_THRESHOLD_W:
-            mode = "charging"
+            mode = ACTION_CHARGING
         elif power_w < -BATTERY_MODE_THRESHOLD_W:
-            mode = "discharging"
+            mode = ACTION_DISCHARGING
         else:
-            mode = "idle"
+            mode = ACTION_IDLE
 
         return BatteryState(
             soc_kwh=total_soc_kwh,
@@ -1307,7 +1310,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_power = manual_w / 1000  # kW for output sensors
         elif self._control_mode == MODE_HYBRID:
             # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption
-            if result.optimal_mode == "idle":
+            if result.optimal_mode == ACTION_IDLE:
                 # Optimizer wants to preserve battery capacity.
                 # This means: don't charge (even with PV surplus) and don't discharge.
                 #
@@ -1318,16 +1321,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 # Exception: if there's consumption (grid importing), use zero_grid
                 # to reduce import with available PV, without cycling the battery.
                 has_upcoming_discharge = any(
-                    m == "discharging" for m in result.mode_schedule[1:]
+                    m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
                 )
                 if has_upcoming_discharge and current_grid >= 0:
                     # Preserve capacity (discharge planned, no PV surplus)
-                    effective_mode = "idle"
+                    effective_mode = ACTION_IDLE
                 else:
                     # Either no discharge planned, or PV surplus to capture
                     effective_mode = "zero_grid"
                 effective_power = 0.0
-            elif result.optimal_mode == "discharging":
+            elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
                 # Use shadow price as the threshold: net sell value per kWh stored
                 # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
@@ -1349,21 +1352,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 sqrt_rte = self.battery_config.round_trip_efficiency**0.5
                 net_sell_value = current_feed_in * sqrt_rte
                 threshold = result.shadow_price_eur_kwh
-                if self._last_hybrid_decision == "discharging":
+                if self._last_hybrid_decision == ACTION_DISCHARGING:
                     should_discharge = net_sell_value >= threshold * 0.95
                 else:
                     should_discharge = net_sell_value >= threshold * 1.05
 
                 if should_discharge:
-                    effective_mode = "discharging"
+                    effective_mode = ACTION_DISCHARGING
                     effective_power = result.optimal_power_kw
-                    self._last_hybrid_decision = "discharging"
+                    self._last_hybrid_decision = ACTION_DISCHARGING
                 else:
                     # Shadow price > sell value: energy is more valuable later
                     effective_mode = "zero_grid"
                     effective_power = 0.0
                     self._last_hybrid_decision = "zero_grid"
-            elif result.optimal_mode == "charging" and current_grid < 0:
+            elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
                 current_feed_in = (
                     resampled_feed_in[0]
                     if resampled_feed_in
@@ -1409,19 +1412,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 and current_step_start == self._committed_step_start
             )
             direction_flip = (
-                self._committed_action == "charging" and effective_mode == "discharging"
+                self._committed_action == ACTION_CHARGING
+                and effective_mode == ACTION_DISCHARGING
             ) or (
-                self._committed_action == "discharging" and effective_mode == "charging"
+                self._committed_action == ACTION_DISCHARGING
+                and effective_mode == ACTION_CHARGING
             )
-            if self._committed_action == "charging":
+            if self._committed_action == ACTION_CHARGING:
                 price_jumped = current_price > self._committed_price + commit_spread
-            elif self._committed_action == "discharging":
+            elif self._committed_action == ACTION_DISCHARGING:
                 price_jumped = current_price < self._committed_price - commit_spread
             else:
                 price_jumped = False
 
             if (
-                self._committed_action in ("charging", "discharging")
+                self._committed_action in (ACTION_CHARGING, ACTION_DISCHARGING)
                 and same_price_period
                 and not price_jumped
                 and not soc_at_limit
@@ -1439,7 +1444,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         commit_spread,
                     )
                     effective_power = self._committed_power
-                elif effective_mode == "idle":
+                elif effective_mode == ACTION_IDLE:
                     # Prevent switching an active charge/discharge to idle.
                     _LOGGER.debug(
                         "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
@@ -1464,7 +1469,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._committed_step_start = current_step_start
 
         controller_schedule_w = (
-            effective_power * 1000 if effective_mode != "idle" else 0.0
+            effective_power * 1000 if effective_mode != ACTION_IDLE else 0.0
         )
 
         # Store for real-time control loop
