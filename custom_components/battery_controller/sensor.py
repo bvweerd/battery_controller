@@ -20,6 +20,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
     BATTERY_SUBENTRY_TYPE,
     DOMAIN,
     PV_SUBENTRY_TYPE,
@@ -207,7 +210,7 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return {}
         return {
-            "optimal_mode": self.coordinator.data.get("optimal_mode", "idle"),
+            "optimal_mode": self.coordinator.data.get("optimal_mode", ACTION_IDLE),
             "current_price": self.coordinator.data.get("current_price", 0.0),
         }
 
@@ -225,7 +228,7 @@ class BatteryOptimalModeSensor(BatteryControllerSensor):
     def native_value(self) -> str | None:
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.get("optimal_mode", "idle")
+        return self.coordinator.data.get("optimal_mode", ACTION_IDLE)
 
 
 class BatteryScheduleSensor(BatteryControllerSensor):
@@ -245,9 +248,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return None
         mode_schedule = self.coordinator.data.get("mode_schedule", [])
-        n_charging = sum(1 for m in mode_schedule if m == "charging")
-        n_discharging = sum(1 for m in mode_schedule if m == "discharging")
-        n_idle = sum(1 for m in mode_schedule if m == "idle")
+        n_charging = sum(1 for m in mode_schedule if m == ACTION_CHARGING)
+        n_discharging = sum(1 for m in mode_schedule if m == ACTION_DISCHARGING)
+        n_idle = sum(1 for m in mode_schedule if m == ACTION_IDLE)
         return f"C:{n_charging} D:{n_discharging} I:{n_idle}"
 
     @property

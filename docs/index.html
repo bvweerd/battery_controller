@@ -1189,7 +1189,7 @@ function renderDiagnostics(raw) {
       const arrays = fc.per_pv_array_forecasts || {};
       const keys = Object.keys(arrays);
       if (keys.length < 2) return '';
-      return keys.map(k => kv(`PV array ${k.slice(0,8)}… now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
+      return keys.map(k => kv(`PV array ${k} now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
     })();
 
   // ── Charts

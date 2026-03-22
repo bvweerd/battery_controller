@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .battery_model import BatteryConfig
+from .const import ACTION_CHARGING, ACTION_DISCHARGING, ACTION_IDLE
 from .helpers import clamp
 
 _LOGGER = logging.getLogger(__name__)
@@ -238,11 +239,11 @@ class ZeroGridController:
 
         # Determine action mode: use deadband as the idle threshold
         if final_target_w > self.config.deadband_w:
-            action_mode = "charging"
+            action_mode = ACTION_CHARGING
         elif final_target_w < -self.config.deadband_w:
-            action_mode = "discharging"
+            action_mode = ACTION_DISCHARGING
         else:
-            action_mode = "idle"
+            action_mode = ACTION_IDLE
 
         return {
             "target_power_w": final_target_w,
