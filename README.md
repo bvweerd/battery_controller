@@ -367,4 +367,4 @@ automation:
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details.
