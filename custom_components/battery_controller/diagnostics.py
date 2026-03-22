@@ -9,16 +9,35 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
+from .const import (
+    CONF_BATTERY_POWER_SENSOR,
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+    CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_FEED_IN_PRICE_SENSOR,
+    CONF_PRICE_SENSOR,
+)
+
 # Sensor entity IDs may be considered private; redact them
 TO_REDACT: set[str] = {
-    "price_sensor",
-    "feed_in_price_sensor",
-    "battery_soc_sensor",
-    "battery_power_sensor",
+    CONF_PRICE_SENSOR,
+    CONF_FEED_IN_PRICE_SENSOR,
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_BATTERY_POWER_SENSOR,
     "pv_forecast_sensor",
-    "electricity_consumption_sensors",
-    "electricity_production_sensors",
+    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+    CONF_ELECTRICITY_PRODUCTION_SENSORS,
 }
+
+
+def _subentry_name_map(entry: ConfigEntry) -> dict[str, str]:
+    """Return a mapping of subentry_id → title for all subentries."""
+    return {sid: sub.title for sid, sub in entry.subentries.items()}
+
+
+def _remap_keys(d: dict[str, Any], name_map: dict[str, str]) -> dict[str, Any]:
+    """Replace subentry ID keys with their human-readable titles."""
+    return {name_map.get(k, k): v for k, v in d.items()}
 
 
 async def async_get_config_entry_diagnostics(
@@ -27,6 +46,7 @@ async def async_get_config_entry_diagnostics(
     """Return diagnostics for a config entry."""
 
     entry_data = entry.runtime_data if hasattr(entry, "runtime_data") else None
+    name_map = _subentry_name_map(entry)
 
     weather_coord = getattr(entry_data, "weather_coordinator", None)
     forecast_coord = getattr(entry_data, "forecast_coordinator", None)
@@ -83,7 +103,9 @@ async def async_get_config_entry_diagnostics(
             "current_ghi_wm2": forecast_coord.data.get("current_ghi_wm2"),
             "current_wind_speed_ms": forecast_coord.data.get("current_wind_speed_ms"),
             "pv_dc_coupled": forecast_coord.data.get("pv_dc_coupled"),
-            "per_pv_array_forecasts": forecast_coord.data.get("per_pv_array_forecasts"),
+            "per_pv_array_forecasts": _remap_keys(
+                forecast_coord.data.get("per_pv_array_forecasts") or {}, name_map
+            ),
             "timestamp": str(forecast_coord.data.get("timestamp")),
         }
         # Include learned consumption pattern
@@ -114,7 +136,9 @@ async def async_get_config_entry_diagnostics(
             "schedule_mode": data.get("schedule_mode"),
             "schedule_power_kw": data.get("schedule_power_kw"),
             "control_action": data.get("control_action"),
-            "battery_setpoints": data.get("battery_setpoints"),
+            "battery_setpoints": _remap_keys(
+                data.get("battery_setpoints") or {}, name_map
+            ),
             "total_cost": data.get("total_cost"),
             "baseline_cost": data.get("baseline_cost"),
             "savings": data.get("savings"),
@@ -193,6 +217,13 @@ async def async_get_config_entry_diagnostics(
             "title": entry.title,
             "data": async_redact_data(dict(entry.data), TO_REDACT),
             "options": async_redact_data(dict(entry.options), TO_REDACT),
+            "subentries": {
+                sub.title: {
+                    "type": sub.subentry_type,
+                    "data": async_redact_data(dict(sub.data), TO_REDACT),
+                }
+                for sub in entry.subentries.values()
+            },
         },
         "battery_config": battery_config,
         "weather": weather_data,

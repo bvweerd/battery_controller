@@ -8,6 +8,9 @@ from dataclasses import dataclass
 
 from .battery_model import BatteryConfig
 from .const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
     POWER_IDLE_THRESHOLD_KW,
@@ -105,11 +108,11 @@ def _rebuild_schedule(
 
         rebuilt_power[t] = actual_power_kw
         if actual_power_kw > POWER_IDLE_THRESHOLD_KW:
-            rebuilt_mode.append("charging")
+            rebuilt_mode.append(ACTION_CHARGING)
         elif actual_power_kw < -POWER_IDLE_THRESHOLD_KW:
-            rebuilt_mode.append("discharging")
+            rebuilt_mode.append(ACTION_DISCHARGING)
         else:
-            rebuilt_mode.append("idle")
+            rebuilt_mode.append(ACTION_IDLE)
         soc_schedule.append(current_soc_kwh)
 
     return rebuilt_power, rebuilt_mode, soc_schedule
@@ -626,12 +629,12 @@ def optimize_battery_schedule(
         power_schedule_kw.append(power_kw)
 
         if action_w > 0:
-            mode_schedule.append("charging")
+            mode_schedule.append(ACTION_CHARGING)
             current_soc = min(
                 current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
             )
         elif action_w < 0:
-            mode_schedule.append("discharging")
+            mode_schedule.append(ACTION_DISCHARGING)
             current_soc = max(
                 current_soc - abs(action_w) * time_step_hours / sqrt_rte,
                 float(min_soc_wh),
@@ -643,7 +646,7 @@ def optimize_battery_schedule(
                 headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
                 passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
                 current_soc = current_soc + passive_wh
-            mode_schedule.append("idle")
+            mode_schedule.append(ACTION_IDLE)
 
         soc_schedule_kwh.append(current_soc / 1000)
 
@@ -756,7 +759,7 @@ def optimize_battery_schedule(
     savings = baseline_cost - initial_terminal_value - total_cost
 
     setpoint_power_kw = power_schedule_kw[0] if power_schedule_kw else 0.0
-    setpoint_mode = mode_schedule[0] if mode_schedule else "idle"
+    setpoint_mode = mode_schedule[0] if mode_schedule else ACTION_IDLE
 
     return OptimizationResult(
         power_schedule_kw=power_schedule_kw,
@@ -918,28 +921,28 @@ def _filter_oscillations(
         changed = False
         i = 0
         while i < len(filtered_mode) - 1:
-            if filtered_mode[i] == "charging":
+            if filtered_mode[i] == ACTION_CHARGING:
                 # Look ahead for quick discharge
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                    if filtered_mode[j] == "discharging":
+                    if filtered_mode[j] == ACTION_DISCHARGING:
                         charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
                         discharge_price = get_discharge_value(j, abs(filtered_power[j]))
                         effective_spread = discharge_price - charge_cost / rte
                         if effective_spread < min_arbitrage_spread:
                             filtered_power[i] = 0.0
-                            filtered_mode[i] = "idle"
+                            filtered_mode[i] = ACTION_IDLE
                             changed = True
                         break
-            elif filtered_mode[i] == "discharging":
+            elif filtered_mode[i] == ACTION_DISCHARGING:
                 # Look ahead for quick charge
                 for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
-                    if filtered_mode[j] == "charging":
+                    if filtered_mode[j] == ACTION_CHARGING:
                         discharge_price = get_discharge_value(i, abs(filtered_power[i]))
                         charge_cost = get_charge_cost(j, max(filtered_power[j], 0.0))
                         effective_spread = discharge_price - charge_cost / rte
                         if effective_spread < min_arbitrage_spread:
                             filtered_power[i] = 0.0
-                            filtered_mode[i] = "idle"
+                            filtered_mode[i] = ACTION_IDLE
                             changed = True
                         break
             i += 1
@@ -996,7 +999,7 @@ def _filter_micro_cycles(
     i = 0
     while i < len(filtered_mode):
         current_dir = filtered_mode[i]
-        if current_dir not in ("charging", "discharging"):
+        if current_dir not in (ACTION_CHARGING, ACTION_DISCHARGING):
             i += 1
             continue
 
@@ -1015,7 +1018,7 @@ def _filter_micro_cycles(
         if total_energy_kwh < min_cycle_kwh:
             for k in range(i, j):
                 filtered_power[k] = 0.0
-                filtered_mode[k] = "idle"
+                filtered_mode[k] = ACTION_IDLE
             any_filtered = True
 
         i = j
@@ -1078,7 +1081,7 @@ def _empty_result(
         baseline_cost=0.0,
         savings=0.0,
         optimal_power_kw=0.0,
-        optimal_mode="idle",
+        optimal_mode=ACTION_IDLE,
         shadow_price_eur_kwh=0.0,
         price_forecast=[],
         pv_forecast=[],
