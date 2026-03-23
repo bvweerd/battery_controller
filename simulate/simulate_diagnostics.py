@@ -972,6 +972,78 @@ def main():
         terminal_price=terminal_price,
     )
 
+    # ── Diagnostic history (only present in diagnostics from new versions)
+    opt_data_top = diag.get("data", {}).get("optimization", {})
+    run_log = opt_data_top.get("optimizer_run_log", [])
+    setpoint_log = opt_data_top.get("setpoint_log", [])
+
+    if run_log:
+        print()
+        print("=" * 120)
+        print("  OPTIMIZER RUN HISTORY  (last run = most recent)")
+        print("=" * 120)
+        print(
+            f"  {'Timestamp':>22}  {'Ctrl':>14}  {'DP mode':>11}  {'DP kW':>6}  "
+            f"{'Eff.mode':>11}  {'Eff.kW':>6}  {'Setpt kW':>8}  "
+            f"{'SoC kWh':>7}  {'Price':>7}  {'Shadow':>7}  {'Commit':>6}  {'Reason'}"
+        )
+        print("-" * 120)
+        for entry in run_log:
+            ts = entry.get("timestamp", "")[:19].replace("T", " ")
+            locked = "YES" if entry.get("commitment_locked") else "no"
+            reason = entry.get("commitment_reason", "")
+            dev = ""
+            dp_kw = entry.get("dp_power_kw", 0.0)
+            eff_kw = entry.get("effective_power_kw", 0.0)
+            setp_kw = entry.get("setpoint_kw", 0.0)
+            if abs(setp_kw - eff_kw) > 0.05:
+                dev = " ← SoC/power limit"
+            elif abs(eff_kw - dp_kw) > 0.05 and not entry.get("commitment_locked"):
+                dev = " ← mode override"
+            print(
+                f"  {ts:>22}  {entry.get('control_mode', ''):>14}  "
+                f"{entry.get('dp_mode', ''):>11}  {dp_kw:>6.3f}  "
+                f"{entry.get('effective_mode', ''):>11}  {eff_kw:>6.3f}  {setp_kw:>8.3f}  "
+                f"{entry.get('soc_kwh', 0):>7.3f}  "
+                f"{entry.get('current_price') or 0:>7.4f}  "
+                f"{entry.get('shadow_price_eur_kwh') or 0:>7.4f}  "
+                f"{locked:>6}  {reason}{dev}"
+            )
+        print("-" * 120)
+
+    if setpoint_log:
+        print()
+        print("=" * 110)
+        print("  REAL-TIME SETPOINT HISTORY  (last entry = most recent)")
+        print("=" * 110)
+        print(
+            f"  {'Timestamp':>22}  {'Sched kW':>8}  {'Setp kW':>7}  {'Raw kW':>6}  "
+            f"{'Mode':>14}  {'Eff.mode':>14}  {'SoC kWh':>7}  "
+            f"{'Grid kW':>7}  {'Batt kW':>7}  {'SoC lim'}"
+        )
+        print("-" * 110)
+        for entry in setpoint_log:
+            ts = entry.get("timestamp", "")[:19].replace("T", " ")
+            soc_lim = "YES" if entry.get("soc_limited") else "no"
+            sched = entry.get("schedule_kw", 0.0)
+            setp = entry.get("setpoint_kw", 0.0)
+            raw = entry.get("raw_target_kw", 0.0)
+            row = (
+                f"  {ts:>22}  {sched:>8.3f}  {setp:>7.3f}  {raw:>6.3f}  "
+                f"{entry.get('mode', ''):>14}  {entry.get('effective_mode', ''):>14}  "
+                f"{entry.get('soc_kwh', 0):>7.3f}  "
+                f"{entry.get('grid_kw', 0):>7.3f}  {entry.get('battery_kw', 0):>7.3f}  {soc_lim}"
+            )
+            if entry.get("soc_limited"):
+                row = "\033[31m" + row + "\033[0m"
+            elif abs(setp - sched) > 0.1:
+                row = "\033[33m" + row + "\033[0m"
+            print(row)
+        print("-" * 110)
+        print(
+            "  Red = SoC limit blocked setpoint  |  Yellow = setpoint deviates from schedule"
+        )
+
 
 if __name__ == "__main__":
     main()

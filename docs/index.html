@@ -194,6 +194,58 @@
     <div id="spread-analysis" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
   </div>
 
+  <!-- Optimizer run history -->
+  <div id="run-log-section" class="hidden bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-1 text-sm">🕒 Optimizer Run History <span id="run-log-count" class="text-xs text-gray-400 font-normal"></span></h3>
+    <p class="text-xs text-gray-400 mb-3">One row per 15-min optimizer run. Highlights deviations between DP output, effective mode (after hybrid/commitment logic), and the published setpoint.</p>
+    <div class="scrolltable sticky-header">
+      <table class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="bg-gray-50 text-gray-600">
+            <th class="border border-gray-200 px-2 py-1 text-left">Time</th>
+            <th class="border border-gray-200 px-2 py-1">Ctrl mode</th>
+            <th class="border border-gray-200 px-2 py-1">DP mode</th>
+            <th class="border border-gray-200 px-2 py-1">DP kW</th>
+            <th class="border border-gray-200 px-2 py-1">Eff. mode</th>
+            <th class="border border-gray-200 px-2 py-1">Eff. kW</th>
+            <th class="border border-gray-200 px-2 py-1">Setpoint kW</th>
+            <th class="border border-gray-200 px-2 py-1">SoC kWh</th>
+            <th class="border border-gray-200 px-2 py-1">Price</th>
+            <th class="border border-gray-200 px-2 py-1">Shadow λ</th>
+            <th class="border border-gray-200 px-2 py-1">Grid kW</th>
+            <th class="border border-gray-200 px-2 py-1">Commit</th>
+          </tr>
+        </thead>
+        <tbody id="run-log-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Real-time setpoint log -->
+  <div id="setpoint-log-section" class="hidden bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-1 text-sm">⚡ Real-time Setpoint Log <span id="setpoint-log-count" class="text-xs text-gray-400 font-normal"></span></h3>
+    <p class="text-xs text-gray-400 mb-3">One row per setpoint change from the ~5 s real-time loop. Yellow = setpoint deviates from schedule. Red = SoC limit blocked the action.</p>
+    <div class="scrolltable sticky-header">
+      <table class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="bg-gray-50 text-gray-600">
+            <th class="border border-gray-200 px-2 py-1 text-left">Time</th>
+            <th class="border border-gray-200 px-2 py-1">Schedule kW</th>
+            <th class="border border-gray-200 px-2 py-1">Setpoint kW</th>
+            <th class="border border-gray-200 px-2 py-1">Raw target kW</th>
+            <th class="border border-gray-200 px-2 py-1">Controller mode</th>
+            <th class="border border-gray-200 px-2 py-1">Effective mode</th>
+            <th class="border border-gray-200 px-2 py-1">SoC kWh</th>
+            <th class="border border-gray-200 px-2 py-1">Grid kW</th>
+            <th class="border border-gray-200 px-2 py-1">Battery kW</th>
+            <th class="border border-gray-200 px-2 py-1">SoC limit?</th>
+          </tr>
+        </thead>
+        <tbody id="setpoint-log-table"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Tips -->
   <div class="bg-white rounded-xl border border-gray-200 p-5">
     <h3 class="font-semibold text-gray-700 mb-3 text-sm">💡 Tips &amp; Recommendations</h3>
@@ -936,7 +988,53 @@ function generateTips(d) {
       consider DC coupling if your hardware supports it.`});
   }
 
-  // 10. Savings summary
+  // 10. Setpoint deviation analysis (requires optimizer_run_log / setpoint_log)
+  const runLog2 = opt.optimizer_run_log || [];
+  const setpLog2 = opt.setpoint_log || [];
+
+  if (runLog2.length > 0) {
+    const socLimitedRuns = runLog2.filter(e =>
+      Math.abs((e.setpoint_kw ?? 0) - (e.effective_power_kw ?? 0)) > 0.05
+    );
+    const commitLocked = runLog2.filter(e => e.commitment_locked);
+
+    if (socLimitedRuns.length > 0) {
+      const pct = Math.round(socLimitedRuns.length / runLog2.length * 100);
+      const examples = socLimitedRuns.slice(-3).map(e =>
+        `${(e.timestamp||'').slice(11,16)}: eff=${(e.effective_power_kw??0).toFixed(2)} kW → setp=${(e.setpoint_kw??0).toFixed(2)} kW (SoC=${(e.soc_kwh??0).toFixed(2)} kWh)`
+      ).join('<br>');
+      tips.push({ t:'warn', title:`Setpoint was SoC/power limited in ${socLimitedRuns.length}/${runLog2.length} optimizer runs (${pct}%)`,
+        text:`The published setpoint differed from the effective power because the battery hit a SoC or power limit.
+        This is expected behavior, not a bug — it means the optimizer planned an action that became impossible at execution time.
+        <br><br><b>Recent examples:</b><br>${examples}
+        <br><br>If this happens frequently, consider adjusting min/max SoC settings or reviewing forecast accuracy.`});
+    }
+
+    if (commitLocked.length > 0) {
+      const pct = Math.round(commitLocked.length / runLog2.length * 100);
+      const byReason = {};
+      commitLocked.forEach(e => { byReason[e.commitment_reason || 'unknown'] = (byReason[e.commitment_reason || 'unknown'] || 0) + 1; });
+      const reasons = Object.entries(byReason).map(([k,v]) => `${k}: ${v}×`).join(', ');
+      tips.push({ t:'info', title:`Commitment filter active in ${commitLocked.length}/${runLog2.length} runs (${pct}%)`,
+        text:`The commitment filter overrode the DP output to prevent rapid charge/discharge oscillation.
+        This is expected for the first run after a price-period boundary.
+        <br>Reasons: ${reasons}
+        <br><br>If commitment is active continuously across many price periods, check <b>min_price_spread</b> — it may be too low, causing the optimizer to oscillate.`});
+    }
+  }
+
+  if (setpLog2.length > 0) {
+    const socLimitedRt = setpLog2.filter(e => e.soc_limited);
+    if (socLimitedRt.length > 0) {
+      const pct = Math.round(socLimitedRt.length / setpLog2.length * 100);
+      tips.push({ t:'warn', title:`SoC limit blocked real-time setpoint in ${socLimitedRt.length} setpoint changes (${pct}%)`,
+        text:`The real-time controller wanted to charge/discharge but the battery SoC was at its limit.
+        Charge was blocked at max SoC, or discharge was blocked at min SoC.
+        This is normal during saturation or depletion, but frequent blocking may indicate the schedule is over-committing relative to actual capacity.`});
+    }
+  }
+
+  // 12. Savings summary
   if (savings > 0 && baseline > 0) {
     tips.push({ t:'ok', title:`Saving €${savings.toFixed(4)} over this horizon (${savPct.toFixed(1)}%)`,
       text:`Extrapolated: ~€${(savings * 96).toFixed(2)}/day (assuming similar price pattern 24h).
@@ -1278,6 +1376,98 @@ function renderDiagnostics(raw) {
     renderProfitabilityTable(prices, feedInForDp, pvFc, consumFc, powerKw, modes, socKwh,
       resolvedStepTimes, bc, opts, dp2.terminalPrice);
     renderSpreadAnalysis(bc, opts, prices);
+  }
+
+  // ── Optimizer run history
+  const runLog = opt.optimizer_run_log || [];
+  const runLogSection = document.getElementById('run-log-section');
+  if (runLog.length > 0) {
+    runLogSection.classList.remove('hidden');
+    document.getElementById('run-log-count').textContent = `(${runLog.length} entries)`;
+    const runTbody = document.getElementById('run-log-table');
+    runTbody.innerHTML = '';
+    // Show most recent first
+    [...runLog].reverse().forEach(entry => {
+      const ts = (entry.timestamp || '').slice(0, 19).replace('T', ' ');
+      const dpKw = (entry.dp_power_kw ?? 0).toFixed(3);
+      const effKw = (entry.effective_power_kw ?? 0).toFixed(3);
+      const setp = (entry.setpoint_kw ?? 0).toFixed(3);
+      const socKwh = (entry.soc_kwh ?? 0).toFixed(3);
+      const price = entry.current_price != null ? `€ ${entry.current_price.toFixed(4)}` : '—';
+      const shadow = entry.shadow_price_eur_kwh != null ? `€ ${entry.shadow_price_eur_kwh.toFixed(4)}` : '—';
+      const grid = entry.grid_kw != null ? `${entry.grid_kw.toFixed(2)}` : '—';
+      const locked = entry.commitment_locked
+        ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`
+        : '<span class="text-gray-300">—</span>';
+
+      // Highlight rows where setpoint deviates from effective power (SoC/power limit)
+      const socLimited = Math.abs((entry.setpoint_kw ?? 0) - (entry.effective_power_kw ?? 0)) > 0.05;
+      // Highlight rows where effective differs from DP (mode override, not commitment)
+      const modeOverride = !entry.commitment_locked
+        && Math.abs((entry.effective_power_kw ?? 0) - (entry.dp_power_kw ?? 0)) > 0.05;
+
+      let rowCls = 'border-b border-gray-100';
+      if (socLimited) rowCls += ' bg-red-50';
+      else if (entry.commitment_locked) rowCls += ' bg-blue-50';
+      else if (modeOverride) rowCls += ' bg-amber-50';
+
+      const dpModeBadge = badge(entry.dp_mode || '—', entry.dp_mode);
+      const effModeBadge = badge(entry.effective_mode || '—', entry.effective_mode);
+
+      const tr = document.createElement('tr');
+      tr.className = rowCls;
+      tr.innerHTML = `
+        <td class="border border-gray-200 px-2 py-1 font-mono text-xs">${ts}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${entry.control_mode || '—'}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${dpModeBadge}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${dpKw}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${effModeBadge}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${effKw}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right font-medium ${socLimited ? 'text-red-700' : ''}">${setp}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${socKwh}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${price}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${shadow}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${grid}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${locked}</td>`;
+      runTbody.appendChild(tr);
+    });
+  }
+
+  // ── Real-time setpoint log
+  const setp_log = opt.setpoint_log || [];
+  const setpLogSection = document.getElementById('setpoint-log-section');
+  if (setp_log.length > 0) {
+    setpLogSection.classList.remove('hidden');
+    document.getElementById('setpoint-log-count').textContent = `(${setp_log.length} entries)`;
+    const setpTbody = document.getElementById('setpoint-log-table');
+    setpTbody.innerHTML = '';
+    [...setp_log].reverse().forEach(entry => {
+      const ts = (entry.timestamp || '').slice(0, 19).replace('T', ' ');
+      const schedKw = (entry.schedule_kw ?? 0).toFixed(3);
+      const setpKw = (entry.setpoint_kw ?? 0).toFixed(3);
+      const rawKw = (entry.raw_target_kw ?? 0).toFixed(3);
+      const socLim = entry.soc_limited;
+      const deviation = Math.abs((entry.setpoint_kw ?? 0) - (entry.schedule_kw ?? 0)) > 0.1;
+
+      let rowCls = 'border-b border-gray-100';
+      if (socLim) rowCls += ' bg-red-50';
+      else if (deviation) rowCls += ' bg-amber-50';
+
+      const tr = document.createElement('tr');
+      tr.className = rowCls;
+      tr.innerHTML = `
+        <td class="border border-gray-200 px-2 py-1 font-mono text-xs">${ts}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${schedKw}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right font-medium ${socLim ? 'text-red-700' : deviation ? 'text-amber-700' : ''}">${setpKw}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${rawKw}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${entry.mode || '—'}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${entry.effective_mode || '—'}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${(entry.soc_kwh ?? 0).toFixed(3)}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${(entry.grid_kw ?? 0).toFixed(2)}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${(entry.battery_kw ?? 0).toFixed(3)}</td>
+        <td class="border border-gray-200 px-2 py-1 text-center">${socLim ? '<span class="badge badge-fail">yes</span>' : '<span class="text-gray-300">—</span>'}`;
+      setpTbody.appendChild(tr);
+    });
   }
 
   // ── Entity table

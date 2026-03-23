@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -192,6 +193,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Tracks whether we were in "discharging" (schedule) or "zero_grid" state
         # so small oscillations around the shadow-price threshold are damped.
         self._last_hybrid_decision: str = "zero_grid"
+
+        # Diagnostic history ring buffers (not persisted across restarts).
+        # optimizer_run_log: one entry per 15-min optimizer run (24 h @ 15 min = 96).
+        # setpoint_log: one entry every time the real-time setpoint changes.
+        self._optimizer_run_log: deque[dict[str, Any]] = deque(maxlen=96)
+        self._setpoint_log: deque[dict[str, Any]] = deque(maxlen=576)
 
     @property
     def control_mode(self) -> str:
@@ -527,6 +534,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return
 
         # Setpoint changed — full update including control action and setpoints
+        # Append to real-time setpoint history for diagnostics
+        self._setpoint_log.append(
+            {
+                "timestamp": dt_util.now().isoformat(),
+                "schedule_kw": round(controller_schedule_w / 1000, 3),
+                "setpoint_kw": round(control_action["target_power_kw"], 3),
+                "raw_target_kw": round(control_action["raw_target_w"] / 1000, 3),
+                "mode": control_action["mode"],
+                "effective_mode": rt_effective_mode,
+                "soc_kwh": round(battery_state.soc_kwh, 3),
+                "soc_percent": round(battery_state.soc_percent, 1),
+                "grid_kw": round(current_grid_w / 1000, 3),
+                "battery_kw": round(battery_state.power_kw, 3),
+                "soc_limited": (
+                    abs(control_action["dp_schedule_w"]) > 50
+                    and abs(control_action["raw_target_w"])
+                    < abs(control_action["dp_schedule_w"]) - 50
+                ),
+            }
+        )
+
         battery_setpoints = self._split_setpoint(control_action["target_power_kw"])
         self.async_set_updated_data(
             {
@@ -1399,6 +1427,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Commitment filter: don't switch an active charge/discharge to idle unless
         # the price has moved beyond the oscillation-filter threshold (same economics
         # as the post-DP oscillation filter in optimizer.py).
+        commitment_locked = False
+        commitment_reason = ""
         if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
             sqrt_rte = battery_config.round_trip_efficiency**0.5
             commit_spread = degradation_cost_per_kwh * 2.0 / sqrt_rte + min_spread
@@ -1444,6 +1474,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         commit_spread,
                     )
                     effective_power = self._committed_power
+                    commitment_locked = True
+                    commitment_reason = "power_locked"
                 elif effective_mode == ACTION_IDLE:
                     # Prevent switching an active charge/discharge to idle.
                     _LOGGER.debug(
@@ -1456,6 +1488,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     )
                     effective_mode = self._committed_action
                     effective_power = self._committed_power
+                    commitment_locked = True
+                    commitment_reason = "idle_suppressed"
                 else:
                     # Direction flip bypassed the guard — update commitment.
                     self._committed_action = effective_mode
@@ -1505,6 +1539,32 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Record successful run
         self._last_failure_reason = None
         self._last_success_time = dt_util.utcnow()
+
+        # Append to optimizer run history for diagnostics
+        self._optimizer_run_log.append(
+            {
+                "timestamp": dt_util.now().isoformat(),
+                "control_mode": self._control_mode,
+                "dp_mode": result.optimal_mode,
+                "dp_power_kw": round(result.optimal_power_kw, 3),
+                "effective_mode": effective_mode,
+                "effective_power_kw": round(effective_power, 3),
+                "setpoint_kw": round(control_action["target_power_kw"], 3),
+                "raw_target_kw": round(control_action["raw_target_w"] / 1000, 3),
+                "soc_kwh": round(battery_state.soc_kwh, 3),
+                "soc_percent": round(battery_state.soc_percent, 1),
+                "current_price": round(resampled_prices[0], 4)
+                if resampled_prices
+                else None,
+                "current_feed_in_price": round(resampled_feed_in[0], 4)
+                if resampled_feed_in
+                else None,
+                "shadow_price_eur_kwh": round(result.shadow_price_eur_kwh, 4),
+                "grid_kw": round(current_grid / 1000, 3),
+                "commitment_locked": commitment_locked,
+                "commitment_reason": commitment_reason,
+            }
+        )
 
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
