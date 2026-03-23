@@ -785,6 +785,134 @@ class TestOscillationPrevention:
         assert soc[1] == 5.0
 
 
+class TestQuarterHourOscillationFilter:
+    """Regression tests for oscillation filter with quarter-hour price data.
+
+    Bug: with 15-min price data, step_durations_hours[0] can be very short
+    (e.g. 1 min when the optimizer runs just before a price boundary).  Using
+    it as ref_step_h inflated lookahead_steps up to 120, causing the filter to
+    scan the entire 36-h horizon and incorrectly pair charge steps with distant
+    unrelated discharges — removing profitable charge blocks so only single
+    15-min slots survived.
+
+    Additionally, the filter only evaluated the *nearest* discharge in the
+    window.  An intermediate low-spread discharge would wrongly suppress a
+    charge whose actual profitable match was slightly further in the window.
+    """
+
+    def test_charge_block_preserved_with_short_first_step(self):
+        """Charge block must not be removed when first step is very short (1 min).
+
+        Simulates the optimizer running 1 minute before a price boundary.
+        Before the fix, lookahead_steps = round(2.0 / 0.017) = 120 which
+        covered the entire 96-step horizon, causing charge blocks to be
+        paired with distant, low-spread discharges and incorrectly removed.
+        """
+        from custom_components.battery_controller.optimizer import _filter_oscillations
+
+        n = 16
+        # Steps 0-3: cheap (4 ct), steps 4-7: idle, steps 8-15: expensive (25 ct)
+        prices = [0.04] * 4 + [0.14] * 4 + [0.25] * 8
+        power = [3.0] * 4 + [0.0] * 4 + [-3.0] * 8
+        mode = ["charging"] * 4 + ["idle"] * 4 + ["discharging"] * 8
+
+        # First step is 1 minute (= 0.017 h); rest are full 15-min steps
+        step_durations = [1 / 60] + [0.25] * (n - 1)
+
+        filtered_power, filtered_mode, _ = _filter_oscillations(
+            power_schedule_kw=power,
+            mode_schedule=mode,
+            initial_soc_kwh=2.0,
+            price_forecast=prices,
+            min_price_spread=0.05,
+            degradation_cost_per_kwh=0.03,
+            rte=0.9,
+            step_durations_hours=step_durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=10.0,
+        )
+
+        # Profitable charge steps (spread = 25 - 4/0.9 ≈ 20.6 ct >> threshold)
+        # must not be suppressed regardless of the short first step.
+        assert filtered_mode[0] == "charging", "charge step 0 wrongly suppressed"
+        assert filtered_mode[1] == "charging", "charge step 1 wrongly suppressed"
+        assert filtered_mode[2] == "charging", "charge step 2 wrongly suppressed"
+        assert filtered_mode[3] == "charging", "charge step 3 wrongly suppressed"
+
+    def test_charge_block_preserved_with_intermediate_low_spread_discharge(self):
+        """Charge block must survive when an intermediate nearby discharge has low spread.
+
+        Before the fix the filter broke on the *first* discharge found.  An
+        intermediate discharge at a small spread caused the charge to be
+        removed, even though a profitable discharge appeared a few steps later
+        within the same lookahead window.
+        """
+        from custom_components.battery_controller.optimizer import _filter_oscillations
+
+        n = 16
+        # Step 0: charge at 4 ct
+        # Step 2: small discharge at 7 ct (spread 7-4/0.9 ≈ 2.6 ct < threshold)
+        # Step 8: big discharge at 25 ct (spread 25-4/0.9 ≈ 20.6 ct >> threshold)
+        prices = [0.04, 0.04, 0.07, 0.04, 0.04, 0.04, 0.04, 0.04, 0.25] + [0.25] * 7
+        power = [3.0, 3.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0] + [-3.0] * 8
+        mode = (
+            ["charging", "charging", "discharging"] + ["idle"] * 5 + ["discharging"] * 8
+        )
+        step_durations = [0.25] * n
+
+        filtered_power, filtered_mode, _ = _filter_oscillations(
+            power_schedule_kw=power,
+            mode_schedule=mode,
+            initial_soc_kwh=2.0,
+            price_forecast=prices,
+            min_price_spread=0.05,
+            degradation_cost_per_kwh=0.03,
+            rte=0.9,
+            step_durations_hours=step_durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=10.0,
+        )
+
+        # The charge steps 0 and 1 have a profitable discharge at step 8
+        # (spread ≈ 20.6 ct >> 11.6 ct threshold). They must be kept even
+        # though the nearest discharge at step 2 has an insufficient spread.
+        assert filtered_mode[0] == "charging", (
+            "charge step 0 wrongly suppressed by intermediate low-spread discharge"
+        )
+        assert filtered_mode[1] == "charging", (
+            "charge step 1 wrongly suppressed by intermediate low-spread discharge"
+        )
+
+    def test_true_oscillation_still_removed(self):
+        """Rapid charge→discharge with no profitable match must still be suppressed."""
+        from custom_components.battery_controller.optimizer import _filter_oscillations
+
+        n = 8
+        # All discharges have very small spread vs the charges → true oscillation
+        prices = [0.04, 0.05, 0.04, 0.05, 0.04, 0.05, 0.04, 0.05]
+        power = [3.0, -1.0, 3.0, -1.0, 3.0, -1.0, 3.0, -1.0]
+        mode = ["charging", "discharging"] * 4
+        step_durations = [0.25] * n
+
+        filtered_power, filtered_mode, _ = _filter_oscillations(
+            power_schedule_kw=power,
+            mode_schedule=mode,
+            initial_soc_kwh=5.0,
+            price_forecast=prices,
+            min_price_spread=0.05,
+            degradation_cost_per_kwh=0.03,
+            rte=0.9,
+            step_durations_hours=step_durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=10.0,
+        )
+
+        charge_count = sum(1 for m in filtered_mode if m == "charging")
+        assert charge_count == 0, (
+            f"True oscillations should be suppressed, but {charge_count} charge steps remain"
+        )
+
+
 class TestMicroCycleFilter:
     """Tests for micro-cycle post-processing."""
 
