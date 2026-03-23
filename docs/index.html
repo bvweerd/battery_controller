@@ -586,7 +586,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
     const actionW= policy[t][sIdx];
     const pvDcW  = pvDcFc && t < pvDcFc.length ? pvDcFc[t] * 1000 : 0;
 
-    powerKw.push(actionW / 1000);
+    powerKw.push(-actionW / 1000);
     if (actionW > 0) {
       modes.push('charging');
       curSocWh = Math.min(curSocWh + actionW * stepH * sqrtRte, maxSocWh);
@@ -627,7 +627,7 @@ function computeTotalCost(powerKw, socKwh, inputs, cfg) {
     const pvDcW = pvDcFc  && pvDcFc[t]  !== undefined ? pvDcFc[t]  * 1000 : 0;
     const maxSocWhC = cfg.maxSocKwh * 1000;
     total += calculateStepCost(
-      stepH, socKwh[t] * 1000, powerKw[t] * 1000,
+      stepH, socKwh[t] * 1000, -powerKw[t] * 1000,
       priceFc[t], feedIn, pvW, consumW,
       cfg.rte, degradCost, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
     );
@@ -1072,7 +1072,7 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
       <td class="border border-gray-200 px-2 py-0.5">${(feedIn*100).toFixed(2)}ct</td>
       <td class="border border-gray-200 px-2 py-0.5">${pv.toFixed(2)}</td>
       <td class="border border-gray-200 px-2 py-0.5">${cons.toFixed(2)}</td>
-      <td class="border border-gray-200 px-2 py-0.5 font-medium ${pw>0?'text-blue-700':pw<0?'text-orange-700':'text-gray-400'}">${pw>0?'+':''}${pw.toFixed(3)}</td>
+      <td class="border border-gray-200 px-2 py-0.5 font-medium ${mode==='discharging'?'text-orange-700':mode==='charging'?'text-blue-700':'text-gray-400'}">${pw>0?'+':''}${pw.toFixed(3)}</td>
       <td class="border border-gray-200 px-2 py-0.5"><span class="badge badge-${mode}">${mode}</span></td>
       <td class="border border-gray-200 px-2 py-0.5">${soc.toFixed(3)}</td>
       <td class="border border-gray-200 px-2 py-0.5 font-medium ${discProfit>0?'text-green-700':'text-red-700'}">${discProfit>=0?'+':''}${(discProfit*100).toFixed(2)}ct</td>
@@ -1483,7 +1483,7 @@ function runSimulator() {
         const discP   = price[t] * sqrtRte - res.terminalPrice - degrad;
         const chgP    = res.terminalPrice - effCp / sqrtRte - degrad;
         const stepCost= calculateStepCost(
-          stepH, res.socKwh[t]*1000, res.powerKw[t]*1000, price[t], feedIn2,
+          stepH, res.socKwh[t]*1000, -res.powerKw[t]*1000, price[t], feedIn2,
           (pv[t]||0)*1000, (consump[t]||0)*1000, p.rte, degrad,
           false, 0, 0.97, 0, p.maxSocKwh * 1000
         );
@@ -1493,7 +1493,7 @@ function runSimulator() {
         tr.innerHTML = `
           <td class="border border-gray-200 px-2 py-0.5 text-center text-gray-500">${t+1}</td>
           <td class="border border-gray-200 px-2 py-0.5 text-center"><span class="badge badge-${mode}">${mode}</span></td>
-          <td class="border border-gray-200 px-2 py-0.5 font-medium ${res.powerKw[t]>0?'text-blue-700':res.powerKw[t]<0?'text-orange-700':'text-gray-400'}">${res.powerKw[t]>0?'+':''}${res.powerKw[t].toFixed(3)}</td>
+          <td class="border border-gray-200 px-2 py-0.5 font-medium ${mode==='discharging'?'text-orange-700':mode==='charging'?'text-blue-700':'text-gray-400'}">${res.powerKw[t]>0?'+':''}${res.powerKw[t].toFixed(3)}</td>
           <td class="border border-gray-200 px-2 py-0.5">${res.socKwh[t].toFixed(3)}</td>
           <td class="border border-gray-200 px-2 py-0.5">${(res.socKwh[t+1]||res.socKwh[t]).toFixed(3)}</td>
           <td class="border border-gray-200 px-2 py-0.5">${(price[t]*100).toFixed(2)}ct</td>
