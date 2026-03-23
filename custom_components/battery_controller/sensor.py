@@ -265,7 +265,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
             "step_durations_hours": self.coordinator.data.get(
                 "step_durations_hours", []
             ),
-            "power_schedule_kw": self.coordinator.data.get("power_schedule_kw", []),
+            "power_schedule_kw": [
+                -v for v in self.coordinator.data.get("power_schedule_kw", [])
+            ],
             "mode_schedule": self.coordinator.data.get("mode_schedule", []),
             "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", []),
         }
