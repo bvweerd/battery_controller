@@ -6,6 +6,7 @@ import pytest
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
     BatteryState,
+    aggregate_battery_configs,
     calculate_degradation_cost_per_kwh,
 )
 
@@ -79,6 +80,160 @@ class TestBatteryConfig:
         config = BatteryConfig.from_config({})
         assert config.capacity_kwh == 10.0
         assert config.round_trip_efficiency == 0.90
+
+    def test_derating_defaults_disabled(self):
+        """Default config has no derating (thresholds at 100% / 0%)."""
+        config = BatteryConfig(capacity_kwh=10.0)
+        assert config.high_soc_charge_threshold_pct == 100.0
+        assert config.high_soc_max_charge_kw == 0.0
+        assert config.low_soc_discharge_threshold_pct == 0.0
+        assert config.low_soc_max_discharge_kw == 0.0
+
+    def test_max_charge_at_soc_no_derating(self):
+        """Without derating configured, max_charge_at_soc returns nominal max."""
+        config = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=1.2)
+        assert config.max_charge_at_soc(9.5) == pytest.approx(1.2)
+        assert config.max_charge_at_soc(5.0) == pytest.approx(1.2)
+        assert config.max_charge_at_soc(0.5) == pytest.approx(1.2)
+
+    def test_max_charge_at_soc_derated_above_threshold(self):
+        """At or above threshold SoC, derated limit is returned."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=1.2,
+            high_soc_charge_threshold_pct=95.0,
+            high_soc_max_charge_kw=0.45,
+        )
+        # Below threshold → nominal
+        assert config.max_charge_at_soc(9.0) == pytest.approx(1.2)  # 90%
+        assert config.max_charge_at_soc(9.49) == pytest.approx(1.2)  # 94.9%
+        # At threshold → derated
+        assert config.max_charge_at_soc(9.5) == pytest.approx(0.45)  # exactly 95%
+        # Above threshold → derated
+        assert config.max_charge_at_soc(9.8) == pytest.approx(0.45)  # 98%
+
+    def test_max_discharge_at_soc_no_derating(self):
+        """Without derating configured, max_discharge_at_soc returns nominal max."""
+        config = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=1.2)
+        assert config.max_discharge_at_soc(1.5) == pytest.approx(1.2)
+        assert config.max_discharge_at_soc(5.0) == pytest.approx(1.2)
+        assert config.max_discharge_at_soc(9.0) == pytest.approx(1.2)
+
+    def test_max_discharge_at_soc_derated_below_threshold(self):
+        """At or below threshold SoC, derated limit is returned."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_discharge_power_kw=1.2,
+            low_soc_discharge_threshold_pct=15.0,
+            low_soc_max_discharge_kw=0.38,
+        )
+        # Above threshold → nominal
+        assert config.max_discharge_at_soc(2.0) == pytest.approx(1.2)  # 20%
+        assert config.max_discharge_at_soc(1.51) == pytest.approx(1.2)  # 15.1%
+        # At threshold → derated
+        assert config.max_discharge_at_soc(1.5) == pytest.approx(0.38)  # exactly 15%
+        # Below threshold → derated
+        assert config.max_discharge_at_soc(1.0) == pytest.approx(0.38)  # 10%
+
+    def test_from_subentry_with_derating(self):
+        """from_subentry reads SoC-dependent derating fields."""
+        data = {
+            "capacity_kwh": 5.2,
+            "max_charge_power_kw": 1.2,
+            "max_discharge_power_kw": 1.2,
+            "round_trip_efficiency": 0.92,
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 100.0,
+            "pv_dc_efficiency": 0.97,
+            "battery_soc_sensor": "sensor.batt_soc",
+            "high_soc_charge_threshold_pct": 95.0,
+            "high_soc_max_charge_kw": 0.45,
+            "low_soc_discharge_threshold_pct": 15.0,
+            "low_soc_max_discharge_kw": 0.38,
+        }
+        config = BatteryConfig.from_subentry(data)
+        assert config.high_soc_charge_threshold_pct == 95.0
+        assert config.high_soc_max_charge_kw == pytest.approx(0.45)
+        assert config.low_soc_discharge_threshold_pct == 15.0
+        assert config.low_soc_max_discharge_kw == pytest.approx(0.38)
+
+    def test_from_subentry_derating_defaults(self):
+        """from_subentry without derating keys defaults to disabled."""
+        data = {
+            "capacity_kwh": 5.2,
+            "max_charge_power_kw": 1.2,
+            "max_discharge_power_kw": 1.2,
+            "round_trip_efficiency": 0.92,
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 100.0,
+            "pv_dc_efficiency": 0.97,
+            "battery_soc_sensor": "sensor.batt_soc",
+        }
+        config = BatteryConfig.from_subentry(data)
+        assert config.high_soc_max_charge_kw == 0.0
+        assert config.low_soc_max_discharge_kw == 0.0
+
+
+class TestAggregateBatteryConfigs:
+    """Tests for aggregate_battery_configs."""
+
+    def test_single_config_passthrough(self):
+        config = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        result = aggregate_battery_configs([config])
+        assert result is config
+
+    def test_empty_returns_default(self):
+        result = aggregate_battery_configs([])
+        assert result.capacity_kwh == 10.0  # BatteryConfig default
+
+    def test_power_limits_summed(self):
+        a = BatteryConfig(
+            capacity_kwh=5.0, max_charge_power_kw=1.2, max_discharge_power_kw=1.2
+        )
+        b = BatteryConfig(
+            capacity_kwh=5.0, max_charge_power_kw=1.0, max_discharge_power_kw=0.8
+        )
+        result = aggregate_battery_configs([a, b])
+        assert result.max_charge_power_kw == pytest.approx(2.2)
+        assert result.max_discharge_power_kw == pytest.approx(2.0)
+
+    def test_derating_aggregated(self):
+        """Derated powers are summed; thresholds are capacity-weighted averages."""
+        a = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            high_soc_charge_threshold_pct=95.0,
+            high_soc_max_charge_kw=0.45,
+            low_soc_discharge_threshold_pct=15.0,
+            low_soc_max_discharge_kw=0.38,
+        )
+        b = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            high_soc_charge_threshold_pct=95.0,
+            high_soc_max_charge_kw=0.45,
+            low_soc_discharge_threshold_pct=15.0,
+            low_soc_max_discharge_kw=0.38,
+        )
+        result = aggregate_battery_configs([a, b])
+        assert result.high_soc_charge_threshold_pct == pytest.approx(95.0)
+        assert result.high_soc_max_charge_kw == pytest.approx(0.90)
+        assert result.low_soc_discharge_threshold_pct == pytest.approx(15.0)
+        assert result.low_soc_max_discharge_kw == pytest.approx(0.76)
+
+    def test_no_derating_preserved_on_aggregate(self):
+        """Two configs without derating stay without derating after aggregation."""
+        a = BatteryConfig(
+            capacity_kwh=5.0, max_charge_power_kw=1.2, max_discharge_power_kw=1.2
+        )
+        b = BatteryConfig(
+            capacity_kwh=5.0, max_charge_power_kw=1.0, max_discharge_power_kw=1.0
+        )
+        result = aggregate_battery_configs([a, b])
+        assert result.high_soc_max_charge_kw == 0.0
+        assert result.low_soc_max_discharge_kw == 0.0
 
 
 class TestBatteryState:
