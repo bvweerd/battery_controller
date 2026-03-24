@@ -856,6 +856,7 @@ function renderDiagnostics(raw) {
   if (prices.length > 0) {
     const cfg2 = {
       rte: bc.round_trip_efficiency || 0.9,
+      capacityKwh: bc.capacity_kwh || 10,
       minSocKwh: bc.min_soc_kwh || 0,
       maxSocKwh: bc.max_soc_kwh || 10,
       maxChargeKw: bc.max_charge_power_kw || 5,
@@ -863,6 +864,10 @@ function renderDiagnostics(raw) {
       pvDcCoupled: bc.pv_dc_coupled || false,
       pvDcEfficiency: bc.pv_dc_efficiency || 0.97,
       maxGridPowerKw: opts.max_grid_power_kw || 0,
+      highSocChargeThresholdPct: bc.high_soc_charge_threshold_pct ?? 100,
+      highSocMaxChargeKw: bc.high_soc_max_charge_kw ?? 0,
+      lowSocDischargeThresholdPct: bc.low_soc_discharge_threshold_pct ?? 0,
+      lowSocMaxDischargeKw: bc.low_soc_max_discharge_kw ?? 0,
     };
     const feedInForDp = feedInFc || prices;
     const usableKwhDp = (cfg2.maxSocKwh - cfg2.minSocKwh) || 1;
@@ -1050,6 +1055,7 @@ function getSimParams() {
   const rte       = g('sp-rte');
   return {
     rte,
+    capacityKwh:   capacity,
     minSocKwh:     capacity * minSocPct / 100,
     maxSocKwh:     capacity * maxSocPct / 100,
     maxChargeKw:   g('sp-charge-kw'),
