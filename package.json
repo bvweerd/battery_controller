@@ -1,0 +1,21 @@
+{
+  "name": "battery-controller-analyzer",
+  "description": "Unit tests for the browser-side DP optimizer and diagnostics analyzer",
+  "private": true,
+  "scripts": {
+    "test": "jest --coverage"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/docs/__tests__/**/*.test.js"
+    ],
+    "coverageDirectory": "coverage-js",
+    "collectCoverageFrom": [
+      "docs/analyzer.js"
+    ]
+  }
+}
