@@ -75,6 +75,23 @@ jobs:
           category: integration
           ignore: brands
 
+  js-test:
+    name: Test (JS analyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Jest
+        run: npm test
+
   hassfest:
     name: Home Assistant hassfest
     runs-on: ubuntu-latest
