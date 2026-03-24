@@ -522,6 +522,16 @@ def optimize_battery_schedule(
     ]
     actions = discharge_actions + charge_actions
 
+    # Pre-compute SoC-dependent power limits for every SoC state.
+    # For batteries without derating these equal max_charge_w / max_discharge_w
+    # and the guards below never fire, so there is no performance regression.
+    soc_max_charge_w = [
+        battery_config.max_charge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+    soc_max_discharge_w = [
+        battery_config.max_discharge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+
     # Backward induction
     for t in range(n_steps - 1, -1, -1):
         time_step_hours = step_durations_hours[t]
@@ -536,6 +546,8 @@ def optimize_battery_schedule(
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
+            max_chg_w = soc_max_charge_w[s_idx]
+            max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
                 # SoC transition: action_w is battery-side power (explicit AC command).
@@ -545,11 +557,15 @@ def optimize_battery_schedule(
                 # Efficiency losses are on the grid/AC side and handled in
                 # calculate_step_cost.
                 if action_w > 0:
+                    if action_w > max_chg_w:
+                        continue
                     energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
+                    if -action_w > max_dis_w:
+                        continue
                     # Discharge: action_w is AC setpoint → battery must supply
                     # abs(action_w) / discharge_eff from its DC side.
                     energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte

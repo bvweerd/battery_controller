@@ -41,6 +41,16 @@ CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
 CONF_MIN_SOC_PERCENT = "min_soc_percent"
 CONF_MAX_SOC_PERCENT = "max_soc_percent"
 
+# Configuration keys - SoC-dependent power derating
+# Some batteries (e.g. Marstek Venus A) reduce charge/discharge power near SoC extremes.
+# Above high_soc_charge_threshold the BMS caps charge power to high_soc_max_charge_kw.
+# Below low_soc_discharge_threshold the BMS caps discharge power to low_soc_max_discharge_kw.
+# Defaults of 100 / 0 % effectively disable derating (thresholds are never reached).
+CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT = "high_soc_charge_threshold_pct"
+CONF_HIGH_SOC_MAX_CHARGE_KW = "high_soc_max_charge_kw"
+CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT = "low_soc_discharge_threshold_pct"
+CONF_LOW_SOC_MAX_DISCHARGE_KW = "low_soc_max_discharge_kw"
+
 # Subentry types
 PV_SUBENTRY_TYPE = "pv_array"
 BATTERY_SUBENTRY_TYPE = "battery"
@@ -93,6 +103,14 @@ DEFAULT_MAX_DISCHARGE_POWER_KW = 5.0
 DEFAULT_ROUND_TRIP_EFFICIENCY = 0.90
 DEFAULT_MIN_SOC_PERCENT = 10.0
 DEFAULT_MAX_SOC_PERCENT = 90.0
+
+# Default values - SoC-dependent power derating (disabled by default)
+DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT = 100.0  # % — above this SoC, charge is derated
+DEFAULT_HIGH_SOC_MAX_CHARGE_KW = 0.0  # kW — 0 means no derating
+DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT = (
+    0.0  # % — below this SoC, discharge is derated
+)
+DEFAULT_LOW_SOC_MAX_DISCHARGE_KW = 0.0  # kW — 0 means no derating
 
 # Default values - PV array geometry
 DEFAULT_PV_ORIENTATION_DEG = 180.0  # degrees, South-facing

@@ -38,6 +38,27 @@ class BatteryConfig:
     pv_dc_peak_power_kwp: float
     pv_dc_efficiency: float
     max_grid_power_kw: float = 0.0
+    high_soc_charge_threshold_pct: float = 100.0
+    high_soc_max_charge_kw: float = 0.0
+    low_soc_discharge_threshold_pct: float = 0.0
+    low_soc_max_discharge_kw: float = 0.0
+
+    def max_charge_at_soc(self, soc_kwh: float) -> float:
+        if (
+            self.high_soc_max_charge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100 >= self.high_soc_charge_threshold_pct
+        ):
+            return self.high_soc_max_charge_kw
+        return self.max_charge_power_kw
+
+    def max_discharge_at_soc(self, soc_kwh: float) -> float:
+        if (
+            self.low_soc_max_discharge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100
+            <= self.low_soc_discharge_threshold_pct
+        ):
+            return self.low_soc_max_discharge_kw
+        return self.max_discharge_power_kw
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +89,10 @@ def extract_inputs(diag: dict) -> tuple:
         pv_dc_coupled=bc["pv_dc_coupled"],
         pv_dc_peak_power_kwp=bc["pv_dc_peak_power_kwp"],
         pv_dc_efficiency=bc["pv_dc_efficiency"],
+        high_soc_charge_threshold_pct=bc.get("high_soc_charge_threshold_pct", 100.0),
+        high_soc_max_charge_kw=bc.get("high_soc_max_charge_kw", 0.0),
+        low_soc_discharge_threshold_pct=bc.get("low_soc_discharge_threshold_pct", 0.0),
+        low_soc_max_discharge_kw=bc.get("low_soc_max_discharge_kw", 0.0),
     )
 
     sched = diag["data"]["optimization"]["schedule"]
@@ -304,6 +329,13 @@ def run_dp(
     ]
     actions = discharge_actions + charge_actions
 
+    soc_max_charge_w = [
+        battery_config.max_charge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+    soc_max_discharge_w = [
+        battery_config.max_discharge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+
     for t in range(n_steps - 1, -1, -1):
         time_step_hours = step_durations_hours[t]
         grid_price = price_forecast[t]
@@ -317,14 +349,20 @@ def run_dp(
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
+            max_chg_w = soc_max_charge_w[s_idx]
+            max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
                 if action_w > 0:
+                    if action_w > max_chg_w:
+                        continue
                     energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
+                    if -action_w > max_dis_w:
+                        continue
                     energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:

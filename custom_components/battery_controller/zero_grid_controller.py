@@ -99,11 +99,11 @@ class ZeroGridController:
         # reading (which would cancel itself out each cycle via the grid meter).
         target_battery_w = self._last_target_w - current_grid_w
 
-        # Apply battery limits
+        # Apply battery limits (SoC-dependent: e.g. BMS absorption near full/empty)
         target_battery_w = clamp(
             target_battery_w,
-            -self.config.max_discharge_w,
-            self.config.max_charge_w,
+            -self.battery_config.max_discharge_at_soc(current_soc_kwh) * 1000,
+            self.battery_config.max_charge_at_soc(current_soc_kwh) * 1000,
         )
 
         # Apply SoC limits
@@ -144,11 +144,11 @@ class ZeroGridController:
         """
         target_battery_w = dp_schedule_w
 
-        # Apply battery limits
+        # Apply battery limits (SoC-dependent: e.g. BMS absorption near full/empty)
         target_battery_w = clamp(
             target_battery_w,
-            -self.config.max_discharge_w,
-            self.config.max_charge_w,
+            -self.battery_config.max_discharge_at_soc(current_soc_kwh) * 1000,
+            self.battery_config.max_charge_at_soc(current_soc_kwh) * 1000,
         )
 
         # Apply SoC limits
