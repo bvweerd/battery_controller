@@ -9,6 +9,7 @@ const POWER_STEP_W           = 100;
 const DC_TO_AC_EFF           = 0.96;
 const MIN_PV_SURPLUS_KW      = 0.05;
 const POWER_IDLE_THRESHOLD_W = 1.0;
+const MIN_CYCLE_KWH          = 0.2;
 
 // ── DP core ────────────────────────────────────────────────────────
 
@@ -173,7 +174,9 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           bestAction = actionW;
         }
       }
-      V[t][s]      = isFinite(bestCost) ? bestCost : Vnext[s];
+      // Match Python: keep Infinity for unreachable states (never triggers in practice
+      // since idle is always valid).
+      V[t][s]      = bestCost;
       policy[t][s] = bestAction;
     }
   }
@@ -214,36 +217,233 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
   return { powerKw, modes, socKwh };
 }
 
+// ── Post-processing filters (mirrors optimizer.py) ─────────────────
+
+/**
+ * Rebuild SoC schedule from a (possibly filtered) power schedule.
+ * Mirrors Python _rebuild_schedule.
+ * NOTE: powerKw convention here: negative = charging, positive = discharging
+ * (same as forwardPass output).
+ */
+function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
+  const sqrtRte  = Math.sqrt(cfg.rte);
+  const minSocWh = cfg.minSocKwh * 1000;
+  const maxSocWh = cfg.maxSocKwh * 1000;
+  const socKwh   = [currentSocKwh];
+  let curSocWh   = currentSocKwh * 1000;
+
+  for (let t = 0; t < powerKw.length; t++) {
+    const stepH  = stepDurations[t] || 0.25;
+    const p      = powerKw[t];
+    const pvDcW  = pvDcFc && t < pvDcFc.length ? pvDcFc[t] * 1000 : 0;
+
+    if (modes[t] === 'charging' && p < -1e-9) {
+      const actionW = -p * 1000;   // positive
+      curSocWh = Math.min(curSocWh + actionW * stepH * sqrtRte, maxSocWh);
+    } else if (modes[t] === 'discharging' && p > 1e-9) {
+      const actionW = p * 1000;    // positive
+      curSocWh = Math.max(curSocWh - actionW * stepH / sqrtRte, minSocWh);
+    } else {
+      if (cfg.pvDcCoupled && pvDcW > 0) {
+        const dcEff      = cfg.pvDcEfficiency;
+        const headroomWh = Math.max(0, maxSocWh - curSocWh);
+        const passiveWh  = Math.min(pvDcW * dcEff * stepH, headroomWh);
+        curSocWh = Math.min(curSocWh + passiveWh, maxSocWh);
+      }
+    }
+    socKwh.push(curSocWh / 1000);
+  }
+  return socKwh;
+}
+
+/**
+ * Oscillation filter: removes charge↔discharge pairs where the price spread
+ * is insufficient to cover RTE losses and degradation.
+ * Mirrors Python _filter_oscillations.
+ */
+function filterOscillations(powerKw, modes, cfg, priceFc, feedInFc, pvFc,
+    consumFc, stepDurations, degradCost, minPriceSpread, pvDcFc) {
+  if (!powerKw.length) return { powerKw, modes };
+
+  const { rte, minSocKwh, maxSocKwh, pvDcCoupled, pvDcEfficiency, maxDischargeKw } = cfg;
+  const sqrtRte  = Math.sqrt(rte);
+  const minArb   = (2 * degradCost + minPriceSpread) / sqrtRte;
+
+  const refStepH = stepDurations.length > 1 ? stepDurations[1] : (stepDurations[0] || 0.25);
+  const usableKwh = maxSocKwh - minSocKwh;
+  const cycleHours = maxDischargeKw > 0 ? usableKwh / maxDischargeKw : 2.0;
+  const windowH  = Math.max(2.0, cycleHours);
+  const lookahead = Math.max(1, Math.round(windowH / refStepH));
+
+  const filtPow  = [...powerKw];
+  const filtMode = [...modes];
+
+  function getChargeCost(i, chargePowKw) {
+    if (chargePowKw <= 0 || !pvFc || !consumFc || !feedInFc) return priceFc[i];
+    let effectiveKw = chargePowKw;
+    if (pvDcCoupled && pvDcFc) {
+      const stepH     = stepDurations[i] || 0.25;
+      const passiveKw = (pvDcFc[i] || 0) * pvDcEfficiency;
+      const maxPassiveKwh = maxSocKwh - minSocKwh;
+      const cappedPassive = stepH > 0 ? Math.min(passiveKw, maxPassiveKwh / stepH) : 0;
+      effectiveKw = Math.max(0, chargePowKw - cappedPassive);
+      if (effectiveKw <= 0) return 0.0;
+    }
+    const pvSurplusKw = Math.max(0, (pvFc[i] || 0) - (consumFc[i] || 0));
+    const fromPv  = Math.min(effectiveKw, pvSurplusKw);
+    const fromGrid = Math.max(0, effectiveKw - fromPv);
+    const total   = fromPv + fromGrid;
+    if (total <= 0) return priceFc[i];
+    return (fromPv * feedInFc[i] + fromGrid * priceFc[i]) / total;
+  }
+
+  function getDischargeVal(i, disPowKw) {
+    if (disPowKw <= 0) return priceFc[i];
+    if (!pvFc || !consumFc || !feedInFc) return priceFc[i];
+    const residualKw = Math.max(0, (consumFc[i] || 0) - (pvFc[i] || 0));
+    const toSelf  = Math.min(disPowKw, residualKw);
+    const toExport = Math.max(0, disPowKw - toSelf);
+    const total   = toSelf + toExport;
+    if (total <= 0) return priceFc[i];
+    return (toSelf * priceFc[i] + toExport * feedInFc[i]) / total;
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < filtMode.length - 1; i++) {
+      if (filtMode[i] === 'charging') {
+        const chargeCost = getChargeCost(i, Math.abs(filtPow[i]));
+        let hasDisInWindow = false, hasProfDis = false;
+        const end = Math.min(i + lookahead + 1, filtMode.length);
+        for (let j = i + 1; j < end; j++) {
+          if (filtMode[j] === 'discharging') {
+            hasDisInWindow = true;
+            const disVal = getDischargeVal(j, Math.abs(filtPow[j]));
+            if (disVal - chargeCost / rte >= minArb) { hasProfDis = true; break; }
+          }
+        }
+        if (hasDisInWindow && !hasProfDis) {
+          filtPow[i] = 0; filtMode[i] = 'idle'; changed = true;
+        }
+      } else if (filtMode[i] === 'discharging') {
+        const disVal = getDischargeVal(i, Math.abs(filtPow[i]));
+        let hasChargeInWindow = false, hasProfCharge = false;
+        const end = Math.min(i + lookahead + 1, filtMode.length);
+        for (let j = i + 1; j < end; j++) {
+          if (filtMode[j] === 'charging') {
+            hasChargeInWindow = true;
+            const cc = getChargeCost(j, Math.abs(filtPow[j]));
+            if (disVal - cc / rte >= minArb) { hasProfCharge = true; break; }
+          }
+        }
+        if (hasChargeInWindow && !hasProfCharge) {
+          filtPow[i] = 0; filtMode[i] = 'idle'; changed = true;
+        }
+      }
+    }
+  }
+  return { powerKw: filtPow, modes: filtMode };
+}
+
+/**
+ * Micro-cycle filter: removes charge/discharge blocks that move less than
+ * MIN_CYCLE_KWH total energy — too small to be worthwhile.
+ * Mirrors Python _filter_micro_cycles.
+ */
+function filterMicroCycles(powerKw, modes, stepDurations) {
+  if (!powerKw.length) return { powerKw, modes };
+
+  const filtPow  = [...powerKw];
+  const filtMode = [...modes];
+  let i = 0;
+  while (i < filtMode.length) {
+    const dir = filtMode[i];
+    if (dir !== 'charging' && dir !== 'discharging') { i++; continue; }
+    let j = i, totalEnergy = 0;
+    while (j < filtMode.length && filtMode[j] === dir) {
+      const stepH = stepDurations[j] || 0.25;
+      totalEnergy += Math.abs(filtPow[j]) * stepH;
+      j++;
+    }
+    if (totalEnergy < MIN_CYCLE_KWH) {
+      for (let k = i; k < j; k++) { filtPow[k] = 0; filtMode[k] = 'idle'; }
+    }
+    i = j;
+  }
+  return { powerKw: filtPow, modes: filtMode };
+}
+
 function computeShadowPrice(V, socStates, currentSocKwh) {
   if (socStates.length < 3) return 0;
   const idx     = findNearestSocIdx(currentSocKwh * 1000, socStates);
   const clamped = Math.max(1, Math.min(socStates.length - 2, idx));
+  // λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC)
+  // V at lower SoC > V at higher SoC (more energy = lower future cost),
+  // so (V[low] - V[high]) is positive → shadow price is positive.
+  // Matches Python: (V[0][idx-1] - V[0][idx+1]) / (2 * step_kwh)
   const dV      = V[0][clamped - 1] - V[0][clamped + 1];
   const dSocKwh = (socStates[clamped + 1] - socStates[clamped - 1]) / 1000;
-  return dSocKwh !== 0 ? -dV / dSocKwh : 0;
+  return dSocKwh !== 0 ? dV / dSocKwh : 0;
 }
 
-function computeTotalCost(powerKw, socKwh, inputs, cfg) {
-  let total = 0, baseline = 0;
+/**
+ * Baseline cost: no battery exists.
+ * DC-coupled PV all goes to AC at DC_TO_AC_EFF (no passive charging).
+ * Mirrors Python _calculate_baseline_cost.
+ */
+function computeBaselineCost(inputs, cfg) {
+  const { priceFc, feedInFc, pvFc, consumFc, stepDurations, pvDcFc } = inputs;
+  let baseline = 0;
+  for (let t = 0; t < priceFc.length; t++) {
+    const stepH   = stepDurations[t] || 0.25;
+    const feedIn  = feedInFc && feedInFc[t] !== undefined ? feedInFc[t] : priceFc[t];
+    const pvW     = pvFc    && pvFc[t]    !== undefined ? pvFc[t]    * 1000 : 0;
+    const consumW = consumFc && consumFc[t] !== undefined ? consumFc[t] * 1000 : 0;
+    const pvDcW   = pvDcFc  && pvDcFc[t]  !== undefined ? pvDcFc[t]  * 1000 : 0;
+    // All DC PV → AC at DC_TO_AC_EFF (no battery to absorb it)
+    const dcPvToAcW = pvDcW > 0 ? pvDcW * DC_TO_AC_EFF : 0;
+    const totalPvW  = pvW + dcPvToAcW;
+    const netGridW  = consumW - totalPvW;
+    const energyKwh = Math.abs(netGridW) * stepH / 1000;
+    baseline += netGridW > 0 ? energyKwh * priceFc[t] : -energyKwh * feedIn;
+  }
+  return baseline;
+}
+
+/**
+ * Schedule total cost including terminal value.
+ * Mirrors Python _calculate_schedule_total_cost.
+ */
+function computeScheduleCost(powerKw, socKwh, inputs, cfg, terminalPrice) {
   const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost, pvDcFc } = inputs;
+  let total = 0;
+  const maxSocWhC = cfg.maxSocKwh * 1000;
   for (let t = 0; t < powerKw.length; t++) {
-    const stepH  = stepDurations[t] || 0.25;
-    const feedIn = feedInFc && feedInFc[t] !== undefined ? feedInFc[t] : priceFc[t];
-    const pvW    = pvFc    && pvFc[t]    !== undefined ? pvFc[t]    * 1000 : 0;
-    const consumW= consumFc && consumFc[t] !== undefined ? consumFc[t] * 1000 : 0;
-    const pvDcW  = pvDcFc  && pvDcFc[t]  !== undefined ? pvDcFc[t]  * 1000 : 0;
-    const maxSocWhC = cfg.maxSocKwh * 1000;
+    const stepH   = stepDurations[t] || 0.25;
+    const feedIn  = feedInFc && feedInFc[t] !== undefined ? feedInFc[t] : priceFc[t];
+    const pvW     = pvFc    && pvFc[t]    !== undefined ? pvFc[t]    * 1000 : 0;
+    const consumW = consumFc && consumFc[t] !== undefined ? consumFc[t] * 1000 : 0;
+    const pvDcW   = pvDcFc  && pvDcFc[t]  !== undefined ? pvDcFc[t]  * 1000 : 0;
     total += calculateStepCost(
       stepH, socKwh[t] * 1000, -powerKw[t] * 1000,
       priceFc[t], feedIn, pvW, consumW,
       cfg.rte, degradCost, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
     );
-    baseline += calculateStepCost(
-      stepH, socKwh[t] * 1000, 0,
-      priceFc[t], feedIn, pvW, consumW,
-      cfg.rte, 0, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
-    );
   }
+  // Terminal value: stored energy above min SoC at end of horizon is worth terminalPrice
+  if (terminalPrice > 0 && socKwh.length > powerKw.length) {
+    const finalSoc      = socKwh[socKwh.length - 1];
+    const finalStoredKwh = Math.max(0, finalSoc - cfg.minSocKwh);
+    total -= finalStoredKwh * terminalPrice;
+  }
+  return total;
+}
+
+/** @deprecated Use computeBaselineCost + computeScheduleCost directly. */
+function computeTotalCost(powerKw, socKwh, inputs, cfg) {
+  const baseline = computeBaselineCost(inputs, cfg);
+  const total    = computeScheduleCost(powerKw, socKwh, inputs, cfg, 0);
   return { total, baseline };
 }
 
@@ -253,13 +453,37 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
                    stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice);
-  const { powerKw, modes, socKwh } = forwardPass(dp, cfg, currentSocKwh, pvDcFc);
-  const shadow = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);
-  const { total, baseline } = computeTotalCost(powerKw, socKwh, inputs, cfg);
+  let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc);
+
+  // Post-processing filters (matching optimizer.py)
+  const oscResult = filterOscillations(
+    powerKw, modes, cfg, priceFc, feedInFc || priceFc, pvFc, consumFc,
+    dp.stepDurations, degradCost, minPriceSpread || 0.05, pvDcFc
+  );
+  powerKw = oscResult.powerKw;
+  modes   = oscResult.modes;
+
+  const mcResult = filterMicroCycles(powerKw, modes, dp.stepDurations);
+  powerKw = mcResult.powerKw;
+  modes   = mcResult.modes;
+
+  // Rebuild SoC from filtered schedule
+  const socKwh = rebuildSoc(powerKw, modes, cfg, currentSocKwh, dp.stepDurations, pvDcFc);
+
+  const shadow   = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);
+  const baseline = computeBaselineCost(inputs, cfg);
+  const total    = computeScheduleCost(powerKw, socKwh, inputs, cfg, dp.terminalPrice);
+
+  // Savings: value added by battery actions only.
+  // Subtract initial terminal value so savings = 0 when battery is idle,
+  // regardless of how much energy is already stored.
+  // Mirrors: savings = baseline - initial_terminal_value - total_cost
+  const initialStoredKwh = Math.max(0, currentSocKwh - cfg.minSocKwh);
+  const savings = baseline - initialStoredKwh * dp.terminalPrice - total;
 
   return {
     powerKw, modes, socKwh,
-    totalCost: total, baselineCost: baseline, savings: baseline - total,
+    totalCost: total, baselineCost: baseline, savings,
     shadowPrice: shadow, terminalPrice: dp.terminalPrice,
     nSocStates: dp.socStates.length, powerStepW: dp.powerStepW, socResWh: dp.socResWh,
   };
@@ -499,12 +723,17 @@ function generateTips(d) {
 // ── Node.js module export (ignored in browser) ─────────────────────
 if (typeof module !== 'undefined') {
   module.exports = {
-    SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW,
+    SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
     calculateStepCost,
     findNearestSocIdx,
     runDP,
     forwardPass,
+    rebuildSoc,
+    filterOscillations,
+    filterMicroCycles,
     computeShadowPrice,
+    computeBaselineCost,
+    computeScheduleCost,
     computeTotalCost,
     runOptimizer,
     generateTips,

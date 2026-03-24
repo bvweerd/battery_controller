@@ -15,7 +15,7 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
   - `forecast_models.py` — PV and consumption forecasting + historical price model
   - `battery_model.py` — battery physics (RTE split as √RTE per direction)
   - `config_flow.py` — setup + options flow with `section()` helpers
-  - `const.py` — SOC_RESOLUTION_WH=100, power step=500W, all config keys
+  - `const.py` — SOC_RESOLUTION_WH=25, POWER_STEP_W=100, all config keys
 - `tests/` — pytest with `pytest-homeassistant-custom-component` + syrupy snapshots
 
 ## HA Conventions
@@ -39,6 +39,22 @@ Always do the following after modifying any source file:
 3. **Update `ALGORITHM.md`** — if algorithm logic, efficiency model, or DP behaviour changed
 4. **Update `simulate_diagnostics.py`** — if inputs, outputs, or data structures changed
 5. **Update `docs/index.html`** — if the simulator UI or displayed parameters changed
+
+## Keeping DP implementations in sync
+There are three DP implementations that **must always be kept identical** in algorithm, constants, and cost semantics:
+- `custom_components/battery_controller/optimizer.py` — the integration (source of truth)
+- `docs/analyzer.js` — JS re-implementation used by the diagnostic simulator
+- `simulate/simulate_diagnostics.py` — Python script for local diagnostics testing
+
+When changing **any** of the following in `optimizer.py`, apply the same change to `analyzer.js` and `simulate_diagnostics.py`:
+- SoC transition logic (charge/discharge/idle, RTE split, passive DC PV)
+- `calculate_step_cost` cost formula (grid cost, degradation, DC PV path, grid cap)
+- Action generation (power steps, charge/discharge limits)
+- Terminal condition (terminal price, V[T] initialization)
+- V[t][s] fallback for unreachable states
+- Shadow price formula and sign convention
+- Oscillation filter thresholds (min_price_spread, degradation formula)
+- Constants: `SOC_RESOLUTION_WH`, `POWER_STEP_W`, `DC_TO_AC_INVERTER_EFFICIENCY`
 
 ## Compaction: always preserve
 - Modified files and their key changes
