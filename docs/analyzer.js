@@ -709,9 +709,9 @@ function generateTips(d) {
 
   // 12. Savings summary
   if (savings > 0 && baseline > 0) {
-    tips.push({ t:'ok', title:`Saving €${savings.toFixed(4)} over this horizon (${savPct.toFixed(1)}%)`,
-      text:`Extrapolated: ~€${(savings * 96).toFixed(2)}/day (assuming similar price pattern 24h).
-      Actual savings depend on price volatility throughout the day.`});
+    tips.push({ t:'ok', title:`Saving €${savings.toFixed(4)} over this horizon (${savPct.toFixed(1)}% vs no battery)`,
+      text:`Savings compared to having no battery over the planned horizon.
+      Actual daily savings depend on how many profitable charge/discharge cycles occur.`});
   }
 
   if (tips.filter(t => t.t !== 'ok').length === 0) {
