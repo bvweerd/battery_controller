@@ -73,7 +73,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          ignore: brands
 
   js-test:
     name: Test (JS analyzer)
