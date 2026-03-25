@@ -948,22 +948,26 @@ class TestTerminalShadowPrice:
             min_price_spread=0.05,
         )
 
-    def test_shadow_price_used_as_terminal(self, battery_config):
-        """High shadow price should encourage charging; low should encourage discharging."""
-        # Flat prices — no arbitrage opportunity; the terminal price drives the decision.
+    def test_shadow_price_not_used_as_terminal(self, battery_config):
+        """terminal_shadow_price must not affect the DP terminal condition.
+
+        Using the shadow price as terminal_price creates a circular dependency in
+        rolling-horizon re-optimisation: λ ≈ sqrt(RTE) × P_best, so the opportunity
+        cost of discharging at P_best becomes P_best — making peak-hour discharge
+        break-even and degradation tips it to idle.  The terminal value now always
+        uses the feed-in tail average; terminal_shadow_price is only passed through
+        to the caller for use as the hybrid mode switching threshold.
+        """
         flat_price = [0.20] * 8
         feed_in = [0.07] * 8
         args = self._base_args(battery_config)
 
-        # High terminal shadow price: stored energy is worth a lot → prefer charging
         result_high = optimize_battery_schedule(
             price_forecast=flat_price,
             feed_in_forecast=feed_in,
             terminal_shadow_price=0.40,
             **args,
         )
-
-        # Low terminal shadow price: stored energy worth little → prefer discharging
         result_low = optimize_battery_schedule(
             price_forecast=flat_price,
             feed_in_forecast=feed_in,
@@ -971,10 +975,8 @@ class TestTerminalShadowPrice:
             **args,
         )
 
-        final_soc_high = result_high.soc_schedule_kwh[-1]
-        final_soc_low = result_low.soc_schedule_kwh[-1]
-        assert final_soc_high > final_soc_low, (
-            "High terminal shadow price should lead to higher end SoC than low"
+        assert result_high.power_schedule_kw == result_low.power_schedule_kw, (
+            "terminal_shadow_price should not influence the DP schedule"
         )
 
     def test_fallback_when_no_shadow_price(self, battery_config):
@@ -993,29 +995,33 @@ class TestTerminalShadowPrice:
         assert len(result.power_schedule_kw) == 8
         assert result.shadow_price_eur_kwh >= 0.0
 
-    def test_negative_shadow_price_ignored(self, battery_config):
-        """Negative shadow price should be ignored; fallback to feed-in tail."""
+    def test_shadow_price_always_ignored_for_terminal(self, battery_config):
+        """Any terminal_shadow_price value (None, negative, positive) gives identical DP results."""
         price = [0.20] * 8
         feed_in = [0.07] * 8
         args = self._base_args(battery_config)
 
-        # With None (baseline fallback)
         result_none = optimize_battery_schedule(
             price_forecast=price,
             feed_in_forecast=feed_in,
             terminal_shadow_price=None,
             **args,
         )
-
-        # Negative value should produce identical result to None
         result_neg = optimize_battery_schedule(
             price_forecast=price,
             feed_in_forecast=feed_in,
             terminal_shadow_price=-0.10,
             **args,
         )
+        result_pos = optimize_battery_schedule(
+            price_forecast=price,
+            feed_in_forecast=feed_in,
+            terminal_shadow_price=0.50,
+            **args,
+        )
 
         assert result_none.power_schedule_kw == result_neg.power_schedule_kw
+        assert result_none.power_schedule_kw == result_pos.power_schedule_kw
 
     def test_shadow_price_self_consistency(self, battery_config):
         """Shadow price fed back as terminal should be close to the new shadow price."""

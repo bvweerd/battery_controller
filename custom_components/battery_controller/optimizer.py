@@ -485,15 +485,17 @@ def optimize_battery_schedule(
     # feed-in price. A non-zero terminal value prevents the optimizer from
     # irrationally discharging the battery just before the horizon ends.
     #
-    # Preferred source: shadow price (λ) from the previous run.  λ is the
-    # marginal value of stored energy derived from the full price structure,
-    # so it is more stable across rolling-horizon runs than the spot price at
-    # a single end-of-horizon time step.
-    # Fallback: blend the last price with the 6-step tail average to dampen
-    # artifacts caused by transient price spikes at the forecast boundary.
-    if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
-        terminal_price = terminal_shadow_price
-    elif feed_in_forecast:
+    # Use the 6-step tail average of the feed-in forecast rather than the
+    # shadow price from the previous run.  The shadow price λ ≈ sqrt(RTE) ×
+    # P_best, so using it as terminal_price makes discharge at P_best break-
+    # even (opportunity cost = λ / sqrt(RTE) = P_best).  In a rolling-horizon
+    # re-optimisation the "best" hours are often the current hours, so this
+    # circular dependency suppresses discharge exactly at the peak.  The tail
+    # average is naturally below peak prices and avoids this trap.
+    # terminal_shadow_price is still passed to the caller and used by hybrid
+    # mode as the charge/discharge switching threshold — it is just no longer
+    # used to initialise V[T].
+    if feed_in_forecast:
         lookback = min(6, len(feed_in_forecast))
         avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
         terminal_price = min(feed_in_forecast[-1], avg_tail)
