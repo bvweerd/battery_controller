@@ -23,6 +23,10 @@ from .const import (
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
     CONF_FIXED_FEED_IN_PRICE,
+    CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+    CONF_HIGH_SOC_MAX_CHARGE_KW,
+    CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+    CONF_LOW_SOC_MAX_DISCHARGE_KW,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MAX_SOC_PERCENT,
@@ -39,6 +43,10 @@ from .const import (
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_CAPACITY_KWH,
     DEFAULT_FIXED_FEED_IN_PRICE,
+    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+    DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
+    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+    DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
     DEFAULT_MAX_CHARGE_POWER_KW,
     DEFAULT_MAX_DISCHARGE_POWER_KW,
     DEFAULT_MAX_SOC_PERCENT,
@@ -123,6 +131,26 @@ def _build_battery_subentry_schema(
                 default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
                 description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
             ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=1.0)),
+            vol.Optional(
+                CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+                description={
+                    "suggested_value": d.get(CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT)
+                },
+            ): vol.All(vol.Coerce(float), vol.Range(min=50.0, max=100.0)),
+            vol.Optional(
+                CONF_HIGH_SOC_MAX_CHARGE_KW,
+                description={"suggested_value": d.get(CONF_HIGH_SOC_MAX_CHARGE_KW)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1000.0)),
+            vol.Optional(
+                CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+                description={
+                    "suggested_value": d.get(CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT)
+                },
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+            vol.Optional(
+                CONF_LOW_SOC_MAX_DISCHARGE_KW,
+                description={"suggested_value": d.get(CONF_LOW_SOC_MAX_DISCHARGE_KW)},
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1000.0)),
         }
     )
 
@@ -150,6 +178,15 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     )
     if validated.get(CONF_BATTERY_POWER_SENSOR):
         result[CONF_BATTERY_POWER_SENSOR] = validated[CONF_BATTERY_POWER_SENSOR]
+    # SoC-dependent derating: only store when explicitly provided
+    for key, default in (
+        (CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT, DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT),
+        (CONF_HIGH_SOC_MAX_CHARGE_KW, DEFAULT_HIGH_SOC_MAX_CHARGE_KW),
+        (CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT, DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT),
+        (CONF_LOW_SOC_MAX_DISCHARGE_KW, DEFAULT_LOW_SOC_MAX_DISCHARGE_KW),
+    ):
+        if key in validated:
+            result[key] = float(validated[key])
     return result
 
 
