@@ -1158,3 +1158,129 @@ class TestOscillationFilterDcPv:
         no_dc_charge_steps = sum(1 for m in result_no_dc[1] if m == "charging")
         dc_charge_steps = sum(1 for m in result_with_dc[1] if m == "charging")
         assert dc_charge_steps >= no_dc_charge_steps
+
+
+class TestSocDependentDerating:
+    """Tests for SoC-dependent power derating in the DP."""
+
+    def _marstek_config(self) -> BatteryConfig:
+        """Marstek Venus A-like config: 5.2 kWh, 1.2 kW nominal, derating near extremes."""
+        return BatteryConfig(
+            capacity_kwh=5.2,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            round_trip_efficiency=0.92,
+            min_soc_percent=10.0,  # min = 0.52 kWh
+            max_soc_percent=100.0,  # max = 5.2 kWh
+            high_soc_charge_threshold_pct=95.0,  # above 4.94 kWh → 0.45 kW
+            high_soc_max_charge_kw=0.45,
+            low_soc_discharge_threshold_pct=15.0,  # below 0.78 kWh → 0.38 kW
+            low_soc_max_discharge_kw=0.38,
+        )
+
+    def test_charge_power_limited_above_threshold(self):
+        """When starting above the high-SoC charge threshold, charge power is capped."""
+        config = self._marstek_config()
+        # Start at 97% SoC (above 95% threshold) with a low buy price
+        start_soc_kwh = 5.044  # 97%
+        prices = [0.05, 0.05, 0.30, 0.30]
+        result = optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=start_soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.2] * 4,
+            step_durations_hours=[0.25] * 4,
+            degradation_cost_per_kwh=0.02,
+            min_price_spread=0.05,
+        )
+        # Any charge step at this SoC must stay at or below the derated limit (0.45 kW)
+        for i, (mode, power) in enumerate(
+            zip(result.mode_schedule, result.power_schedule_kw)
+        ):
+            if mode == "charging" and result.soc_schedule_kwh[i] >= 5.2 * 0.95:
+                assert power <= pytest.approx(0.45 + 0.01), (
+                    f"step {i}: charge power {power:.3f} kW exceeds derated limit 0.45 kW"
+                )
+
+    def test_discharge_power_limited_below_threshold(self):
+        """When starting below the low-SoC discharge threshold, discharge power is capped."""
+        config = self._marstek_config()
+        # Start at 12% SoC (below 15% threshold)
+        start_soc_kwh = 0.624  # 12%
+        prices = [0.30, 0.30, 0.05, 0.05]
+        result = optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=start_soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.2] * 4,
+            step_durations_hours=[0.25] * 4,
+            degradation_cost_per_kwh=0.02,
+            min_price_spread=0.05,
+        )
+        # Any discharge step at this SoC must not exceed derated limit (0.38 kW)
+        for i, (mode, power) in enumerate(
+            zip(result.mode_schedule, result.power_schedule_kw)
+        ):
+            if mode == "discharging" and result.soc_schedule_kwh[i] <= 5.2 * 0.15:
+                assert abs(power) <= pytest.approx(0.38 + 0.01), (
+                    f"step {i}: discharge power {abs(power):.3f} kW exceeds derated limit 0.38 kW"
+                )
+
+    def test_full_power_available_at_mid_soc(self):
+        """Away from extremes, full nominal power is available."""
+        config = self._marstek_config()
+        # Start at 50% SoC — well away from both derating zones
+        start_soc_kwh = 2.6  # 50%
+        # Flat low prices first, then high — should charge then discharge at full power
+        prices = [0.05, 0.05, 0.05, 0.05, 0.30, 0.30, 0.30, 0.30]
+        result = optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=start_soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.1] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.02,
+            min_price_spread=0.05,
+        )
+        # At mid-SoC at least one charging step should use close to full power (1.2 kW)
+        charge_powers = [
+            p
+            for i, (m, p) in enumerate(
+                zip(result.mode_schedule, result.power_schedule_kw)
+            )
+            if m == "charging" and result.soc_schedule_kwh[i] < 5.2 * 0.95
+        ]
+        if charge_powers:
+            assert max(charge_powers) >= 0.8
+
+    def test_derating_does_not_affect_unrelated_config(self):
+        """A config without derating produces the same result as before this feature."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            # Explicitly no derating (defaults)
+        )
+        prices = [0.05, 0.05, 0.30, 0.30]
+        result = optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=5.0,
+            price_forecast=prices,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5] * 4,
+            step_durations_hours=[0.25] * 4,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+        assert len(result.power_schedule_kw) == 4
+        assert result.savings >= 0

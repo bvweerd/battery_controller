@@ -133,6 +133,23 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   for (let i = dischargeSteps; i >= 1; i--) actions.push(-i * powerStepW);
   for (let i = chargeSteps; i >= 0; i--)    actions.push(i * powerStepW);
 
+  // Pre-compute SoC-dependent power limits per state.
+  // highSocMaxChargeKw = 0 or absent means no derating.
+  const highSocThreshPct  = cfg.highSocChargeThresholdPct  ?? 100;
+  const highSocMaxChargeW = (cfg.highSocMaxChargeKw  ?? 0) * 1000;
+  const lowSocThreshPct   = cfg.lowSocDischargeThresholdPct ?? 0;
+  const lowSocMaxDischargeW = (cfg.lowSocMaxDischargeKw ?? 0) * 1000;
+  const socMaxChargeW    = socStates.map(wh => {
+    if (highSocMaxChargeW > 0 && wh / cfg.capacityKwh / 10 >= highSocThreshPct)
+      return highSocMaxChargeW;
+    return maxChargeW;
+  });
+  const socMaxDischargeW = socStates.map(wh => {
+    if (lowSocMaxDischargeW > 0 && wh / cfg.capacityKwh / 10 <= lowSocThreshPct)
+      return lowSocMaxDischargeW;
+    return maxDischargeW;
+  });
+
   for (let t = nSteps - 1; t >= 0; t--) {
     const stepH     = stepDurations[t];
     const gridPrice = priceFc[t];
@@ -144,6 +161,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
     for (let s = 0; s < nSocStates; s++) {
       const socWh  = socStates[s];
+      const maxChgW = socMaxChargeW[s];
+      const maxDisW = socMaxDischargeW[s];
       let bestCost = Infinity;
       let bestAction = 0;
 
@@ -151,9 +170,11 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         const actionW = actions[ai];
         let newSocWh;
         if (actionW > 0) {
+          if (actionW > maxChgW) continue;
           newSocWh = socWh + actionW * stepH * sqrtRte;
           if (newSocWh > maxSocWh) continue;
         } else if (actionW < 0) {
+          if (-actionW > maxDisW) continue;
           newSocWh = socWh - Math.abs(actionW) * stepH / sqrtRte;
           if (newSocWh < minSocWh) continue;
         } else {

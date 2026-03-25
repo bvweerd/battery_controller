@@ -101,7 +101,11 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
             "battery_power_sensor": "Battery power sensor (optional)",
-            "pv_dc_efficiency": "DC coupling efficiency (0–1, for DC-coupled PV on this inverter)"
+            "pv_dc_efficiency": "DC coupling efficiency (0–1, for DC-coupled PV on this inverter)",
+            "high_soc_charge_threshold_pct": "High-SoC charge derating threshold (%, optional)",
+            "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
+            "low_soc_discharge_threshold_pct": "Low-SoC discharge derating threshold (%, optional)",
+            "low_soc_max_discharge_kw": "Derated discharge power below threshold (kW, optional)"
           }
         },
         "reconfigure": {
@@ -117,7 +121,11 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
             "battery_power_sensor": "Battery power sensor (optional)",
-            "pv_dc_efficiency": "DC coupling efficiency (0–1)"
+            "pv_dc_efficiency": "DC coupling efficiency (0–1)",
+            "high_soc_charge_threshold_pct": "High-SoC charge derating threshold (%, optional)",
+            "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
+            "low_soc_discharge_threshold_pct": "Low-SoC discharge derating threshold (%, optional)",
+            "low_soc_max_discharge_kw": "Derated discharge power below threshold (kW, optional)"
           }
         }
       },

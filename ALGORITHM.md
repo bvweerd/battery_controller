@@ -56,11 +56,15 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 |-----------|-------------|
 | `capacity_kwh` | Total battery capacity |
 | `min_soc_kwh / max_soc_kwh` | Operating SoC limits |
-| `max_charge_power_kw / max_discharge_power_kw` | Power limits |
+| `max_charge_power_kw / max_discharge_power_kw` | Nominal power limits |
 | `round_trip_efficiency` (RTE) | End-to-end efficiency (e.g. 0.90 = 90%) |
 | `pv_dc_coupled` | Whether DC-coupled PV is present |
 | `pv_dc_efficiency` | DC MPPT + DC-DC conversion efficiency (~0.97) |
 | `max_grid_power_kw` | Grid connection cap (0 = unlimited) |
+| `high_soc_charge_threshold_pct` | Above this SoC (%), charge is limited to `high_soc_max_charge_kw` |
+| `high_soc_max_charge_kw` | Derated charge limit above threshold (0 = no derating) |
+| `low_soc_discharge_threshold_pct` | Below this SoC (%), discharge is limited to `low_soc_max_discharge_kw` |
+| `low_soc_max_discharge_kw` | Derated discharge limit below threshold (0 = no derating) |
 
 ---
 
@@ -95,6 +99,7 @@ actions = discharge_actions + charge_actions
 
 - `full_step_hours` is the duration of a regular (non-partial) time step. A partial first step (e.g. 3 minutes remaining before the next price boundary) must not shrink `power_step_w` for all subsequent full steps.
 - Charge actions are listed highest-first so that the DP's "first equal wins" tie-breaking naturally produces **front-loaded charging** (maximum power immediately rather than a ramp-up).
+- The global action list is built from the **nominal** (unconstrained) maxima. Per-state derating is applied in the backward pass (see Section 6).
 
 ---
 
@@ -222,15 +227,24 @@ where `s'` is the SoC state after applying action `a`:
 The backward pass runs from `t = N-1` down to `t = 0`:
 
 ```python
+# Pre-compute per-state power limits (outside the t-loop for performance)
+soc_max_charge_w[s]    = max_charge_at_soc(soc_states[s])
+soc_max_discharge_w[s] = max_discharge_at_soc(soc_states[s])
+
 for t in range(N-1, -1, -1):
     for s in all_soc_states:
         best_cost = infinity
         best_action = 0
 
         for a in all_actions:
+            if a > 0 and a > soc_max_charge_w[s]:
+                continue   # SoC-dependent charge derating
+            if a < 0 and |a| > soc_max_discharge_w[s]:
+                continue   # SoC-dependent discharge derating
+
             s' = transition(s, a, t)
             if s' < min_soc or s' > max_soc:
-                continue   # constraint violation
+                continue   # SoC boundary violation
             if a != 0 and nearest_soc_idx(s') == nearest_soc_idx(s):
                 continue   # sub-resolution action — skip to avoid ghost "free" moves
 
@@ -242,6 +256,10 @@ for t in range(N-1, -1, -1):
         V[t][s] = best_cost
         policy[t][s] = best_action
 ```
+
+**SoC-dependent derating**: Some batteries (e.g. Marstek Venus A) reduce their max charge/discharge power near SoC extremes (BMS absorption). The per-state limits `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are precomputed before the outer time loop using `BatteryConfig.max_charge_at_soc()` and `max_discharge_at_soc()`. For batteries without derating (the default), these equal the nominal maxima and the guards never fire.
+
+**Effect on the schedule**: Because backward induction propagates future costs, the DP at step `t` already "knows" that entering a derated SoC zone at `t+1` constrains future power. This causes the optimizer to front-load discharge before the low-SoC threshold — for example, discharging at 1200 W in earlier steps rather than running out of power at 380 W near empty.
 
 **Sub-resolution skip rule**: If a non-zero action does not move the SoC to a different discrete state, the DP sees it as "free" (no change in `V[t+1]`) but the step cost still includes RTE losses. Allowing such actions causes spurious micro-charging/discharging at zero apparent benefit. These actions are skipped. Idle (`a = 0`) is exempt because passive DC PV may still move the SoC bin.
 
@@ -386,6 +404,7 @@ Several implementation details prevent subtle correctness bugs:
 | Horizon-end discharge | Terminal condition `V[T][s] = -stored_kwh × terminal_price` prevents horizon-end drain |
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | RTE symmetry | `charge_eff = discharge_eff = sqrt(RTE)` ensures `charge_eff × discharge_eff = RTE` exactly |
+| Derating precomputed outside `t`-loop | `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are arrays computed once from `soc_states` before the backward pass, avoiding repeated method calls in the tight inner loop |
 
 ## 12. Variable Price Intervals (15-min / 30-min / hourly)
 
