@@ -38,6 +38,27 @@ class BatteryConfig:
     pv_dc_peak_power_kwp: float
     pv_dc_efficiency: float
     max_grid_power_kw: float = 0.0
+    high_soc_charge_threshold_pct: float = 100.0
+    high_soc_max_charge_kw: float = 0.0
+    low_soc_discharge_threshold_pct: float = 0.0
+    low_soc_max_discharge_kw: float = 0.0
+
+    def max_charge_at_soc(self, soc_kwh: float) -> float:
+        if (
+            self.high_soc_max_charge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100 >= self.high_soc_charge_threshold_pct
+        ):
+            return self.high_soc_max_charge_kw
+        return self.max_charge_power_kw
+
+    def max_discharge_at_soc(self, soc_kwh: float) -> float:
+        if (
+            self.low_soc_max_discharge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100
+            <= self.low_soc_discharge_threshold_pct
+        ):
+            return self.low_soc_max_discharge_kw
+        return self.max_discharge_power_kw
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +89,10 @@ def extract_inputs(diag: dict) -> tuple:
         pv_dc_coupled=bc["pv_dc_coupled"],
         pv_dc_peak_power_kwp=bc["pv_dc_peak_power_kwp"],
         pv_dc_efficiency=bc["pv_dc_efficiency"],
+        high_soc_charge_threshold_pct=bc.get("high_soc_charge_threshold_pct", 100.0),
+        high_soc_max_charge_kw=bc.get("high_soc_max_charge_kw", 0.0),
+        low_soc_discharge_threshold_pct=bc.get("low_soc_discharge_threshold_pct", 0.0),
+        low_soc_max_discharge_kw=bc.get("low_soc_max_discharge_kw", 0.0),
     )
 
     sched = diag["data"]["optimization"]["schedule"]
@@ -304,6 +329,13 @@ def run_dp(
     ]
     actions = discharge_actions + charge_actions
 
+    soc_max_charge_w = [
+        battery_config.max_charge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+    soc_max_discharge_w = [
+        battery_config.max_discharge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+
     for t in range(n_steps - 1, -1, -1):
         time_step_hours = step_durations_hours[t]
         grid_price = price_forecast[t]
@@ -317,14 +349,20 @@ def run_dp(
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
+            max_chg_w = soc_max_charge_w[s_idx]
+            max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
                 if action_w > 0:
+                    if action_w > max_chg_w:
+                        continue
                     energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
+                    if -action_w > max_dis_w:
+                        continue
                     energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
@@ -971,6 +1009,78 @@ def main():
         min_price_spread=min_price_spread,
         terminal_price=terminal_price,
     )
+
+    # ── Diagnostic history (only present in diagnostics from new versions)
+    opt_data_top = diag.get("data", {}).get("optimization", {})
+    run_log = opt_data_top.get("optimizer_run_log", [])
+    setpoint_log = opt_data_top.get("setpoint_log", [])
+
+    if run_log:
+        print()
+        print("=" * 120)
+        print("  OPTIMIZER RUN HISTORY  (last run = most recent)")
+        print("=" * 120)
+        print(
+            f"  {'Timestamp':>22}  {'Ctrl':>14}  {'DP mode':>11}  {'DP kW':>6}  "
+            f"{'Eff.mode':>11}  {'Eff.kW':>6}  {'Setpt kW':>8}  "
+            f"{'SoC kWh':>7}  {'Price':>7}  {'Shadow':>7}  {'Commit':>6}  {'Reason'}"
+        )
+        print("-" * 120)
+        for entry in run_log:
+            ts = entry.get("timestamp", "")[:19].replace("T", " ")
+            locked = "YES" if entry.get("commitment_locked") else "no"
+            reason = entry.get("commitment_reason", "")
+            dev = ""
+            dp_kw = entry.get("dp_power_kw", 0.0)
+            eff_kw = entry.get("effective_power_kw", 0.0)
+            setp_kw = entry.get("setpoint_kw", 0.0)
+            if abs(setp_kw - eff_kw) > 0.05:
+                dev = " ← SoC/power limit"
+            elif abs(eff_kw - dp_kw) > 0.05 and not entry.get("commitment_locked"):
+                dev = " ← mode override"
+            print(
+                f"  {ts:>22}  {entry.get('control_mode', ''):>14}  "
+                f"{entry.get('dp_mode', ''):>11}  {dp_kw:>6.3f}  "
+                f"{entry.get('effective_mode', ''):>11}  {eff_kw:>6.3f}  {setp_kw:>8.3f}  "
+                f"{entry.get('soc_kwh', 0):>7.3f}  "
+                f"{entry.get('current_price') or 0:>7.4f}  "
+                f"{entry.get('shadow_price_eur_kwh') or 0:>7.4f}  "
+                f"{locked:>6}  {reason}{dev}"
+            )
+        print("-" * 120)
+
+    if setpoint_log:
+        print()
+        print("=" * 110)
+        print("  REAL-TIME SETPOINT HISTORY  (last entry = most recent)")
+        print("=" * 110)
+        print(
+            f"  {'Timestamp':>22}  {'Sched kW':>8}  {'Setp kW':>7}  {'Raw kW':>6}  "
+            f"{'Mode':>14}  {'Eff.mode':>14}  {'SoC kWh':>7}  "
+            f"{'Grid kW':>7}  {'Batt kW':>7}  {'SoC lim'}"
+        )
+        print("-" * 110)
+        for entry in setpoint_log:
+            ts = entry.get("timestamp", "")[:19].replace("T", " ")
+            soc_lim = "YES" if entry.get("soc_limited") else "no"
+            sched = entry.get("schedule_kw", 0.0)
+            setp = entry.get("setpoint_kw", 0.0)
+            raw = entry.get("raw_target_kw", 0.0)
+            row = (
+                f"  {ts:>22}  {sched:>8.3f}  {setp:>7.3f}  {raw:>6.3f}  "
+                f"{entry.get('mode', ''):>14}  {entry.get('effective_mode', ''):>14}  "
+                f"{entry.get('soc_kwh', 0):>7.3f}  "
+                f"{entry.get('grid_kw', 0):>7.3f}  {entry.get('battery_kw', 0):>7.3f}  {soc_lim}"
+            )
+            if entry.get("soc_limited"):
+                row = "\033[31m" + row + "\033[0m"
+            elif abs(setp - sched) > 0.1:
+                row = "\033[33m" + row + "\033[0m"
+            print(row)
+        print("-" * 110)
+        print(
+            "  Red = SoC limit blocked setpoint  |  Yellow = setpoint deviates from schedule"
+        )
 
 
 if __name__ == "__main__":

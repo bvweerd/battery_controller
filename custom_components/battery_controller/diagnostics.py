@@ -197,6 +197,14 @@ async def async_get_config_entry_diagnostics(
                 "mode": battery_state.mode,
             }
 
+        # Diagnostic history: optimizer run log and real-time setpoint log
+        if hasattr(optimization_coord, "_optimizer_run_log"):
+            optimization_data["optimizer_run_log"] = list(
+                optimization_coord._optimizer_run_log
+            )
+        if hasattr(optimization_coord, "_setpoint_log"):
+            optimization_data["setpoint_log"] = list(optimization_coord._setpoint_log)
+
     # Collect all entity states
     ent_reg = er.async_get(hass)
     entities: list[dict[str, Any]] = []

@@ -30,6 +30,15 @@ class BatteryConfig:
     # Grid capacity cap: maximum import/export power at grid connection (0 = unlimited)
     max_grid_power_kw: float = 0.0
 
+    # SoC-dependent power derating
+    # Some batteries cap charge/discharge power near SoC extremes (BMS absorption).
+    # high_soc_max_charge_kw = 0 means no derating (use max_charge_power_kw always).
+    # low_soc_max_discharge_kw = 0 means no derating (use max_discharge_power_kw always).
+    high_soc_charge_threshold_pct: float = 100.0
+    high_soc_max_charge_kw: float = 0.0
+    low_soc_discharge_threshold_pct: float = 0.0
+    low_soc_max_discharge_kw: float = 0.0
+
     # Derived values (calculated in __post_init__)
     charge_efficiency: float = field(init=False)
     discharge_efficiency: float = field(init=False)
@@ -54,6 +63,35 @@ class BatteryConfig:
         self.min_soc_kwh = self.capacity_kwh * self.min_soc_percent / 100.0
         self.max_soc_kwh = self.capacity_kwh * self.max_soc_percent / 100.0
 
+    def max_charge_at_soc(self, soc_kwh: float) -> float:
+        """Return the max charge power (kW) allowed at the given SoC.
+
+        Above high_soc_charge_threshold_pct the BMS limits charge power to
+        high_soc_max_charge_kw.  A value of 0 for the derated limit means
+        no derating is configured; the nominal max is returned instead.
+        """
+        if (
+            self.high_soc_max_charge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100 >= self.high_soc_charge_threshold_pct
+        ):
+            return self.high_soc_max_charge_kw
+        return self.max_charge_power_kw
+
+    def max_discharge_at_soc(self, soc_kwh: float) -> float:
+        """Return the max discharge power (kW) allowed at the given SoC.
+
+        Below low_soc_discharge_threshold_pct the BMS limits discharge power to
+        low_soc_max_discharge_kw.  A value of 0 for the derated limit means
+        no derating is configured; the nominal max is returned instead.
+        """
+        if (
+            self.low_soc_max_discharge_kw > 0
+            and soc_kwh / self.capacity_kwh * 100
+            <= self.low_soc_discharge_threshold_pct
+        ):
+            return self.low_soc_max_discharge_kw
+        return self.max_discharge_power_kw
+
     @classmethod
     def from_subentry(cls, data: dict[str, Any]) -> BatteryConfig:
         """Create BatteryConfig from a battery subentry data dict."""
@@ -65,6 +103,10 @@ class BatteryConfig:
             CONF_MIN_SOC_PERCENT,
             CONF_MAX_SOC_PERCENT,
             CONF_PV_DC_EFFICIENCY,
+            CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+            CONF_HIGH_SOC_MAX_CHARGE_KW,
+            CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+            CONF_LOW_SOC_MAX_DISCHARGE_KW,
             DEFAULT_CAPACITY_KWH,
             DEFAULT_MAX_CHARGE_POWER_KW,
             DEFAULT_MAX_DISCHARGE_POWER_KW,
@@ -72,6 +114,10 @@ class BatteryConfig:
             DEFAULT_MIN_SOC_PERCENT,
             DEFAULT_MAX_SOC_PERCENT,
             DEFAULT_PV_DC_EFFICIENCY,
+            DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+            DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
+            DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+            DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
         )
 
         return cls(
@@ -94,6 +140,26 @@ class BatteryConfig:
             pv_dc_efficiency=float(
                 data.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
             ),
+            high_soc_charge_threshold_pct=float(
+                data.get(
+                    CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+                    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+                )
+            ),
+            high_soc_max_charge_kw=float(
+                data.get(CONF_HIGH_SOC_MAX_CHARGE_KW, DEFAULT_HIGH_SOC_MAX_CHARGE_KW)
+            ),
+            low_soc_discharge_threshold_pct=float(
+                data.get(
+                    CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+                    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+                )
+            ),
+            low_soc_max_discharge_kw=float(
+                data.get(
+                    CONF_LOW_SOC_MAX_DISCHARGE_KW, DEFAULT_LOW_SOC_MAX_DISCHARGE_KW
+                )
+            ),
         )
 
     @classmethod
@@ -111,6 +177,10 @@ class BatteryConfig:
             CONF_PV_DC_PEAK_POWER_KWP,
             CONF_PV_DC_EFFICIENCY,
             CONF_MAX_GRID_POWER_KW,
+            CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+            CONF_HIGH_SOC_MAX_CHARGE_KW,
+            CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+            CONF_LOW_SOC_MAX_DISCHARGE_KW,
             DEFAULT_CAPACITY_KWH,
             DEFAULT_MAX_CHARGE_POWER_KW,
             DEFAULT_MAX_DISCHARGE_POWER_KW,
@@ -121,6 +191,10 @@ class BatteryConfig:
             DEFAULT_PV_DC_PEAK_POWER_KWP,
             DEFAULT_PV_DC_EFFICIENCY,
             DEFAULT_MAX_GRID_POWER_KW,
+            DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+            DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
+            DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+            DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
         )
 
         return cls(
@@ -150,6 +224,26 @@ class BatteryConfig:
             ),
             max_grid_power_kw=float(
                 config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
+            ),
+            high_soc_charge_threshold_pct=float(
+                config.get(
+                    CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+                    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+                )
+            ),
+            high_soc_max_charge_kw=float(
+                config.get(CONF_HIGH_SOC_MAX_CHARGE_KW, DEFAULT_HIGH_SOC_MAX_CHARGE_KW)
+            ),
+            low_soc_discharge_threshold_pct=float(
+                config.get(
+                    CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+                    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+                )
+            ),
+            low_soc_max_discharge_kw=float(
+                config.get(
+                    CONF_LOW_SOC_MAX_DISCHARGE_KW, DEFAULT_LOW_SOC_MAX_DISCHARGE_KW
+                )
             ),
         )
 
@@ -193,6 +287,20 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         0.0 if any(cap == 0.0 for cap in feed_in_caps) else sum(feed_in_caps)
     )
 
+    # SoC-dependent derating: capacity-weighted average thresholds, summed derated powers.
+    # If no battery has derating configured (kw == 0), the combined value is also 0
+    # (disabled), so defaults are preserved correctly.
+    combined_high_threshold = (
+        sum(c.high_soc_charge_threshold_pct * c.capacity_kwh for c in configs)
+        / total_cap
+    )
+    combined_high_max_charge_kw = sum(c.high_soc_max_charge_kw for c in configs)
+    combined_low_threshold = (
+        sum(c.low_soc_discharge_threshold_pct * c.capacity_kwh for c in configs)
+        / total_cap
+    )
+    combined_low_max_discharge_kw = sum(c.low_soc_max_discharge_kw for c in configs)
+
     return BatteryConfig(
         capacity_kwh=total_cap,
         max_charge_power_kw=sum(c.max_charge_power_kw for c in configs),
@@ -204,6 +312,10 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         pv_dc_peak_power_kwp=pv_dc_peak,
         pv_dc_efficiency=pv_dc_eff,
         max_grid_power_kw=combined_feed_in_kw,
+        high_soc_charge_threshold_pct=combined_high_threshold,
+        high_soc_max_charge_kw=combined_high_max_charge_kw,
+        low_soc_discharge_threshold_pct=combined_low_threshold,
+        low_soc_max_discharge_kw=combined_low_max_discharge_kw,
     )
 
 

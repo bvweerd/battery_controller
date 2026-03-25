@@ -485,15 +485,17 @@ def optimize_battery_schedule(
     # feed-in price. A non-zero terminal value prevents the optimizer from
     # irrationally discharging the battery just before the horizon ends.
     #
-    # Preferred source: shadow price (λ) from the previous run.  λ is the
-    # marginal value of stored energy derived from the full price structure,
-    # so it is more stable across rolling-horizon runs than the spot price at
-    # a single end-of-horizon time step.
-    # Fallback: blend the last price with the 6-step tail average to dampen
-    # artifacts caused by transient price spikes at the forecast boundary.
-    if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
-        terminal_price = terminal_shadow_price
-    elif feed_in_forecast:
+    # Use the 6-step tail average of the feed-in forecast rather than the
+    # shadow price from the previous run.  The shadow price λ ≈ sqrt(RTE) ×
+    # P_best, so using it as terminal_price makes discharge at P_best break-
+    # even (opportunity cost = λ / sqrt(RTE) = P_best).  In a rolling-horizon
+    # re-optimisation the "best" hours are often the current hours, so this
+    # circular dependency suppresses discharge exactly at the peak.  The tail
+    # average is naturally below peak prices and avoids this trap.
+    # terminal_shadow_price is still passed to the caller and used by hybrid
+    # mode as the charge/discharge switching threshold — it is just no longer
+    # used to initialise V[T].
+    if feed_in_forecast:
         lookback = min(6, len(feed_in_forecast))
         avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
         terminal_price = min(feed_in_forecast[-1], avg_tail)
@@ -522,6 +524,16 @@ def optimize_battery_schedule(
     ]
     actions = discharge_actions + charge_actions
 
+    # Pre-compute SoC-dependent power limits for every SoC state.
+    # For batteries without derating these equal max_charge_w / max_discharge_w
+    # and the guards below never fire, so there is no performance regression.
+    soc_max_charge_w = [
+        battery_config.max_charge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+    soc_max_discharge_w = [
+        battery_config.max_discharge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
+    ]
+
     # Backward induction
     for t in range(n_steps - 1, -1, -1):
         time_step_hours = step_durations_hours[t]
@@ -536,6 +548,8 @@ def optimize_battery_schedule(
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
+            max_chg_w = soc_max_charge_w[s_idx]
+            max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
                 # SoC transition: action_w is battery-side power (explicit AC command).
@@ -545,11 +559,15 @@ def optimize_battery_schedule(
                 # Efficiency losses are on the grid/AC side and handled in
                 # calculate_step_cost.
                 if action_w > 0:
+                    if action_w > max_chg_w:
+                        continue
                     energy_change_wh = action_w * time_step_hours * sqrt_rte
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
                 elif action_w < 0:
+                    if -action_w > max_dis_w:
+                        continue
                     # Discharge: action_w is AC setpoint → battery must supply
                     # abs(action_w) / discharge_eff from its DC side.
                     energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
