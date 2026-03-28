@@ -154,3 +154,34 @@ async def test_diagnostics_missing_runtime_data(
     assert diagnostics["weather"] == {}
     assert diagnostics["forecast"] == {}
     assert diagnostics["optimization"] == {}
+
+
+async def test_diagnostics_entity_state_none(
+    hass: HomeAssistant, mock_config_entry: MagicMock
+):
+    """Test diagnostics when hass.states.get returns None for an entity (lines 212-213)."""
+    mock_config_entry.runtime_data = None
+    if hasattr(mock_config_entry, "runtime_data"):
+        del mock_config_entry.runtime_data
+
+    ent_entry = MagicMock()
+    ent_entry.entity_id = "sensor.test_sensor"
+    ent_entry.unique_id = "unique_123"
+
+    with (
+        patch("homeassistant.helpers.entity_registry.async_get") as mock_er_get,
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_config_entry"
+        ) as mock_entries,
+        patch(
+            "homeassistant.core.StateMachine.get",
+            return_value=None,
+        ),
+    ):
+        mock_er_get.return_value = MagicMock()
+        mock_entries.return_value = [ent_entry]
+
+        diagnostics = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+
+    assert diagnostics["entities"][0]["state"] is None
+    assert diagnostics["entities"][0]["attributes"] == {}

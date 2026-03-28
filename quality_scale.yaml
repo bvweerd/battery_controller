@@ -1,0 +1,211 @@
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: No service actions registered.
+  appropriate-polling:
+    status: done
+    comment: |
+      DataUpdateCoordinator with appropriate intervals:
+      WeatherDataCoordinator 30 min, ForecastCoordinator 15 min, OptimizationCoordinator 15 min.
+  brands:
+    status: done
+  common-modules:
+    status: done
+    comment: helpers.py (price extraction), battery_model.py (physics), optimizer.py (DP engine), const.py.
+  config-flow-test-coverage:
+    status: done
+    comment: |
+      test_config_flow.py covers the config flow, options flow, battery subentry flow (add + reconfigure)
+      and PV subentry flow (add + reconfigure + delete) fully.
+  config-flow:
+    status: done
+    comment: |
+      UI setup via ConfigFlow; data_description present in all flow steps
+      (config/options sections and battery subentry user+reconfigure steps);
+      structural config in ConfigEntry.data, runtime-tunable values in ConfigEntry.options.
+  dependency-transparency:
+    status: done
+    comment: |
+      requirements: [] in manifest.json. Only external dependency is aiohttp,
+      used via HA's own async_get_clientsession — no extra PyPI packages.
+  docs-actions:
+    status: exempt
+    comment: No service actions.
+  docs-high-level-description:
+    status: done
+    comment: README "What is Battery Controller?" section.
+  docs-installation-instructions:
+    status: done
+    comment: README "Installation" section with Prerequisites, HACS steps and manual installation.
+  docs-removal-instructions:
+    status: done
+    comment: README "Removal" section with step-by-step removal instructions including manual entity cleanup.
+  entity-event-setup:
+    status: done
+    comment: CoordinatorEntity pattern; subscriptions via async_on_remove in async_added_to_hass.
+  entity-unique-id:
+    status: done
+    comment: All entities — _attr_unique_id = f"{entry.entry_id}_{key}".
+  has-entity-name:
+    status: done
+    comment: _attr_has_entity_name = True on all entity base classes.
+  runtime-data:
+    status: done
+    comment: entry.runtime_data = BatteryControllerData(...) in async_setup_entry.
+  test-before-configure:
+    status: done
+    comment: |
+      async_step_user calls _test_api_connection (aiohttp GET to open-meteo.com)
+      before async_create_entry. On failure: errors["base"] = "cannot_connect".
+  test-before-setup:
+    status: done
+    comment: |
+      async_config_entry_first_refresh() in async_setup_entry raises ConfigEntryNotReady
+      if open-meteo.com is unreachable during the first setup.
+  unique-config-entry:
+    status: done
+    comment: async_set_unique_id(DOMAIN) + _abort_if_unique_id_configured() in async_step_user.
+
+  # Silver
+  action-exceptions:
+    status: exempt
+    comment: No service actions.
+  config-entry-unloading:
+    status: done
+    comment: |
+      async_unload_entry calls async_shutdown on all three coordinators
+      and delegates platform unload to async_unload_platforms.
+  docs-configuration-parameters:
+    status: done
+    comment: README "Configuration" section describes all parameters for Main, Battery and PV Array.
+  docs-installation-parameters:
+    status: done
+    comment: README "Prerequisites" section describes HA version, price sensor and HACS requirements.
+  entity-unavailable:
+    status: done
+    comment: |
+      CoordinatorEntity automatically marks entities unavailable on coordinator failure
+      (last_update_success=False). Sensors without data return None as native_value.
+  integration-owner:
+    status: done
+    comment: manifest.json codeowners — ["@bvweerd"].
+  log-when-unavailable:
+    status: done
+    comment: |
+      DataUpdateCoordinator implements log-once: first failure logs at ERROR,
+      subsequent failures at DEBUG, recovery at INFO. WeatherDataCoordinator inherits this behaviour.
+  parallel-updates:
+    status: done
+    comment: PARALLEL_UPDATES = 0 in binary_sensor, number, select, sensor and switch.
+  reauthentication-flow:
+    status: exempt
+    comment: The integration requires no authentication.
+  test-coverage:
+    status: done
+    comment: |
+      Total coverage 95%. All modules covered; coordinator_optimization.py at 79%
+      with the remaining gap in complex price-extension and hybrid-mode branches.
+
+  # Gold
+  devices:
+    status: done
+    comment: |
+      Main device via ConfigEntry, per-battery sub-device and per-PV sub-device
+      linked as via_device to the main device.
+  diagnostics:
+    status: done
+    comment: diagnostics.py implements async_get_config_entry_diagnostics.
+  discovery-update-info:
+    status: exempt
+    comment: No discoverable network devices.
+  discovery:
+    status: exempt
+    comment: No device discovery applicable; integration reads HA sensors and open-meteo.
+  docs-data-update:
+    status: done
+    comment: README "How It Works" + "Architecture" describes the coordinator cascade with intervals.
+  docs-examples:
+    status: done
+    comment: README "Example Automation" section with complete YAML.
+  docs-known-limitations:
+    status: done
+    comment: |
+      README "Known Limitations" section covers horizon limitations, day-ahead gap,
+      LFP assumptions, multi-battery aggregation and consumption pattern learning period.
+  docs-supported-devices:
+    status: exempt
+    comment: |
+      Software-only integration; works via HA automations with any inverter.
+      No specific devices to list.
+  docs-supported-functions:
+    status: done
+    comment: README "Entities Created" section describes all platforms, entities and attributes.
+  docs-troubleshooting:
+    status: done
+    comment: |
+      README "Troubleshooting" section covers common problems and solutions:
+      no schedule, no arbitrage, unavailable entities, zero PV forecast, diagnostics analyzer.
+  docs-use-cases:
+    status: done
+    comment: README "Control Modes" section + automation examples.
+  dynamic-devices:
+    status: done
+    comment: Battery and PV subentries can be added and removed after initial setup.
+  entity-category:
+    status: done
+    comment: EntityCategory.CONFIG (number, select, switch), EntityCategory.DIAGNOSTIC (status sensors).
+  entity-device-class:
+    status: done
+    comment: |
+      SensorDeviceClass.POWER, BATTERY, MONETARY, IRRADIANCE, WIND_SPEED;
+      BinarySensorDeviceClass.RUNNING.
+  entity-disabled-by-default:
+    status: done
+    comment: |
+      _attr_entity_registry_enabled_default = False on weather sensors (GHI, wind),
+      schedule sensor and battery subentry diagnostic sensors.
+  entity-translations:
+    status: done
+    comment: |
+      All entities have _attr_translation_key;
+      translations/en.json and translations/nl.json present.
+  exception-translations:
+    status: done
+    comment: |
+      All UpdateFailed calls in coordinator_weather, coordinator_forecast and
+      coordinator_optimization use translation_domain=DOMAIN + translation_key.
+      Translations are in strings.json and translations/en.json under "exceptions".
+  icon-translations:
+    status: done
+    comment: icons.json with default MDI icons for all entity types (sensor, number, select, switch, binary_sensor).
+  reconfiguration-flow:
+    status: done
+    comment: |
+      Options flow for main configuration;
+      battery subentry reconfigure flow and PV subentry reconfigure flow present.
+  repair-issues:
+    status: done
+    comment: |
+      ir.async_create_issue("price_sensor_unavailable") in OptimizationCoordinator
+      when the price sensor is unavailable and no historical price model data exists yet.
+      ir.async_delete_issue on recovery. Text in strings.json under "issues".
+  stale-devices:
+    status: done
+    comment: |
+      async_remove_config_entry_device in __init__.py: returns True for devices
+      whose subentry no longer exists (stale), False for active subentry devices
+      and the main device.
+
+  # Platinum
+  async-dependency:
+    status: done
+    comment: aiohttp is fully async; all I/O via native async or async_add_executor_job.
+  inject-websession:
+    status: done
+    comment: coordinator_weather.py uses async_get_clientsession(hass) — HA's own session injection.
+  strict-typing:
+    status: done
+    comment: |
+      mypy --strict passes with 0 errors across all 18 source files.
+      strict = true set in setup.cfg.

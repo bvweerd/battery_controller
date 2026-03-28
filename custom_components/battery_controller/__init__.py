@@ -11,6 +11,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 
 from .const import (
@@ -228,6 +229,21 @@ async def _update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
             "Runtime-only options changed; skipping reload for entry %s",
             entry.entry_id,
         )
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Allow removing stale subentry devices from the device registry."""
+    for identifier in device_entry.identifiers:
+        if identifier[0] != DOMAIN:
+            continue
+        device_id = identifier[1]
+        if device_id == config_entry.entry_id:
+            return False  # Main device — cannot remove while integration is active
+        if device_id in config_entry.subentries:
+            return False  # Subentry device still active
+    return True  # Stale device, allow removal
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

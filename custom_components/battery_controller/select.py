@@ -67,7 +67,7 @@ class BatteryControlModeSelect(
     @property
     def current_option(self) -> str:
         """Return the current control mode."""
-        return self.coordinator.control_mode
+        return str(self.coordinator.control_mode)
 
     async def async_select_option(self, option: str) -> None:
         """Set the control mode."""
