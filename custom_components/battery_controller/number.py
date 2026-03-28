@@ -57,6 +57,9 @@ class BatteryControllerNumber(NumberEntity):
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
+    _conf_key: (
+        str  # Config entry key used by async_set_native_value; set in each subclass
+    )
 
     def __init__(
         self,
@@ -84,10 +87,15 @@ class BatteryControllerNumber(NumberEntity):
             self._entry, options={**self._entry.options, key: value}
         )
 
+    async def async_set_native_value(self, value: float) -> None:
+        await self._set_runtime_value(self._conf_key, value)
+        self.async_write_ha_state()
+
 
 class DegradationCostNumber(BatteryControllerNumber):
     """Number entity for degradation cost per cycle."""
 
+    _conf_key = CONF_DEGRADATION_COST_PER_CYCLE
     _attr_translation_key = "degradation_cost"
     _attr_name = "Degradation Cost"
     _attr_native_min_value = 0.0
@@ -111,14 +119,11 @@ class DegradationCostNumber(BatteryControllerNumber):
             CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
         )
 
-    async def async_set_native_value(self, value: float) -> None:
-        await self._set_runtime_value(CONF_DEGRADATION_COST_PER_CYCLE, value)
-        self.async_write_ha_state()
-
 
 class MinPriceSpreadNumber(BatteryControllerNumber):
     """Number entity for minimum price spread."""
 
+    _conf_key = CONF_MIN_PRICE_SPREAD
     _attr_translation_key = "min_price_spread"
     _attr_name = "Minimum Price Spread"
     _attr_native_min_value = 0.0
@@ -140,14 +145,11 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
     def native_value(self) -> float:
         return self._get_runtime_value(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD)
 
-    async def async_set_native_value(self, value: float) -> None:
-        await self._set_runtime_value(CONF_MIN_PRICE_SPREAD, value)
-        self.async_write_ha_state()
-
 
 class ZeroGridDeadbandNumber(BatteryControllerNumber):
     """Number entity for zero-grid deadband."""
 
+    _conf_key = CONF_ZERO_GRID_DEADBAND_W
     _attr_translation_key = "zero_grid_deadband"
     _attr_name = "Zero Grid Deadband"
     _attr_native_min_value = 0.0
@@ -171,10 +173,6 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
             CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
         )
 
-    async def async_set_native_value(self, value: float) -> None:
-        await self._set_runtime_value(CONF_ZERO_GRID_DEADBAND_W, value)
-        self.async_write_ha_state()
-
 
 class ManualPowerSetpointNumber(BatteryControllerNumber):
     """Number entity for the manual battery power setpoint.
@@ -184,6 +182,7 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
     SoC limits and power limits are still respected.
     """
 
+    _conf_key = CONF_MANUAL_POWER_SETPOINT_W
     _attr_translation_key = "manual_power_setpoint"
     _attr_name = "Manual Power Setpoint"
     _attr_native_step = 100.0
@@ -220,7 +219,3 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
         return self._get_runtime_value(
             CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
         )
-
-    async def async_set_native_value(self, value: float) -> None:
-        await self._set_runtime_value(CONF_MANUAL_POWER_SETPOINT_W, value)
-        self.async_write_ha_state()

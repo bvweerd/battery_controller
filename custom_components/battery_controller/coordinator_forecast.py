@@ -208,7 +208,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Clamp PV values: a faulty sensor/model must not produce negative output (P1.3)
         pv_forecast = [max(0.0, v) for v in pv_forecast]
 
-        net_load_forecast = [consumption_forecast[i] - pv_forecast[i] for i in range(n)]
+        net_load_forecast = [c - p for c, p in zip(consumption_forecast, pv_forecast)]
 
         # Sum DC PV forecast across all DC subentry models, applying temperature derating
         has_dc = bool(self.pv_dc_models)
