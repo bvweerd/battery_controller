@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections import deque
@@ -241,13 +242,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
         _LOGGER.debug("Daily price model refresh triggered at %s", now)
-        await self._price_model.async_update_pattern()
-        await self._feed_in_price_model.async_update_pattern()
+        await asyncio.gather(
+            self._price_model.async_update_pattern(),
+            self._feed_in_price_model.async_update_pattern(),
+        )
 
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
-        await self._price_model.async_update_pattern()
-        await self._feed_in_price_model.async_update_pattern()
+        await asyncio.gather(
+            self._price_model.async_update_pattern(),
+            self._feed_in_price_model.async_update_pattern(),
+        )
 
         # Re-learn price pattern every 24 h so new data is picked up automatically,
         # and so the model becomes available shortly after a fresh install.
