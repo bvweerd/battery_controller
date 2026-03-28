@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_state_change_event,
@@ -19,6 +20,7 @@ from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .const import (
+    DOMAIN,
     ACTION_CHARGING,
     ACTION_DISCHARGING,
     ACTION_IDLE,
@@ -117,7 +119,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         # Control mode (restore from config or use default)
-        self._control_mode = config.get(CONF_CONTROL_MODE, DEFAULT_CONTROL_MODE)
+        self._control_mode: str = str(
+            config.get(CONF_CONTROL_MODE, DEFAULT_CONTROL_MODE)
+        )
 
         # Price sensor tracking
         self._price_sensor = config.get(CONF_PRICE_SENSOR)
@@ -579,7 +583,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         (positive = charge, negative = discharge).
         """
         entry_id = self.config.get("entry_id", "")
-        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        entry = self.hass.config_entries.async_get_entry(entry_id)
         if entry is None:
             return DEFAULT_MANUAL_POWER_SETPOINT_W
         stored = float(
@@ -867,7 +871,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         made in the subentry config flow take effect without a full reload.
         """
         entry_id = self.config.get("entry_id", "")
-        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        entry = self.hass.config_entries.async_get_entry(entry_id)
         if entry is None:
             return
 
@@ -896,7 +900,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._pending_optimization = True
             if self.data is not None:
                 return self.data
-            raise UpdateFailed("Optimization already in progress")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="optimization_in_progress",
+            )
 
         # When disabled via switch, skip re-running the optimizer but keep the
         # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
@@ -939,7 +946,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "OptimizationCoordinator: Forecast data is not available. Cannot run optimization."
             )
             self._last_failure_reason = "No forecast data available"
-            raise UpdateFailed("No forecast data available", retry_after=60)
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_price_data",
+                retry_after=60,
+            )
 
         # Get price forecast
         if not self._price_sensor:
@@ -947,7 +958,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "OptimizationCoordinator: No price sensor configured. Cannot run optimization."
             )
             self._last_failure_reason = "No price sensor configured"
-            raise UpdateFailed("No price sensor configured")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_price_sensor",
+            )
 
         _LOGGER.debug(
             "OptimizationCoordinator: Fetching price sensor state for %s.",
@@ -955,7 +969,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         price_state = self.hass.states.get(self._price_sensor)
         price_forecast: list[float] = []
-        price_start_times: list = []
+        price_start_times: list[datetime] = []
         price_interval: int = 60
         price_forecast_source: str = "live"
 
@@ -1006,22 +1020,41 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         f"Cannot extract price data from '{self._price_sensor}'"
                     )
                     raise UpdateFailed(
-                        f"Cannot extract price data from '{self._price_sensor}'"
+                        translation_domain=DOMAIN,
+                        translation_key="price_parse_error",
+                        translation_placeholders={
+                            "sensor": self._price_sensor,
+                            "error": str(e),
+                        },
                     ) from e
             else:
-                # Sensor unavailable and no model data
+                # Sensor unavailable and no model data — create a repair issue
                 _LOGGER.error(
                     "OptimizationCoordinator: Price sensor '%s' not available and "
                     "no historical price model data yet.",
                     self._price_sensor,
                 )
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "price_sensor_unavailable",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="price_sensor_unavailable",
+                    translation_placeholders={"sensor": self._price_sensor},
+                )
                 self._last_failure_reason = (
                     f"Price sensor '{self._price_sensor}' not available"
                 )
                 raise UpdateFailed(
-                    f"Price sensor '{self._price_sensor}' not available",
+                    translation_domain=DOMAIN,
+                    translation_key="price_sensor_unavailable",
+                    translation_placeholders={"sensor": self._price_sensor},
                     retry_after=60,
                 )
+
+        # Price forecast obtained successfully — clear any prior repair issue
+        ir.async_delete_issue(self.hass, DOMAIN, "price_sensor_unavailable")
 
         # Get feed-in price forecast
         feed_in_is_dynamic = False  # True when feed-in came from a live sensor forecast
@@ -1050,7 +1083,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Get optimization parameters — read runtime-tunable values from live options
         entry_id = self.config.get("entry_id", "")
-        live_entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        live_entry = self.hass.config_entries.async_get_entry(entry_id)
         live_options = live_entry.options if live_entry is not None else {}
         degradation_cost = float(
             live_options.get(

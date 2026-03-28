@@ -96,7 +96,13 @@ class DegradationCostNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "EUR/cycle"
     _attr_mode = NumberMode.BOX
 
-    def __init__(self, hass, entry, device, config):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        device: DeviceInfo,
+        config: dict[str, Any],
+    ) -> None:
         super().__init__(hass, entry, device, config, "degradation_cost")
 
     @property
@@ -121,7 +127,13 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_mode = NumberMode.BOX
 
-    def __init__(self, hass, entry, device, config):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        device: DeviceInfo,
+        config: dict[str, Any],
+    ) -> None:
         super().__init__(hass, entry, device, config, "min_price_spread")
 
     @property
@@ -144,7 +156,13 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "W"
     _attr_mode = NumberMode.BOX
 
-    def __init__(self, hass, entry, device, config):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        device: DeviceInfo,
+        config: dict[str, Any],
+    ) -> None:
         super().__init__(hass, entry, device, config, "zero_grid_deadband")
 
     @property
@@ -172,7 +190,13 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "W"
     _attr_mode = NumberMode.BOX
 
-    def __init__(self, hass, entry, device, config):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        device: DeviceInfo,
+        config: dict[str, Any],
+    ) -> None:
         super().__init__(hass, entry, device, config, "manual_power_setpoint")
 
     @property

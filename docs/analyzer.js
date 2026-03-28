@@ -105,7 +105,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   if (terminalShadowPrice !== null && terminalShadowPrice !== undefined && terminalShadowPrice >= 0) {
     terminalPrice = terminalShadowPrice;
   } else if (feedInFc.length > 0) {
-    const lookback = Math.min(6, feedInFc.length);
+    const lookback = Math.max(1, Math.min(Math.round(6.0 / fullStepH), feedInFc.length));
     let sum = 0;
     for (let i = feedInFc.length - lookback; i < feedInFc.length; i++) sum += feedInFc[i];
     const avgTail = sum / lookback;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -80,7 +81,12 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
     _attr_name = "PV Curtailment Suggested"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
 
-    def __init__(self, coordinator, device, entry):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+    ) -> None:
         super().__init__(coordinator, device, entry, "pv_curtailment")
 
     @property
@@ -119,13 +125,13 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
         return False
 
     @property
-    def extra_state_attributes(self) -> dict:
+    def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
         feed_in_price = self.coordinator.data.get("current_feed_in_price")
         battery_state = self.coordinator.data.get("battery_state")
         control_action = self.coordinator.data.get("control_action", {})
-        attrs: dict = {
+        attrs: dict[str, Any] = {
             "current_feed_in_price": feed_in_price,
         }
         if battery_state is not None:
@@ -150,18 +156,23 @@ class UseMaxPowerSensor(BatteryControllerBinarySensor):
     _attr_name = "Use Maximum Power Suggested"
     _attr_device_class = BinarySensorDeviceClass.RUNNING
 
-    def __init__(self, coordinator, device, entry):
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+    ) -> None:
         super().__init__(coordinator, device, entry, "use_max_power")
 
     @property
     def is_on(self) -> bool | None:
         if self.coordinator.data is None:
             return None
-        buy_price = self.coordinator.data.get("current_price", 0.0)
+        buy_price = float(self.coordinator.data.get("current_price", 0.0))
         return buy_price < 0
 
     @property
-    def extra_state_attributes(self) -> dict:
+    def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
         return {

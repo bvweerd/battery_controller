@@ -15,6 +15,7 @@ from .const import (
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
+    DOMAIN,
 )
 from .coordinator_weather import WeatherDataCoordinator
 from .forecast_models import (
@@ -135,7 +136,10 @@ class ForecastCoordinator(DataUpdateCoordinator):
         """Calculate PV and consumption forecasts."""
         weather_data = self.weather_coordinator.data
         if not weather_data:
-            raise UpdateFailed("No weather data available")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_weather_data",
+            )
 
         radiation_forecast = weather_data.get("radiation_forecast", [])
         dni_forecast = weather_data.get("dni_forecast", [])

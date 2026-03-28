@@ -365,6 +365,66 @@ automation:
 
 ---
 
+## Removal
+
+To remove the Battery Controller integration:
+
+1. Go to **Settings → Devices & Services → Battery Controller**.
+2. Click the three-dot menu and select **Delete**.
+3. Confirm the deletion — this removes the integration, all subentries, and all associated entities.
+4. Restart Home Assistant to ensure all entities are fully removed from the registry.
+
+If entities remain after deletion, go to **Settings → Devices & Services → Entities**, filter by "battery_controller", and delete any remaining entries manually.
+
+---
+
+## Known Limitations
+
+- **Optimization horizon**: The DP optimizer uses a rolling 24–36 hour horizon. Decisions near the end of the horizon depend on the shadow price (marginal value of stored energy) rather than explicit future prices. The shadow price converges over several days of operation.
+- **Price forecast dependency**: The optimizer requires a price sensor with forecast attributes. Without future prices, only the historical model is used, which reduces arbitrage accuracy.
+- **Day-ahead gap**: Day-ahead prices are typically published around 13:00 CET. Before that, the integration uses the self-learning historical price model. During this window the schedule may be less optimal.
+- **Single aggregate battery**: Multiple batteries are aggregated into one virtual battery for optimization. Setpoints are then split proportionally. Batteries with very different chemistries or SoC ranges may not be split optimally.
+- **LFP assumptions**: The battery efficiency model assumes flat efficiency across the SoC range (as is typical for LFP cells). Other chemistries with significant SoC-dependent efficiency variation are not modeled.
+- **No direct hardware communication**: Battery Controller writes setpoints to HA sensor/number entities only. You are responsible for connecting these to your inverter via automations.
+- **Consumption pattern learning**: The consumption model requires several weeks of kWh sensor history to build accurate patterns. During the initial period, forecasts may be less accurate.
+
+---
+
+## Troubleshooting
+
+### No charge/discharge schedule is generated
+
+- Check **Settings → System → Logs** for errors from `battery_controller`.
+- Verify the **Optimization Status** sensor is `ok` (not `failed` or `initializing`).
+- Confirm your price sensor has forecast attributes: **Developer Tools → States** → find your sensor → check attributes for `raw_today`, `raw_tomorrow`, or `forecast`.
+
+### Battery is not charging or discharging as expected
+
+- Check the **Control Mode** select entity — it must not be `manual` unless you intend that.
+- Verify your automation is reading `sensor.battery_controller_battery_setpoint` (not `optimal_power`).
+- In `follow_schedule` mode: the commitment filter may be holding an earlier setpoint within the same price period. Check the **Schedule** sensor attributes for the committed action.
+
+### Optimizer always schedules idle / no arbitrage
+
+- Ensure the price spread between cheap and expensive hours exceeds the **Minimum Price Spread** number entity (default 0.05 EUR/kWh) plus twice the **Degradation Cost** (default 0.03 EUR/kWh).
+- Check that the feed-in price is not equal to the grid price — if they are the same, arbitrage is less profitable. Configure a separate feed-in price sensor or set the fixed feed-in price.
+
+### Entities are unavailable
+
+- The integration marks entities unavailable when a coordinator fails to update. Check the logs for HTTP errors from open-meteo.com.
+- If the SoC sensor is unavailable, the optimizer falls back to the last known SoC. Check that the SoC sensor entity is working correctly.
+
+### PV forecast is always zero
+
+- Verify your PV array subentry has the correct peak power, orientation, and tilt configured.
+- Check that open-meteo.com is reachable from your Home Assistant instance.
+
+### Diagnostics and analyzer
+
+Download diagnostics via **Settings → Devices & Services → Battery Controller → three-dot menu → Download diagnostics** and upload to the [online analyzer](https://bvweerd.github.io/battery_controller/) for a full breakdown of your configuration, schedule, and optimizer decisions.
+
+---
+
 ## License
 
 See [LICENSE](LICENSE) for details.

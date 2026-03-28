@@ -310,7 +310,7 @@ def run_dp(
     if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
         terminal_price = terminal_shadow_price
     elif feed_in_forecast:
-        lookback = min(6, len(feed_in_forecast))
+        lookback = max(1, min(round(6.0 / full_step_hours), len(feed_in_forecast)))
         avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
         terminal_price = min(feed_in_forecast[-1], avg_tail)
     else:

@@ -9,6 +9,9 @@
             "name": "Required Sensors",
             "data": {
               "price_sensor": "Electricity price sensor"
+            },
+            "data_description": {
+              "price_sensor": "Sensor with electricity price forecast attributes (Nordpool, ENTSO-E, or Dynamic Energy Contract Calculator). The optimizer needs future price data to schedule charge and discharge."
             }
           },
           "optional_sensors": {
@@ -20,6 +23,14 @@
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
               "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
               "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+            },
+            "data_description": {
+              "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
+              "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
+              "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
+              "electricity_consumption_sensors": "Cumulative kWh sensors for grid import. Used to learn household consumption patterns over time.",
+              "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
+              "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
             }
           },
           "advanced": {
@@ -29,16 +40,61 @@
               "zero_grid_enabled": "Zero-grid control enabled",
               "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
               "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
+            },
+            "data_description": {
+              "fixed_feed_in_price": "Fallback sell price when no feed-in price sensor is configured. Also used as the minimum value for arbitrage calculations.",
+              "zero_grid_enabled": "Enables real-time battery control to minimize grid exchange. Requires power consumption and production sensors.",
+              "zero_grid_response_time_s": "Expected delay from setpoint change to battery response. Limits how frequently setpoints are updated to avoid oscillation.",
+              "max_grid_power_kw": "Caps grid import and export power in the optimizer. Set to 0 for no limit."
             }
           }
         }
       }
     },
     "error": {
-      "missing_required": "Please configure the electricity price sensor."
+      "missing_required": "Please configure the electricity price sensor.",
+      "cannot_connect": "Cannot connect to open-meteo.com. Check your internet connection and try again."
     },
     "abort": {
       "already_configured": "Battery Controller is already configured."
+    }
+  },
+  "exceptions": {
+    "api_error": {
+      "message": "Open-meteo API returned status {status}."
+    },
+    "connection_error": {
+      "message": "Error fetching weather data from open-meteo: {error}."
+    },
+    "no_forecast_data": {
+      "message": "No forecast data in open-meteo API response."
+    },
+    "no_weather_data": {
+      "message": "Weather coordinator has no data yet."
+    },
+    "optimization_in_progress": {
+      "message": "Optimization already in progress; queued for next slot."
+    },
+    "no_price_data": {
+      "message": "No forecast data available from forecast coordinator."
+    },
+    "no_price_sensor": {
+      "message": "No electricity price sensor is configured."
+    },
+    "price_parse_error": {
+      "message": "Cannot extract price data from sensor '{sensor}': {error}."
+    },
+    "price_sensor_unavailable": {
+      "message": "Price sensor '{sensor}' is unavailable and no historical price model data exists yet."
+    },
+    "optimizer_error": {
+      "message": "Battery optimizer failed: {error}."
+    }
+  },
+  "issues": {
+    "price_sensor_unavailable": {
+      "title": "Electricity price sensor unavailable",
+      "description": "The price sensor **{sensor}** is unavailable and no historical price model data exists yet. The battery optimizer cannot run without price data. Check that the sensor is working and has forecast attributes."
     }
   },
   "options": {
@@ -51,6 +107,9 @@
             "name": "Required Sensors",
             "data": {
               "price_sensor": "Electricity price sensor"
+            },
+            "data_description": {
+              "price_sensor": "Sensor with electricity price forecast attributes (Nordpool, ENTSO-E, or Dynamic Energy Contract Calculator). The optimizer needs future price data to schedule charge and discharge."
             }
           },
           "optional_sensors": {
@@ -62,6 +121,14 @@
               "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
               "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
               "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+            },
+            "data_description": {
+              "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
+              "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
+              "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
+              "electricity_consumption_sensors": "Cumulative kWh sensors for grid import. Used to learn household consumption patterns over time.",
+              "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
+              "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
             }
           },
           "advanced": {
@@ -71,6 +138,12 @@
               "zero_grid_enabled": "Zero-grid control enabled",
               "zero_grid_response_time_s": "Zero-grid update interval (seconds)",
               "max_grid_power_kw": "Max grid connection power (kW, 0 = unlimited)"
+            },
+            "data_description": {
+              "fixed_feed_in_price": "Fallback sell price when no feed-in price sensor is configured. Also used as the minimum value for arbitrage calculations.",
+              "zero_grid_enabled": "Enables real-time battery control to minimize grid exchange. Requires power consumption and production sensors.",
+              "zero_grid_response_time_s": "Expected delay from setpoint change to battery response. Limits how frequently setpoints are updated to avoid oscillation.",
+              "max_grid_power_kw": "Caps grid import and export power in the optimizer. Set to 0 for no limit."
             }
           }
         }
@@ -106,6 +179,19 @@
             "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
             "low_soc_discharge_threshold_pct": "Low-SoC discharge derating threshold (%, optional)",
             "low_soc_max_discharge_kw": "Derated discharge power below threshold (kW, optional)"
+          },
+          "data_description": {
+            "capacity_kwh": "Total nameplate capacity of the battery.",
+            "round_trip_efficiency": "Fraction of energy returned on discharge vs. energy used on charge (e.g. 0.90 for 90%). Split as √RTE per direction in the optimizer.",
+            "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
+            "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
+            "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
+            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Optional; improves real-time charge/discharge mode detection.",
+            "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
+            "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
+            "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",
+            "low_soc_discharge_threshold_pct": "Below this SoC the battery's delivered discharge power is reduced. Leave empty if not applicable.",
+            "low_soc_max_discharge_kw": "Maximum discharge power allowed below the low-SoC threshold. Leave empty if not applicable."
           }
         },
         "reconfigure": {
@@ -126,6 +212,19 @@
             "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
             "low_soc_discharge_threshold_pct": "Low-SoC discharge derating threshold (%, optional)",
             "low_soc_max_discharge_kw": "Derated discharge power below threshold (kW, optional)"
+          },
+          "data_description": {
+            "capacity_kwh": "Total nameplate capacity of the battery.",
+            "round_trip_efficiency": "Fraction of energy returned on discharge vs. energy used on charge (e.g. 0.90 for 90%). Split as √RTE per direction in the optimizer.",
+            "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
+            "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
+            "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
+            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Optional; improves real-time charge/discharge mode detection.",
+            "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
+            "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
+            "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",
+            "low_soc_discharge_threshold_pct": "Below this SoC the battery's delivered discharge power is reduced. Leave empty if not applicable.",
+            "low_soc_max_discharge_kw": "Maximum discharge power allowed below the low-SoC threshold. Leave empty if not applicable."
           }
         }
       },

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
+import aiohttp
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult, SubentryFlowResult
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import section
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import selector
 import voluptuous as vol
 
@@ -192,7 +195,7 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
 
 def _battery_subentry_title(data: dict[str, Any]) -> str:
     """Generate a display title for a battery subentry."""
-    if name := data.get(CONF_NAME, "").strip():
+    if name := str(data.get(CONF_NAME, "")).strip():
         return name
     kwh = data.get(CONF_CAPACITY_KWH, 0)
     return f"{kwh} kWh"
@@ -502,14 +505,34 @@ def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
 
 def _pv_subentry_title(data: dict[str, Any]) -> str:
     """Generate a display title for a PV subentry."""
-    if name := data.get(CONF_NAME, "").strip():
+    if name := str(data.get(CONF_NAME, "")).strip():
         return name
     kwp = data["peak_power_kwp"]
     coupling = "DC" if data["dc_coupled"] else "AC"
     return f"{kwp} kWp {coupling}"
 
 
-class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
+async def _test_api_connection(hass: HomeAssistant) -> str | None:
+    """Test reachability of open-meteo.com. Returns an error key or None on success."""
+    session = async_get_clientsession(hass)
+    url = "https://api.open-meteo.com/v1/forecast?" + urlencode(
+        {
+            "latitude": hass.config.latitude,
+            "longitude": hass.config.longitude,
+            "hourly": "shortwave_radiation",
+            "forecast_days": "1",
+        }
+    )
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return "cannot_connect"
+    except (aiohttp.ClientError, TimeoutError):
+        return "cannot_connect"
+    return None
+
+
+class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Battery Controller."""
 
     VERSION = 4
@@ -538,7 +561,13 @@ class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # 
             if not data.get(CONF_PRICE_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                return self.async_create_entry(title="Battery Controller", data=data)
+                error = await _test_api_connection(self.hass)
+                if error:
+                    errors["base"] = error
+                else:
+                    return self.async_create_entry(
+                        title="Battery Controller", data=data
+                    )
 
         return self.async_show_form(
             step_id="user",
