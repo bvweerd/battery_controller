@@ -42,6 +42,7 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
+    CONF_PV_DC_COUPLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
@@ -204,6 +205,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # setpoint_log: one entry every time the real-time setpoint changes.
         self._optimizer_run_log: deque[dict[str, Any]] = deque(maxlen=96)
         self._setpoint_log: deque[dict[str, Any]] = deque(maxlen=576)
+
+        # Charge efficiency calibration: rolling window of (actual_delta / planned_delta)
+        # samples collected during active charging steps. The smoothed correction
+        # is applied as a multiplier on sqrt(RTE) to account for systematic
+        # over-estimation of charge efficiency (e.g. CV-phase derating near full SoC).
+        # Only non-DC-coupled systems are sampled to avoid confounding with passive PV.
+        self._charge_eff_samples: deque[float] = deque(maxlen=20)
+        self._charge_eff_correction: float = 1.0
 
     @property
     def control_mode(self) -> str:
@@ -932,6 +941,68 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 self.hass.async_create_task(self.async_request_refresh())
 
+    def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
+        """Compare previous planned SoC to actual SoC and update charge efficiency correction.
+
+        Samples are only collected when:
+        - The previous optimizer step planned active charging (mode == 'charging')
+        - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
+        - DC-coupled PV is not active (passive PV charging would inflate actual delta)
+
+        The correction is the mean of the last 20 ratios (actual/planned), clipped to
+        [0.5, 1.05].  It is applied as a squared factor on round_trip_efficiency so that
+        sqrt(corrected_RTE) = sqrt(RTE) * correction, affecting only the DP's charge
+        efficiency estimate without changing any other battery parameter.
+        """
+        if self._last_result is None:
+            return
+        if (
+            len(self._last_result.mode_schedule) < 1
+            or len(self._last_result.soc_schedule_kwh) < 2
+        ):
+            return
+
+        if self._last_result.mode_schedule[0] != ACTION_CHARGING:
+            return
+
+        # Skip DC-coupled systems: passive PV charging during the step would
+        # inflate actual_delta relative to the grid-only planned_delta.
+        if self.config.get(CONF_PV_DC_COUPLED, False):
+            return
+
+        prev_soc = self._last_result.soc_schedule_kwh[0]
+        planned_next_soc = self._last_result.soc_schedule_kwh[1]
+        planned_delta = planned_next_soc - prev_soc
+
+        if planned_delta < 0.1:
+            # Too small to measure reliably; skip.
+            return
+
+        actual_delta = battery_state.soc_kwh - prev_soc
+        # Cap upward to 1.2× planned to filter out unexpected external charge
+        # sources (e.g. brief grid export reversed, SoC sensor noise).
+        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
+        ratio = actual_delta / planned_delta
+        # Clip to a physically reasonable range; the correction should never
+        # indicate the battery charged *more* than modelled by more than 5%.
+        ratio = max(0.5, min(1.05, ratio))
+
+        self._charge_eff_samples.append(ratio)
+        new_correction = sum(self._charge_eff_samples) / len(self._charge_eff_samples)
+
+        if abs(new_correction - self._charge_eff_correction) > 0.005:
+            _LOGGER.info(
+                "Charge efficiency correction updated: %.3f → %.3f "
+                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                self._charge_eff_correction,
+                new_correction,
+                ratio,
+                len(self._charge_eff_samples),
+                planned_delta,
+                actual_delta,
+            )
+        self._charge_eff_correction = new_correction
+
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
         # Re-read SoC limits and other hardware parameters from live options
@@ -1269,6 +1340,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
+        # Charge efficiency calibration: compare previous planned SoC with actual SoC
+        # to detect systematic over-estimation of charge efficiency (e.g. CV-phase).
+        self._update_charge_eff_calibration(battery_state)
+
         # Uncertainty-based SoC reserve (P2.3): when GHI forecast is highly variable
         # (cloudy/intermittent conditions), keep extra buffer so the battery is not
         # discharged based on optimistic solar estimates that don't materialise.
@@ -1304,6 +1379,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     extra_pct,
                     new_min_pct,
                 )
+
+        # Apply charge efficiency correction: lower the effective RTE so the DP
+        # plans more conservatively (longer charge windows) when the battery
+        # consistently charges slower than modelled.
+        # corrected_rte = rte * correction² → sqrt(corrected_rte) = sqrt(rte) * correction
+        if self._charge_eff_correction < 0.995:
+            corrected_rte = max(
+                0.60,
+                battery_config.round_trip_efficiency * self._charge_eff_correction**2,
+            )
+            battery_config = dataclasses.replace(
+                battery_config, round_trip_efficiency=corrected_rte
+            )
+            _LOGGER.debug(
+                "Charge efficiency correction %.3f applied: RTE %.3f → %.3f",
+                self._charge_eff_correction,
+                self.battery_config.round_trip_efficiency,
+                corrected_rte,
+            )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
         # Run optimization
@@ -1601,6 +1695,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "grid_kw": round(current_grid / 1000, 3),
                 "commitment_locked": commitment_locked,
                 "commitment_reason": commitment_reason,
+                "charge_eff_correction": round(self._charge_eff_correction, 4),
+                "charge_eff_samples": len(self._charge_eff_samples),
             }
         )
 
@@ -1645,5 +1741,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
             "price_interval": price_interval,
+            "charge_eff_correction": round(self._charge_eff_correction, 4),
+            "charge_eff_samples": len(self._charge_eff_samples),
             "timestamp": dt_util.utcnow(),
         }

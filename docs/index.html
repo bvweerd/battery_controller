@@ -735,10 +735,18 @@ function renderDiagnostics(raw) {
     kv('Max charge', `${bc.max_charge_power_kw?.toFixed(2)} kW`) +
     kv('Max discharge', `${bc.max_discharge_power_kw?.toFixed(2)} kW`);
 
+  const chgEffCorr = opt.charge_eff_correction;
+  const chgEffSamples = opt.charge_eff_samples;
+  const chgEffCorrStr = chgEffCorr !== undefined
+    ? `${(chgEffCorr * 100).toFixed(1)}%` + (chgEffSamples !== undefined ? ` (n=${chgEffSamples})` : '')
+    : '—';
+  const chgEffCorrClass = chgEffCorr !== undefined && chgEffCorr < 0.95 ? 'badge badge-fail'
+    : chgEffCorr !== undefined && chgEffCorr < 0.995 ? 'badge badge-idle' : '';
   document.getElementById('cfg-eff').innerHTML =
     kv('Round-trip efficiency', `${((bc.round_trip_efficiency||0)*100).toFixed(1)}%`) +
     kv('Charge eff (√RTE)', `${((bc.charge_efficiency||0)*100).toFixed(2)}%`) +
     kv('Discharge eff (√RTE)', `${((bc.discharge_efficiency||0)*100).toFixed(2)}%`) +
+    kv('Charge eff correction', chgEffCorrClass ? `<span class="${chgEffCorrClass}">${chgEffCorrStr}</span>` : chgEffCorrStr) +
     kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
     kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');

@@ -899,6 +899,25 @@ def main():
             f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
         )
 
+    # Show charge efficiency calibration state if present in diagnostics
+    opt_top = diag.get("data", diag).get("optimization", {})
+    charge_eff_correction = opt_top.get("charge_eff_correction")
+    charge_eff_samples = opt_top.get("charge_eff_samples")
+    if charge_eff_correction is not None:
+        flag = (
+            " ⚠ correction active"
+            if charge_eff_correction < 0.995
+            else " ✓ uncorrected"
+        )
+        samples_str = (
+            f", n={charge_eff_samples} samples"
+            if charge_eff_samples is not None
+            else ""
+        )
+        print(
+            f"  charge_eff_correction: {charge_eff_correction:.4f}{samples_str}{flag}"
+        )
+
     # Run DP
     (
         V,
