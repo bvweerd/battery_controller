@@ -2003,3 +2003,227 @@ async def test_run_optimization_mode_manual(hass, monkeypatch):
         data = await coord._run_optimization()
 
     assert data["optimal_mode"] == "manual"
+
+
+# ---------------------------------------------------------------------------
+# Charge efficiency calibration tests
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_result(
+    mode_schedule: list[str],
+    soc_schedule_kwh: list[float],
+) -> OptimizationResult:
+    """Build a minimal OptimizationResult for calibration tests."""
+    return OptimizationResult(
+        power_schedule_kw=[1.0] * (len(mode_schedule)),
+        mode_schedule=mode_schedule,
+        soc_schedule_kwh=soc_schedule_kwh,
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=1.0,
+        optimal_mode=mode_schedule[0] if mode_schedule else "idle",
+        shadow_price_eur_kwh=0.10,
+        price_forecast=[0.20],
+        pv_forecast=[0.0],
+        consumption_forecast=[0.5],
+    )
+
+
+def test_calibration_no_sample_without_previous_result(hass):
+    """No calibration sample when _last_result is None."""
+    coord = _make_coordinator(hass)
+    assert coord._charge_eff_correction == 1.0
+
+    battery_state = BatteryState(
+        soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert coord._charge_eff_correction == 1.0
+    assert len(coord._charge_eff_samples) == 0
+
+
+def test_calibration_no_sample_for_idle_step(hass):
+    """No sample collected when previous step was idle."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["idle", "charging"],
+        soc_schedule_kwh=[5.0, 5.0, 6.2],
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_calibration_no_sample_when_planned_delta_too_small(hass):
+    """No sample when planned charge delta is below 0.1 kWh threshold."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 5.05],  # only 0.05 kWh planned
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=5.03, soc_percent=50.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+
+
+def test_calibration_perfect_efficiency_no_correction(hass):
+    """When actual delta equals planned delta, correction stays at 1.0."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
+    )
+
+    # Actual SoC reached exactly the planned value
+    battery_state = BatteryState(
+        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 1
+    assert coord._charge_eff_samples[0] == pytest.approx(1.0)
+    assert coord._charge_eff_correction == pytest.approx(1.0)
+
+
+def test_calibration_low_efficiency_updates_correction(hass):
+    """When battery only charged to 80% of plan, correction moves below 1."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],  # planned delta = 2.0 kWh
+    )
+
+    # Actual delta = 1.6 kWh → ratio = 0.8
+    battery_state = BatteryState(
+        soc_kwh=5.6, soc_percent=56.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 1
+    assert coord._charge_eff_samples[0] == pytest.approx(0.8)
+    assert coord._charge_eff_correction == pytest.approx(0.8)
+
+
+def test_calibration_rolling_average_converges(hass):
+    """Multiple samples converge correction to their mean."""
+    coord = _make_coordinator(hass)
+
+    for _ in range(4):
+        coord._last_result = _make_fake_result(
+            mode_schedule=["charging"],
+            soc_schedule_kwh=[0.0, 1.0],
+        )
+        # actual delta = 0.85 kWh → ratio = 0.85
+        battery_state = BatteryState(
+            soc_kwh=0.85, soc_percent=8.5, power_kw=1.0, mode="charging"
+        )
+        coord._update_charge_eff_calibration(battery_state)
+        # Reset prev_soc for next iteration
+        coord._last_result = _make_fake_result(
+            mode_schedule=["charging"],
+            soc_schedule_kwh=[0.0, 1.0],
+        )
+
+    assert coord._charge_eff_correction == pytest.approx(0.85, abs=1e-9)
+
+
+def test_calibration_floor_clips_extreme_low_ratio(hass):
+    """Ratio below 0.5 is clipped to the floor."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 7.0],  # planned delta = 2.0 kWh
+    )
+
+    # Actual delta = 0.5 kWh → uncipped ratio = 0.25, clipped to 0.5
+    battery_state = BatteryState(
+        soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert coord._charge_eff_samples[0] == pytest.approx(0.5)
+
+
+def test_calibration_ceiling_clips_extra_charge(hass):
+    """Ratio above 1.05 (unexpected extra charge source) is clipped to 1.05."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
+    )
+
+    # Actual delta = 1.5 kWh → unclipped ratio = 1.5, clipped to 1.05
+    battery_state = BatteryState(
+        soc_kwh=6.5, soc_percent=65.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert coord._charge_eff_samples[0] == pytest.approx(1.05)
+
+
+def test_calibration_not_applied_for_dc_coupled(hass):
+    """DC-coupled PV systems are excluded from calibration (passive PV confounds delta).
+
+    The DC-coupled flag lives in the top-level config dict (injected by async_setup_entry
+    from PV subentries), not in the battery subentry, so that is where the check reads it.
+    """
+    from custom_components.battery_controller.const import CONF_PV_DC_COUPLED
+
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        # Top-level flag set by async_setup_entry from PV subentries
+        CONF_PV_DC_COUPLED: True,
+        "battery_subentries": [
+            (
+                "bat1",
+                {
+                    CONF_MAX_CHARGE_POWER_KW: 1.2,
+                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                    CONF_ROUND_TRIP_EFFICIENCY: 0.92,
+                    CONF_MIN_SOC_PERCENT: 10.0,
+                    CONF_MAX_SOC_PERCENT: 100.0,
+                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                },
+            )
+        ],
+    }
+    from custom_components.battery_controller.coordinator_optimization import (
+        OptimizationCoordinator as OC,
+    )
+
+    coord = OC(hass, weather_coordinator, forecast_coordinator, config)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    # No sample should have been added for DC-coupled system
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0

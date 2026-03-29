@@ -82,10 +82,10 @@
       "message": "No electricity price sensor is configured."
     },
     "price_parse_error": {
-      "message": "Cannot extract price data from sensor '{sensor}': {error}."
+      "message": "Cannot extract price data from sensor {sensor}: {error}."
     },
     "price_sensor_unavailable": {
-      "message": "Price sensor '{sensor}' is unavailable and no historical price model data exists yet."
+      "message": "Price sensor {sensor} is unavailable and no historical price model data exists yet."
     },
     "optimizer_error": {
       "message": "Battery optimizer failed: {error}."
