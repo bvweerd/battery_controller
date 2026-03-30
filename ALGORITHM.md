@@ -77,21 +77,20 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = max(SOC_RESOLUTION_WH, POWER_STEP_W × min_step_hours × sqrt(RTE))
+soc_resolution_wh = SOC_RESOLUTION_WH
 n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
 soc_states[i] = min_soc_wh + i × soc_resolution_wh
 ```
 
-- **`SOC_RESOLUTION_WH`** is the minimum resolution (default: 100 Wh).
-- The resolution is also bounded from below by the energy moved by one power step in the shortest time interval, scaled by `sqrt(RTE)`. This ensures that every discretized action changes the SoC by at least one state.
+- **`SOC_RESOLUTION_WH`** (default: 25 Wh) is the only grid constant; the power step is derived from it.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
 
-Actions are discretized in steps of `power_step_w`:
+The power step is derived directly from the SoC resolution so that every action moves exactly one SoC state, and the action space aligns perfectly with the SoC grid:
 
 ```
-power_step_w = max(POWER_STEP_W, soc_resolution_wh / full_step_hours)
+power_step_w = soc_resolution_wh / full_step_hours   (e.g. 25 Wh / 1 h = 25 W)
 charge_actions   = [max_charge_w, ..., 2×step, step, 0]   (highest-first)
 discharge_actions = [-step, -2×step, ..., -max_discharge_w] (lowest-first)
 actions = discharge_actions + charge_actions
