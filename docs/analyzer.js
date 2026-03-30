@@ -5,7 +5,7 @@
 
 // ── Constants (mirroring Python const.py) ──────────────────────────
 const SOC_RES_WH             = 25.0;
-const POWER_STEP_W           = 100;
+
 const DC_TO_AC_EFF           = 0.96;
 const MIN_PV_SURPLUS_KW      = 0.05;
 const POWER_IDLE_THRESHOLD_W = 1.0;
@@ -93,8 +93,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const minStepH  = Math.min(...stepDurations.slice(0, nSteps));
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
   const socResWh  = SOC_RES_WH;
-  const alignedStepW = socResWh / fullStepH;
-  const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
+  const powerStepW   = socResWh / fullStepH;
 
   const nSocStates = Math.round((maxSocWh - minSocWh) / socResWh) + 1;
   const socStates  = [];
@@ -744,7 +743,7 @@ function generateTips(d) {
 // ── Node.js module export (ignored in browser) ─────────────────────
 if (typeof module !== 'undefined') {
   module.exports = {
-    SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
+    SOC_RES_WH, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
     calculateStepCost,
     findNearestSocIdx,
     runDP,

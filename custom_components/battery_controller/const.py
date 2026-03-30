@@ -151,8 +151,9 @@ DEFAULT_CONTROL_MODE = "hybrid"
 # to near the feed-in price, making charging appear break-even and preventing
 # the optimizer from finding profitable charge/discharge cycles.
 # 25 Wh ensures ~6× margin between charging cost and discharge revenue per state.
-SOC_RESOLUTION_WH = 25.0  # Minimum SoC state size in Wh
-POWER_STEP_W = 100  # Battery power action granularity in W
+SOC_RESOLUTION_WH = (
+    25.0  # Minimum SoC state size in Wh; power step = SOC_RES / step_hours
+)
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96

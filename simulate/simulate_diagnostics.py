@@ -166,7 +166,6 @@ def extract_inputs(diag: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 SOC_RESOLUTION_WH = 25.0
-POWER_STEP_W = 100
 MIN_CYCLE_KWH = 0.2
 POWER_IDLE_THRESHOLD_KW = 0.001
 MIN_PV_SURPLUS_KW = 0.05
@@ -293,8 +292,7 @@ def run_dp(
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
     )
-    aligned_step_w = soc_resolution_wh / full_step_hours
-    power_step_w = max(float(POWER_STEP_W), aligned_step_w)
+    power_step_w = soc_resolution_wh / full_step_hours
 
     min_soc_wh = round(battery_config.min_soc_kwh * 1000)
     max_soc_wh = round(battery_config.max_soc_kwh * 1000)

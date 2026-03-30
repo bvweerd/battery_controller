@@ -14,7 +14,6 @@ from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
     POWER_IDLE_THRESHOLD_KW,
-    POWER_STEP_W,
     SOC_RESOLUTION_WH,
 )
 
@@ -451,18 +450,16 @@ def optimize_battery_schedule(
     # inflation is unnecessary.
     soc_resolution_wh = float(SOC_RESOLUTION_WH)
 
-    # Align the power step to the SoC resolution using the *full* interval step,
-    # not min_step_hours.  The first step is typically a short partial interval
-    # (e.g. 3 min before the next price boundary); using its duration would inflate
-    # power_step_w and restrict the available actions for ALL subsequent full-interval
-    # steps (e.g. 1200 W max becomes 750 W when min_step=4 min with hourly prices).
-    # The per-action sub-resolution check (new_soc_idx == s_idx) already handles
-    # the short first step: actions that don't cross a state boundary are skipped.
+    # Derive the power step directly from the SoC resolution and the full interval
+    # duration.  This ensures every action moves exactly one SoC state, and the
+    # action space is perfectly aligned with the SoC grid—no stranded energy at
+    # the battery limits.  Using the *full* interval (not min_step_hours) avoids
+    # inflating the step for the short partial first interval; the sub-resolution
+    # guard (new_soc_idx == s_idx → skip) already handles that case.
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
     )
-    aligned_step_w = soc_resolution_wh / full_step_hours
-    power_step_w = max(float(POWER_STEP_W), aligned_step_w)
+    power_step_w = soc_resolution_wh / full_step_hours
     # Round to nearest Wh to avoid floating-point drift (e.g. 2.12 * 0.1 * 1000
     # = 212.00000000000003).  Without rounding, soc_states[0] may be computed as
     # 912.0 (losing the tiny fractional part) while min_soc_wh stays at

@@ -15,7 +15,7 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
   - `forecast_models.py` — PV and consumption forecasting + historical price model
   - `battery_model.py` — battery physics (RTE split as √RTE per direction)
   - `config_flow.py` — setup + options flow with `section()` helpers
-  - `const.py` — SOC_RESOLUTION_WH=25, POWER_STEP_W=100, all config keys
+  - `const.py` — SOC_RESOLUTION_WH=25 (power_step derived as SOC_RES/step_h), all config keys
 - `tests/` — pytest with `pytest-homeassistant-custom-component` + syrupy snapshots
 
 ## HA Conventions
@@ -54,7 +54,7 @@ When changing **any** of the following in `optimizer.py`, apply the same change 
 - V[t][s] fallback for unreachable states
 - Shadow price formula and sign convention
 - Oscillation filter thresholds (min_price_spread, degradation formula)
-- Constants: `SOC_RESOLUTION_WH`, `POWER_STEP_W`, `DC_TO_AC_INVERTER_EFFICIENCY`
+- Constants: `SOC_RESOLUTION_WH`, `DC_TO_AC_INVERTER_EFFICIENCY`
 
 ## Compaction: always preserve
 - Modified files and their key changes
