@@ -165,7 +165,7 @@ class TestAsyncUpdatePattern:
         )
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -195,7 +195,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -223,7 +223,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -248,7 +248,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -284,7 +284,7 @@ class TestAsyncUpdatePattern:
         mock_instance.async_add_executor_job = AsyncMock(return_value=base_stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -357,7 +357,7 @@ class TestPriceForecastModelPatternUpdate:
         mock_instance.async_add_executor_job = AsyncMock(return_value={})
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -375,7 +375,7 @@ class TestPriceForecastModelPatternUpdate:
         )
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -414,7 +414,7 @@ class TestPriceForecastModelPatternUpdate:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -443,7 +443,7 @@ class TestPriceForecastModelPatternUpdate:
         mock_instance.async_add_executor_job = AsyncMock(return_value=price_stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -460,7 +460,7 @@ class TestPriceForecastModelPatternUpdate:
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             side_effect=ImportError,
         ):
             # Must not raise
@@ -813,7 +813,7 @@ class TestConsumptionForecastModelEmptyStats:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -850,7 +850,7 @@ class TestConsumptionForecastModelTsAndValueNone:
         mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -886,7 +886,7 @@ class TestConsumptionForecastModelSeasonalMinSamples:
         mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -914,7 +914,7 @@ class TestConsumptionForecastModelImportError:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 side_effect=ImportError("no recorder"),
             ),
             caplog.at_level(
@@ -950,7 +950,7 @@ class TestConsumptionForecastModelGenericException:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -981,7 +981,7 @@ class TestPriceForecastModelStatDtNone:
         mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -1010,7 +1010,7 @@ class TestPriceForecastModelStatDtNumeric:
         mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -1034,7 +1034,7 @@ class TestPriceForecastModelImportError:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 side_effect=ImportError("no recorder"),
             ),
             caplog.at_level(
@@ -1067,7 +1067,7 @@ class TestPriceForecastModelGenericException:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -1102,7 +1102,7 @@ class TestPriceForecastModelEntityRegistryException:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -1148,7 +1148,7 @@ class TestConsumptionForecastModelLayer2Exception:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -1195,7 +1195,7 @@ class TestConsumptionForecastModelNullDatetimeParse:
         mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()

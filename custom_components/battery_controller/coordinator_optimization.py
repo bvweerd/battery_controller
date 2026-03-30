@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import issue_registry as ir, storage
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_state_change_event,
@@ -214,6 +214,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._charge_eff_samples: deque[float] = deque(maxlen=20)
         self._charge_eff_correction: float = 1.0
 
+        # Persistent storage for charge efficiency calibration (survives reboots).
+        entry_id = config.get("entry_id", "unknown")
+        self._charge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
+            hass, 1, f"battery_controller_{entry_id}_charge_eff"
+        )
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -261,6 +267,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         await asyncio.gather(
             self._price_model.async_update_pattern(),
             self._feed_in_price_model.async_update_pattern(),
+            self._async_load_charge_eff_calibration(),
         )
 
         # Re-learn price pattern every 24 h so new data is picked up automatically,
@@ -941,6 +948,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 self.hass.async_create_task(self.async_request_refresh())
 
+    async def _async_load_charge_eff_calibration(self) -> None:
+        """Load persisted charge efficiency calibration from storage."""
+        stored = await self._charge_eff_store.async_load()
+        if stored is None:
+            return
+        samples = stored.get("samples", [])
+        correction = stored.get("correction", 1.0)
+        self._charge_eff_samples = deque(samples, maxlen=20)
+        self._charge_eff_correction = float(correction)
+        if self._charge_eff_correction < 0.995:
+            _LOGGER.info(
+                "Restored charge efficiency calibration: correction=%.3f, n=%d samples",
+                self._charge_eff_correction,
+                len(self._charge_eff_samples),
+            )
+
+    async def _async_save_charge_eff_calibration(self) -> None:
+        """Persist current charge efficiency calibration to storage."""
+        await self._charge_eff_store.async_save(
+            {
+                "samples": list(self._charge_eff_samples),
+                "correction": self._charge_eff_correction,
+            }
+        )
+
     def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
         """Compare previous planned SoC to actual SoC and update charge efficiency correction.
 
@@ -990,7 +1022,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._charge_eff_samples.append(ratio)
         new_correction = sum(self._charge_eff_samples) / len(self._charge_eff_samples)
 
-        if abs(new_correction - self._charge_eff_correction) > 0.005:
+        changed = abs(new_correction - self._charge_eff_correction) > 0.005
+        if changed:
             _LOGGER.info(
                 "Charge efficiency correction updated: %.3f → %.3f "
                 "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
@@ -1002,6 +1035,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 actual_delta,
             )
         self._charge_eff_correction = new_correction
+        if changed:
+            self.hass.async_create_task(self._async_save_charge_eff_calibration())
 
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
