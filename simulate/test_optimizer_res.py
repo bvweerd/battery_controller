@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 # Mock constants
 SOC_RESOLUTION_WH = 25.0
+POWER_STEP_W = 100
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96
 
 
@@ -62,7 +63,7 @@ def calculate_step_cost(
 def optimize(battery_config, current_soc_kwh, prices, pv, cons, time_step_min):
     time_step_hours = time_step_min / 60.0
     soc_resolution_wh = float(SOC_RESOLUTION_WH)
-    power_step_w = soc_resolution_wh / time_step_hours
+    power_step_w = max(float(POWER_STEP_W), soc_resolution_wh / time_step_hours)
     min_soc_wh = battery_config.min_soc_kwh * 1000
     max_soc_wh = battery_config.max_soc_kwh * 1000
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1

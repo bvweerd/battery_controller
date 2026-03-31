@@ -14,6 +14,7 @@ from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     MIN_CYCLE_KWH,
     POWER_IDLE_THRESHOLD_KW,
+    POWER_STEP_W,
     SOC_RESOLUTION_WH,
 )
 
@@ -450,16 +451,17 @@ def optimize_battery_schedule(
     # inflation is unnecessary.
     soc_resolution_wh = float(SOC_RESOLUTION_WH)
 
-    # Derive the power step directly from the SoC resolution and the full interval
-    # duration.  This ensures every action moves exactly one SoC state, and the
-    # action space is perfectly aligned with the SoC grid—no stranded energy at
-    # the battery limits.  Using the *full* interval (not min_step_hours) avoids
-    # inflating the step for the short partial first interval; the sub-resolution
-    # guard (new_soc_idx == s_idx → skip) already handles that case.
+    # Power step: POWER_STEP_W as minimum practical granularity.  The aligned
+    # step (SOC_RES / full_step_hours) ensures the smallest action crosses at
+    # least one SoC state; the max() keeps it at 100 W so near-marginal prices
+    # don't produce unpractical trickle-charge/discharge actions.
+    # Boundary actions (drain-to-min / fill-to-max) are evaluated separately
+    # below to capture the last ~50 Wh that the 100 W grid cannot reach.
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
     )
-    power_step_w = soc_resolution_wh / full_step_hours
+    aligned_step_w = soc_resolution_wh / full_step_hours
+    power_step_w = max(float(POWER_STEP_W), aligned_step_w)
     # Round to nearest Wh to avoid floating-point drift (e.g. 2.12 * 0.1 * 1000
     # = 212.00000000000003).  Without rounding, soc_states[0] may be computed as
     # 912.0 (losing the tiny fractional part) while min_soc_wh stays at
@@ -619,6 +621,50 @@ def optimize_battery_schedule(
                 if total_cost < best_cost:
                     best_cost = total_cost
                     best_action = action_w
+
+            # Boundary actions: exact power to reach min/max SoC in this step.
+            # new_soc_idx is known directly (0 or n_soc_states-1), avoiding the
+            # floating-point round-trip through the energy formula.
+            if soc_wh > min_soc_wh:
+                drain_w = (soc_wh - min_soc_wh) * sqrt_rte / time_step_hours
+                if 0 < drain_w <= max_dis_w:
+                    step_cost = calculate_step_cost(
+                        time_step_hours=time_step_hours,
+                        soc_wh=soc_wh,
+                        action_w=-drain_w,
+                        grid_price=grid_price,
+                        feed_in_price=feed_in_price,
+                        pv_production_w=pv_w,
+                        consumption_w=consumption_w,
+                        rte=battery_config.round_trip_efficiency,
+                        degradation_cost_per_kwh=degradation_cost_per_kwh,
+                        battery_config=battery_config,
+                        pv_dc_production_w=pv_dc_w,
+                    )
+                    total_cost = step_cost + V[t + 1][0]
+                    if total_cost < best_cost:
+                        best_cost = total_cost
+                        best_action = -drain_w
+            if soc_wh < max_soc_wh:
+                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * sqrt_rte)
+                if 0 < fill_w <= max_chg_w:
+                    step_cost = calculate_step_cost(
+                        time_step_hours=time_step_hours,
+                        soc_wh=soc_wh,
+                        action_w=fill_w,
+                        grid_price=grid_price,
+                        feed_in_price=feed_in_price,
+                        pv_production_w=pv_w,
+                        consumption_w=consumption_w,
+                        rte=battery_config.round_trip_efficiency,
+                        degradation_cost_per_kwh=degradation_cost_per_kwh,
+                        battery_config=battery_config,
+                        pv_dc_production_w=pv_dc_w,
+                    )
+                    total_cost = step_cost + V[t + 1][n_soc_states - 1]
+                    if total_cost < best_cost:
+                        best_cost = total_cost
+                        best_action = fill_w
 
             V[t][s_idx] = best_cost
             policy[t][s_idx] = best_action

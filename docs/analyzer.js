@@ -5,7 +5,7 @@
 
 // ── Constants (mirroring Python const.py) ──────────────────────────
 const SOC_RES_WH             = 25.0;
-
+const POWER_STEP_W           = 100;
 const DC_TO_AC_EFF           = 0.96;
 const MIN_PV_SURPLUS_KW      = 0.05;
 const POWER_IDLE_THRESHOLD_W = 1.0;
@@ -93,7 +93,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const minStepH  = Math.min(...stepDurations.slice(0, nSteps));
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
   const socResWh  = SOC_RES_WH;
-  const powerStepW   = socResWh / fullStepH;
+  const alignedStepW = socResWh / fullStepH;
+  const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
   const nSocStates = Math.round((maxSocWh - minSocWh) / socResWh) + 1;
   const socStates  = [];
@@ -194,8 +195,32 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           bestAction = actionW;
         }
       }
-      // Match Python: keep Infinity for unreachable states (never triggers in practice
-      // since idle is always valid).
+      // Boundary actions: exact power to reach min/max SoC.
+      // new_soc_idx is known directly — no floating-point round-trip needed.
+      if (socWh > minSocWh) {
+        const drainW = (socWh - minSocWh) * sqrtRte / stepH;
+        if (drainW > 0 && drainW <= maxDisW) {
+          const stepCost = calculateStepCost(
+            stepH, socWh, -drainW, gridPrice, feedIn,
+            pvW, consumW, rte, degradCost,
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          );
+          const totalCost = stepCost + Vnext[0];
+          if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; }
+        }
+      }
+      if (socWh < maxSocWh) {
+        const fillW = (maxSocWh - socWh) / (stepH * sqrtRte);
+        if (fillW > 0 && fillW <= maxChgW) {
+          const stepCost = calculateStepCost(
+            stepH, socWh, fillW, gridPrice, feedIn,
+            pvW, consumW, rte, degradCost,
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          );
+          const totalCost = stepCost + Vnext[nSocStates - 1];
+          if (totalCost < bestCost) { bestCost = totalCost; bestAction = fillW; }
+        }
+      }
       V[t][s]      = bestCost;
       policy[t][s] = bestAction;
     }
@@ -743,7 +768,7 @@ function generateTips(d) {
 // ── Node.js module export (ignored in browser) ─────────────────────
 if (typeof module !== 'undefined') {
   module.exports = {
-    SOC_RES_WH, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
+    SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
     calculateStepCost,
     findNearestSocIdx,
     runDP,
