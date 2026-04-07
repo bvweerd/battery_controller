@@ -13,6 +13,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .const import DOMAIN
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -43,7 +45,6 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 "longitude": self.longitude,
                 "hourly": "temperature_2m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation,wind_speed_10m",
                 "wind_speed_unit": "ms",
-                "current_weather": "true",
                 "timezone": "UTC",
                 "forecast_days": "2",
             }
@@ -54,10 +55,18 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 url, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
-                    raise UpdateFailed(f"API returned status {resp.status}")
+                    raise UpdateFailed(
+                        translation_domain=DOMAIN,
+                        translation_key="api_error",
+                        translation_placeholders={"status": str(resp.status)},
+                    )
                 data = await resp.json()
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise UpdateFailed(f"Error fetching weather data: {err}")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="connection_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
 
         # Extract hourly forecasts
         hourly = data.get("hourly", {})
@@ -68,7 +77,10 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
         wind_speed = hourly.get("wind_speed_10m", [])
 
         if not times or not radiation:
-            raise UpdateFailed("No forecast data in API response")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_forecast_data",
+            )
 
         # Find current hour index
         now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)

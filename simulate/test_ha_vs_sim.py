@@ -382,7 +382,7 @@ def main():
             if action_w_or_max == "max":
                 max_draw = soc - min_soc_wh
                 max_action = max_draw * sqrt_rte
-                pstep = 100  # POWER_STEP_W
+                pstep = max(100.0, 25.0 / dt)  # POWER_STEP_W floor, SOC_RES / step_h
                 action_w = -int(max_action / pstep) * pstep
             else:
                 action_w = action_w_or_max

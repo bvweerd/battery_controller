@@ -11,7 +11,8 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
@@ -129,8 +130,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Initializing coordinators for entry %s", entry.entry_id)
 
     # 1. Weather data coordinator (API calls to open-meteo)
+    # Use async_refresh() instead of async_config_entry_first_refresh() so a
+    # transient open-meteo error does not block setup. The integration loads
+    # with data=None; forecast/optimization coordinators fall back gracefully.
     weather_coordinator = WeatherDataCoordinator(hass)
-    await weather_coordinator.async_config_entry_first_refresh()
+    await weather_coordinator.async_refresh()
 
     # 2. Forecast coordinator (depends on weather coordinator)
     forecast_coordinator = ForecastCoordinator(hass, weather_coordinator, config)
@@ -228,6 +232,21 @@ async def _update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
             "Runtime-only options changed; skipping reload for entry %s",
             entry.entry_id,
         )
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, config_entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    """Allow removing stale subentry devices from the device registry."""
+    for identifier in device_entry.identifiers:
+        if identifier[0] != DOMAIN:
+            continue
+        device_id = identifier[1]
+        if device_id == config_entry.entry_id:
+            return False  # Main device — cannot remove while integration is active
+        if device_id in config_entry.subentries:
+            return False  # Subentry device still active
+    return True  # Stale device, allow removal
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

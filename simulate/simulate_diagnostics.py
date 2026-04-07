@@ -310,7 +310,7 @@ def run_dp(
     if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
         terminal_price = terminal_shadow_price
     elif feed_in_forecast:
-        lookback = min(6, len(feed_in_forecast))
+        lookback = max(1, min(round(6.0 / full_step_hours), len(feed_in_forecast)))
         avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
         terminal_price = min(feed_in_forecast[-1], avg_tail)
     else:
@@ -392,6 +392,47 @@ def run_dp(
                 if total_cost < best_cost:
                     best_cost = total_cost
                     best_action = action_w
+
+            if soc_wh > min_soc_wh:
+                drain_w = (soc_wh - min_soc_wh) * sqrt_rte / time_step_hours
+                if 0 < drain_w <= max_dis_w:
+                    step_cost = calculate_step_cost(
+                        time_step_hours=time_step_hours,
+                        soc_wh=soc_wh,
+                        action_w=-drain_w,
+                        grid_price=grid_price,
+                        feed_in_price=feed_in_price,
+                        pv_production_w=pv_w,
+                        consumption_w=consumption_w,
+                        rte=battery_config.round_trip_efficiency,
+                        degradation_cost_per_kwh=degradation_cost_per_kwh,
+                        battery_config=battery_config,
+                        pv_dc_production_w=pv_dc_w,
+                    )
+                    total_cost = step_cost + V[t + 1][0]
+                    if total_cost < best_cost:
+                        best_cost = total_cost
+                        best_action = -drain_w
+            if soc_wh < max_soc_wh:
+                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * sqrt_rte)
+                if 0 < fill_w <= max_chg_w:
+                    step_cost = calculate_step_cost(
+                        time_step_hours=time_step_hours,
+                        soc_wh=soc_wh,
+                        action_w=fill_w,
+                        grid_price=grid_price,
+                        feed_in_price=feed_in_price,
+                        pv_production_w=pv_w,
+                        consumption_w=consumption_w,
+                        rte=battery_config.round_trip_efficiency,
+                        degradation_cost_per_kwh=degradation_cost_per_kwh,
+                        battery_config=battery_config,
+                        pv_dc_production_w=pv_dc_w,
+                    )
+                    total_cost = step_cost + V[t + 1][n_soc_states - 1]
+                    if total_cost < best_cost:
+                        best_cost = total_cost
+                        best_action = fill_w
 
             V[t][s_idx] = best_cost
             policy[t][s_idx] = best_action
@@ -897,6 +938,25 @@ def main():
     if terminal_shadow_price is not None:
         print(
             f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
+        )
+
+    # Show charge efficiency calibration state if present in diagnostics
+    opt_top = diag.get("data", diag).get("optimization", {})
+    charge_eff_correction = opt_top.get("charge_eff_correction")
+    charge_eff_samples = opt_top.get("charge_eff_samples")
+    if charge_eff_correction is not None:
+        flag = (
+            " ⚠ correction active"
+            if charge_eff_correction < 0.995
+            else " ✓ uncorrected"
+        )
+        samples_str = (
+            f", n={charge_eff_samples} samples"
+            if charge_eff_samples is not None
+            else ""
+        )
+        print(
+            f"  charge_eff_correction: {charge_eff_correction:.4f}{samples_str}{flag}"
         )
 
     # Run DP

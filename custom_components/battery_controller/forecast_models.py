@@ -170,7 +170,7 @@ class ConsumptionForecastModel:
             return
 
         try:
-            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.util import get_instance  # type: ignore[attr-defined, unused-ignore]
             from homeassistant.components.recorder.statistics import (
                 statistics_during_period,
             )
@@ -420,7 +420,7 @@ class PriceForecastModel:
     # Minimum samples required to use a bin (avoids noise from sparse data)
     _MIN_SAMPLES = 2
     # Amplification factor for std deviation: sharpens peaks/valleys relative to overall avg
-    _STD_AMPLIFICATION = 0.5
+    _STD_AMPLIFICATION: float = 0.5
 
     def __init__(
         self,
@@ -464,7 +464,7 @@ class PriceForecastModel:
             return
 
         try:
-            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.util import get_instance  # type: ignore[attr-defined, unused-ignore]
             from homeassistant.components.recorder.statistics import (
                 statistics_during_period,
             )
@@ -645,7 +645,7 @@ class PriceForecastModel:
             variance = sum((v - avg) ** 2 for v in vals) / len(vals)
             std = variance**0.5
             direction = 1.0 if avg >= overall else -1.0
-            return avg + direction * self._STD_AMPLIFICATION * std
+            return float(avg + direction * self._STD_AMPLIFICATION * std)
 
         result = []
         for h in range(hours):

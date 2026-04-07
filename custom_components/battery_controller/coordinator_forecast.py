@@ -7,14 +7,16 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
+    DOMAIN,
 )
 from .coordinator_weather import WeatherDataCoordinator
 from .forecast_models import (
@@ -135,14 +137,32 @@ class ForecastCoordinator(DataUpdateCoordinator):
         """Calculate PV and consumption forecasts."""
         weather_data = self.weather_coordinator.data
         if not weather_data:
-            raise UpdateFailed("No weather data available")
-
-        radiation_forecast = weather_data.get("radiation_forecast", [])
-        dni_forecast = weather_data.get("dni_forecast", [])
-        diffuse_forecast = weather_data.get("diffuse_forecast", [])
-        wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
-        temperature_forecast = weather_data.get("temperature_forecast", [])
-        forecast_start = weather_data.get("forecast_start_utc")
+            _LOGGER.warning(
+                "Weather data unavailable; using zero radiation fallback "
+                "(PV forecast = 0, consumption forecast still active)"
+            )
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "weather_data_unavailable",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="weather_data_unavailable",
+            )
+            radiation_forecast: list[float] = [0.0] * 48
+            dni_forecast: list[float] = []
+            diffuse_forecast: list[float] = []
+            wind_speed_forecast: list[float] = []
+            temperature_forecast: list[float] = []
+            forecast_start = None
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, "weather_data_unavailable")
+            radiation_forecast = weather_data.get("radiation_forecast", [])
+            dni_forecast = weather_data.get("dni_forecast", [])
+            diffuse_forecast = weather_data.get("diffuse_forecast", [])
+            wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
+            temperature_forecast = weather_data.get("temperature_forecast", [])
+            forecast_start = weather_data.get("forecast_start_utc")
         current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
         if forecast_start and radiation_forecast:
             hours_elapsed = max(
@@ -204,7 +224,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Clamp PV values: a faulty sensor/model must not produce negative output (P1.3)
         pv_forecast = [max(0.0, v) for v in pv_forecast]
 
-        net_load_forecast = [consumption_forecast[i] - pv_forecast[i] for i in range(n)]
+        net_load_forecast = [c - p for c, p in zip(consumption_forecast, pv_forecast)]
 
         # Sum DC PV forecast across all DC subentry models, applying temperature derating
         has_dc = bool(self.pv_dc_models)

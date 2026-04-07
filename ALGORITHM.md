@@ -77,25 +77,34 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = max(SOC_RESOLUTION_WH, POWER_STEP_W × min_step_hours × sqrt(RTE))
+soc_resolution_wh = SOC_RESOLUTION_WH
 n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
 soc_states[i] = min_soc_wh + i × soc_resolution_wh
 ```
 
-- **`SOC_RESOLUTION_WH`** is the minimum resolution (default: 100 Wh).
-- The resolution is also bounded from below by the energy moved by one power step in the shortest time interval, scaled by `sqrt(RTE)`. This ensures that every discretized action changes the SoC by at least one state.
+- **`SOC_RESOLUTION_WH`** (default: 25 Wh) is the only grid constant; the power step is derived from it.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
 
-Actions are discretized in steps of `power_step_w`:
+The power step uses `POWER_STEP_W` as a practical minimum to prevent unprofitable trickle actions at near-marginal prices. The aligned step ensures the smallest action crosses at least one SoC state:
 
 ```
-power_step_w = max(POWER_STEP_W, soc_resolution_wh / full_step_hours)
+aligned_step_w   = soc_resolution_wh / full_step_hours   (e.g. 25 Wh / 1 h = 25 W)
+power_step_w     = max(POWER_STEP_W, aligned_step_w)      (e.g. max(100, 25) = 100 W)
 charge_actions   = [max_charge_w, ..., 2×step, step, 0]   (highest-first)
 discharge_actions = [-step, -2×step, ..., -max_discharge_w] (lowest-first)
 actions = discharge_actions + charge_actions
 ```
+
+**Boundary actions** are evaluated separately for each SoC state after the main action loop to capture the residual capacity that the 100 W grid cannot reach (up to ~115 Wh per step):
+
+```
+drain_w = (soc_wh - min_soc_wh) × sqrt_RTE / step_hours   → new_soc_idx = 0
+fill_w  = (max_soc_wh - soc_wh) / (step_hours × sqrt_RTE) → new_soc_idx = n_soc_states − 1
+```
+
+`new_soc_idx` is set directly (not recomputed via the energy formula) to avoid floating-point errors at exact boundaries.
 
 - `full_step_hours` is the duration of a regular (non-partial) time step. A partial first step (e.g. 3 minutes remaining before the next price boundary) must not shrink `power_step_w` for all subsequent full steps.
 - Charge actions are listed highest-first so that the DP's "first equal wins" tie-breaking naturally produces **front-loaded charging** (maximum power immediately rather than a ramp-up).

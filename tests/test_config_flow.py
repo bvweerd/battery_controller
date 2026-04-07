@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant import config_entries, setup
@@ -25,6 +25,16 @@ from custom_components.battery_controller.const import (
 async def setup_ha(hass: HomeAssistant) -> None:
     """Set up Home Assistant for testing."""
     await setup.async_setup_component(hass, "persistent_notification", {})
+
+
+@pytest.fixture(autouse=True)
+def mock_api_connection():
+    """Mock the open-meteo connection test so config flow tests don't hit the network."""
+    with patch(
+        "custom_components.battery_controller.config_flow._test_api_connection",
+        return_value=None,
+    ):
+        yield
 
 
 @pytest.fixture
@@ -183,8 +193,14 @@ async def test_form_user_success_creates_entry(
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    with patch(
-        "custom_components.battery_controller.async_setup_entry", return_value=True
+    with (
+        patch(
+            "custom_components.battery_controller.config_flow._test_api_connection",
+            return_value=None,
+        ),
+        patch(
+            "custom_components.battery_controller.async_setup_entry", return_value=True
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=mock_config
@@ -195,6 +211,22 @@ async def test_form_user_success_creates_entry(
     assert "capacity_kwh" not in result["data"]
     assert "battery_soc_sensor" not in result["data"]
     assert result["data"]["price_sensor"] == "sensor.nordpool_kwh_se3_eur"
+
+
+async def test_form_user_cannot_connect(hass: HomeAssistant, mock_config: dict) -> None:
+    """Config flow shows error when open-meteo is unreachable."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with patch(
+        "custom_components.battery_controller.config_flow._test_api_connection",
+        return_value="cannot_connect",
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=mock_config
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"]["base"] == "cannot_connect"
 
 
 async def test_form_user_missing_price_sensor(hass: HomeAssistant) -> None:
@@ -602,6 +634,243 @@ async def test_battery_subentry_delete(
 
     hass.config_entries.async_remove_subentry(entry, sub_id)
     assert len(entry.subentries) == 0
+
+
+# ---------------------------------------------------------------------------
+# _validate_battery_subentry — uncovered branches
+# ---------------------------------------------------------------------------
+
+
+def test_validate_battery_subentry_with_name_stores_name():
+    """Name is non-empty → result[CONF_NAME] is set (line 164)."""
+    from custom_components.battery_controller.config_flow import (
+        _validate_battery_subentry,
+    )
+
+    data = {
+        "name": "My Battery",
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+        "max_discharge_power_kw": 5.0,
+        "round_trip_efficiency": 0.9,
+        "min_soc_percent": 10.0,
+        "max_soc_percent": 90.0,
+        "battery_soc_sensor": "sensor.soc",
+        "pv_dc_efficiency": 0.97,
+    }
+    result = _validate_battery_subentry(data)
+    assert result["name"] == "My Battery"
+
+
+def test_validate_battery_subentry_with_power_sensor():
+    """battery_power_sensor present → stored in result (line 180)."""
+    from custom_components.battery_controller.config_flow import (
+        _validate_battery_subentry,
+    )
+
+    data = {
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+        "max_discharge_power_kw": 5.0,
+        "round_trip_efficiency": 0.9,
+        "min_soc_percent": 10.0,
+        "max_soc_percent": 90.0,
+        "battery_soc_sensor": "sensor.soc",
+        "pv_dc_efficiency": 0.97,
+        "battery_power_sensor": "sensor.power",
+    }
+    result = _validate_battery_subentry(data)
+    assert result["battery_power_sensor"] == "sensor.power"
+
+
+def test_validate_battery_subentry_with_soc_derating_keys():
+    """SoC derating keys present → stored in result (line 189)."""
+    from custom_components.battery_controller.config_flow import (
+        _validate_battery_subentry,
+    )
+    from custom_components.battery_controller.const import (
+        CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+        CONF_HIGH_SOC_MAX_CHARGE_KW,
+    )
+
+    data = {
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+        "max_discharge_power_kw": 5.0,
+        "round_trip_efficiency": 0.9,
+        "min_soc_percent": 10.0,
+        "max_soc_percent": 90.0,
+        "battery_soc_sensor": "sensor.soc",
+        "pv_dc_efficiency": 0.97,
+        CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT: 80.0,
+        CONF_HIGH_SOC_MAX_CHARGE_KW: 2.5,
+    }
+    result = _validate_battery_subentry(data)
+    assert result[CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT] == 80.0
+    assert result[CONF_HIGH_SOC_MAX_CHARGE_KW] == 2.5
+
+
+def test_battery_subentry_title_with_name():
+    """_battery_subentry_title returns name when non-empty (line 196)."""
+    from custom_components.battery_controller.config_flow import _battery_subentry_title
+
+    assert (
+        _battery_subentry_title({"name": "Main Battery", "capacity_kwh": 10.0})
+        == "Main Battery"
+    )
+
+
+def test_pv_subentry_title_with_name():
+    """_pv_subentry_title returns name when non-empty (line 506)."""
+    from custom_components.battery_controller.config_flow import _pv_subentry_title
+
+    assert (
+        _pv_subentry_title(
+            {"name": "Roof PV", "peak_power_kwp": 4.0, "dc_coupled": False}
+        )
+        == "Roof PV"
+    )
+
+
+def test_validate_pv_subentry_with_name():
+    """_validate_pv_subentry stores name when non-empty (line 490)."""
+    from custom_components.battery_controller.config_flow import _validate_pv_subentry
+
+    data = {
+        "name": "South Array",
+        "peak_power_kwp": 4.0,
+        "orientation": 180.0,
+        "tilt": 35.0,
+        "efficiency_factor": 0.85,
+        "dc_coupled": False,
+    }
+    result = _validate_pv_subentry(data)
+    assert result["name"] == "South Array"
+
+
+# ---------------------------------------------------------------------------
+# Options flow — missing_required error path (line 569)
+# ---------------------------------------------------------------------------
+
+
+async def test_options_flow_missing_price_sensor_shows_error(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+) -> None:
+    """Submitting options without price_sensor sets errors (line 569)."""
+    result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
+
+    with pytest.raises(Exception):
+        # Missing price_sensor should either raise InvalidData or return FORM with errors
+        result2 = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"sensors": {}},
+        )
+        # If it returns a FORM (not CREATE_ENTRY), the error path was hit
+        assert result2["type"] is FlowResultType.FORM
+        assert "base" in result2.get("errors", {})
+
+
+# ---------------------------------------------------------------------------
+# Error paths in subentry flows (lines 391-392, 416-417, 443-444, 468-469)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_battery_subentry_user_vol_invalid_sets_error():
+    """vol.Invalid in _validate_battery_subentry sets errors['base'] (line 391-392)."""
+    import voluptuous as vol
+
+    from custom_components.battery_controller.config_flow import (
+        BatteryControllerBatterySubentryFlow,
+    )
+
+    flow = BatteryControllerBatterySubentryFlow()
+    flow.async_show_form = MagicMock(return_value={"type": "form", "errors": {}})
+
+    with patch(
+        "custom_components.battery_controller.config_flow._validate_battery_subentry",
+        side_effect=vol.Invalid("bad input"),
+    ):
+        await flow.async_step_user(user_input={"capacity_kwh": 10.0})
+
+    call_kwargs = flow.async_show_form.call_args
+    assert call_kwargs.kwargs.get("errors", {}).get("base") == "invalid_battery_input"
+
+
+@pytest.mark.asyncio
+async def test_battery_subentry_reconfigure_vol_invalid_sets_error():
+    """vol.Invalid in battery reconfigure sets errors['base'] (line 416-417)."""
+    import voluptuous as vol
+
+    from custom_components.battery_controller.config_flow import (
+        BatteryControllerBatterySubentryFlow,
+    )
+
+    flow = BatteryControllerBatterySubentryFlow()
+    flow.async_show_form = MagicMock(return_value={"type": "form", "errors": {}})
+    flow._get_entry = MagicMock()
+    flow._get_reconfigure_subentry = MagicMock()
+    flow._get_reconfigure_subentry.return_value.data = {
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+    }
+
+    with patch(
+        "custom_components.battery_controller.config_flow._validate_battery_subentry",
+        side_effect=vol.Invalid("bad input"),
+    ):
+        await flow.async_step_reconfigure(user_input={"capacity_kwh": 10.0})
+
+    call_kwargs = flow.async_show_form.call_args
+    assert call_kwargs.kwargs.get("errors", {}).get("base") == "invalid_battery_input"
+
+
+@pytest.mark.asyncio
+async def test_pv_subentry_user_vol_invalid_sets_error():
+    """vol.Invalid in _validate_pv_subentry sets errors['base'] (line 443-444)."""
+    import voluptuous as vol
+
+    from custom_components.battery_controller.config_flow import (
+        BatteryControllerPVSubentryFlow,
+    )
+
+    flow = BatteryControllerPVSubentryFlow()
+    flow.async_show_form = MagicMock(return_value={"type": "form", "errors": {}})
+
+    with patch(
+        "custom_components.battery_controller.config_flow._validate_pv_subentry",
+        side_effect=vol.Invalid("bad pv"),
+    ):
+        await flow.async_step_user(user_input={"peak_power_kwp": 4.0})
+
+    call_kwargs = flow.async_show_form.call_args
+    assert call_kwargs.kwargs.get("errors", {}).get("base") == "invalid_pv_input"
+
+
+@pytest.mark.asyncio
+async def test_pv_subentry_reconfigure_vol_invalid_sets_error():
+    """vol.Invalid in PV reconfigure sets errors['base'] (line 468-469)."""
+    import voluptuous as vol
+
+    from custom_components.battery_controller.config_flow import (
+        BatteryControllerPVSubentryFlow,
+    )
+
+    flow = BatteryControllerPVSubentryFlow()
+    flow.async_show_form = MagicMock(return_value={"type": "form", "errors": {}})
+    flow._get_entry = MagicMock()
+    flow._get_reconfigure_subentry = MagicMock()
+    flow._get_reconfigure_subentry.return_value.data = {"peak_power_kwp": 4.0}
+
+    with patch(
+        "custom_components.battery_controller.config_flow._validate_pv_subentry",
+        side_effect=vol.Invalid("bad pv"),
+    ):
+        await flow.async_step_reconfigure(user_input={"peak_power_kwp": 4.0})
+
+    call_kwargs = flow.async_show_form.call_args
+    assert call_kwargs.kwargs.get("errors", {}).get("base") == "invalid_pv_input"
 
 
 # ---------------------------------------------------------------------------

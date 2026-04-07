@@ -7,7 +7,8 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.const import EntityCategory
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -67,7 +68,7 @@ class BatteryControlModeSelect(
     @property
     def current_option(self) -> str:
         """Return the current control mode."""
-        return self.coordinator.control_mode
+        return str(self.coordinator.control_mode)
 
     async def async_select_option(self, option: str) -> None:
         """Set the control mode."""

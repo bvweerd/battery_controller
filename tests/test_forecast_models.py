@@ -165,7 +165,7 @@ class TestAsyncUpdatePattern:
         )
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -195,7 +195,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -223,7 +223,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -248,7 +248,7 @@ class TestAsyncUpdatePattern:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             caplog.at_level(
@@ -284,7 +284,7 @@ class TestAsyncUpdatePattern:
         mock_instance.async_add_executor_job = AsyncMock(return_value=base_stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -357,7 +357,7 @@ class TestPriceForecastModelPatternUpdate:
         mock_instance.async_add_executor_job = AsyncMock(return_value={})
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -375,7 +375,7 @@ class TestPriceForecastModelPatternUpdate:
         )
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -414,7 +414,7 @@ class TestPriceForecastModelPatternUpdate:
 
         with (
             patch(
-                "homeassistant.components.recorder.get_instance",
+                "homeassistant.components.recorder.util.get_instance",
                 return_value=mock_instance,
             ),
             patch(
@@ -443,7 +443,7 @@ class TestPriceForecastModelPatternUpdate:
         mock_instance.async_add_executor_job = AsyncMock(return_value=price_stats)
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
@@ -460,7 +460,7 @@ class TestPriceForecastModelPatternUpdate:
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
 
         with patch(
-            "homeassistant.components.recorder.get_instance",
+            "homeassistant.components.recorder.util.get_instance",
             side_effect=ImportError,
         ):
             # Must not raise
@@ -601,3 +601,630 @@ class TestHorizonExtension:
         resampled_prices = resample_forecast(live_prices, 60, time_step)
         assert len(resampled_prices) >= min_horizon_steps
         # Extension block should be skipped (condition is False)
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage: missing branches in forecast_models.py
+# ---------------------------------------------------------------------------
+
+
+class TestPVForecastModelTemperatureDerating:
+    """Cover temperature derating in PVForecastModel.forecast_from_radiation (101-110)."""
+
+    def test_temperature_derating_applied(self):
+        """Temperature derating reduces output at high temperature."""
+        from custom_components.battery_controller.forecast_models import PVForecastModel
+
+        model = PVForecastModel(
+            peak_power_kwp=5.0,
+            orientation_deg=180.0,
+            tilt_deg=35.0,
+            efficiency_factor=0.85,
+        )
+        radiation = [1000.0] * 4  # strong radiation
+        # At 35°C (10°C above STC 25°C), expect slight derating
+        temps = [35.0] * 4
+
+        result_with_temp = model.forecast_from_radiation(
+            radiation, temperature_forecast=temps
+        )
+        result_no_temp = model.forecast_from_radiation(
+            radiation, temperature_forecast=None
+        )
+
+        # With temperature, output should be slightly lower due to derating
+        assert all(r_t <= r_n for r_t, r_n in zip(result_with_temp, result_no_temp))
+
+    def test_temperature_forecast_shorter_than_radiation(self):
+        """When temperature_forecast is shorter, remaining entries use base_forecast."""
+        from custom_components.battery_controller.forecast_models import PVForecastModel
+
+        model = PVForecastModel(peak_power_kwp=5.0)
+        radiation = [1000.0] * 4
+        temps = [35.0, 35.0]  # only 2 temps for 4 radiation entries
+
+        result = model.forecast_from_radiation(radiation, temperature_forecast=temps)
+        # Should have 4 entries (line 109: else: result.append(pv_kw))
+        assert len(result) == 4
+
+
+class TestConsumptionForecastModelPatterns:
+    """Cover forecast() with _seasonal_pattern and _hourly_pattern (lines 372, 374)."""
+
+    def test_seasonal_pattern_used_in_forecast(self, hass):
+        """When seasonal pattern is available, it's used first (line 372)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+            _get_season,
+        )
+        from datetime import datetime
+
+        model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
+        # Populate seasonal pattern
+        dt_now = datetime(2024, 6, 15, 10, 0, 0)
+        season = _get_season(dt_now.month)
+        model._seasonal_pattern[(10, dt_now.weekday(), season)] = 2.5
+
+        result = model.forecast(hours=1, start_time=dt_now)
+        assert result[0] == pytest.approx(2.5)
+
+    def test_hourly_pattern_used_when_no_seasonal(self, hass):
+        """When no seasonal but hourly pattern available, hourly is used (line 374)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from datetime import datetime
+
+        model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
+        dt_now = datetime(2024, 6, 15, 10, 0, 0)
+        model._hourly_pattern[(10, dt_now.weekday())] = 1.8
+
+        result = model.forecast(hours=1, start_time=dt_now)
+        assert result[0] == pytest.approx(1.8)
+
+
+class TestConsumptionForecastModelGetCurrentConsumption:
+    """Cover get_current_consumption with seasonal pattern (line 395)."""
+
+    def test_seasonal_pattern_used_in_current(self, hass):
+        """get_current_consumption uses seasonal pattern when available (line 395)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+            _get_season,
+        )
+        from unittest.mock import patch
+        from datetime import datetime
+        import custom_components.battery_controller.forecast_models as fm_mod
+
+        model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
+        fake_now = datetime(2024, 6, 15, 10, 0, 0)
+        season = _get_season(fake_now.month)
+        model._seasonal_pattern[(10, fake_now.weekday(), season)] = 3.0
+
+        with patch.object(fm_mod.dt_util, "now", return_value=fake_now):
+            result = model.get_current_consumption()
+
+        assert result == pytest.approx(3.0)
+
+    def test_hourly_pattern_used_in_current(self, hass):
+        """get_current_consumption uses hourly pattern when seasonal absent (line 397)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import patch
+        from datetime import datetime
+        import custom_components.battery_controller.forecast_models as fm_mod
+
+        model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
+        fake_now = datetime(2024, 6, 15, 10, 0, 0)
+        model._hourly_pattern[(10, fake_now.weekday())] = 2.2
+
+        with patch.object(fm_mod.dt_util, "now", return_value=fake_now):
+            result = model.get_current_consumption()
+
+        assert result == pytest.approx(2.2)
+
+
+class TestNetLoadModelForecastPadding:
+    """Cover padding in NetLoadForecastModel.forecast when pv_forecast is short (line 722)."""
+
+    def test_pv_forecast_padded_when_shorter_than_hours(self):
+        """When pv_model returns fewer entries than hours, zeros are appended (line 722)."""
+        from custom_components.battery_controller.forecast_models import (
+            NetLoadForecast as NetLoadForecastModel,
+        )
+        from unittest.mock import MagicMock
+
+        pv_model = MagicMock()
+        pv_model.forecast_from_radiation = MagicMock(
+            return_value=[1.0, 2.0]
+        )  # only 2, but hours=4
+
+        consumption_model = MagicMock()
+        consumption_model.forecast = MagicMock(return_value=[0.5] * 4)
+        consumption_model.base_consumption_kw = 0.5
+
+        net_model = NetLoadForecastModel(pv_model, consumption_model)
+        pv_fc, consumption_fc, net_fc = net_model.forecast([1000.0] * 2, hours=4)
+
+        assert len(pv_fc) == 4
+        # Padded with 0.0
+        assert pv_fc[2] == 0.0
+        assert pv_fc[3] == 0.0
+
+
+class TestPriceForecastModelNoSensor:
+    """Cover PriceForecastModel.async_update_pattern when no sensor_id (line 464)."""
+
+    @pytest.mark.asyncio
+    async def test_no_price_sensor_returns_early(self, hass):
+        """async_update_pattern returns early when price_sensor_id is None (line 464)."""
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+
+        model = PriceForecastModel(hass, price_sensor_id=None)
+
+        # Should not raise and should return without doing anything
+        await model.async_update_pattern()
+
+
+# ---------------------------------------------------------------------------
+# Extra coverage: missing lines
+# ---------------------------------------------------------------------------
+
+
+class TestConsumptionForecastModelNoSensors:
+    """Cover async_update_pattern early return when no sensors (line 170)."""
+
+    async def test_no_sensors_returns_early(self):
+        """Returns immediately when no consumption/production sensors configured."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import MagicMock
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
+        # No sensors at all → should return without touching recorder
+        await model.async_update_pattern()
+        # Pattern should remain empty (no data was loaded)
+        assert model._hourly_pattern == {}
+
+
+class TestConsumptionForecastModelEmptyStats:
+    """Cover async_update_pattern debug log when stats empty (lines 192-194)."""
+
+    async def test_empty_stats_returns_early(self, caplog):
+        """When recorder returns empty stats, logs debug and returns (lines 192-194)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value={})
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                return_value=mock_instance,
+            ),
+            caplog.at_level(
+                logging.DEBUG,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "No statistics found" in caplog.text
+        assert model._hourly_pattern == {}
+
+
+class TestConsumptionForecastModelTsAndValueNone:
+    """Cover _ts_and_value returning None when value is None (line 205)."""
+
+    async def test_none_change_skipped(self):
+        """Stats entries with None change field are silently skipped (line 205)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+        # 'change' is None → _ts_and_value returns None → entry skipped
+        stats = {
+            "sensor.consumption": [{"start": "2024-01-01T10:00:00", "change": None}]
+        }
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # Skipped → no hourly pattern
+        assert model._hourly_pattern == {}
+
+
+class TestConsumptionForecastModelSeasonalMinSamples:
+    """Cover seasonal bucket only stored when >= _SEASONAL_MIN_SAMPLES (line 330)."""
+
+    async def test_seasonal_bucket_stored_with_enough_samples(self):
+        """When enough samples, seasonal pattern is populated (line 330)."""
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+        # Use multiple timestamps in the same (hour, weekday, season) bucket
+        # 2024-01-01, 2024-01-08, 2024-01-15 are all Mondays in winter, hour=10
+        stats = {
+            "sensor.consumption": [
+                {"start": f"2024-01-{d:02d}T10:00:00", "change": 1.0}
+                for d in (1, 8, 15)  # 3 Mondays in January
+            ]
+        }
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # At least some seasonal data should be populated
+        assert len(model._seasonal_pattern) > 0
+
+
+class TestConsumptionForecastModelImportError:
+    """Cover ImportError branch in async_update_pattern (lines 340-341)."""
+
+    async def test_import_error_handled_gracefully(self, caplog):
+        """ImportError for recorder is caught and logged as debug (lines 340-341)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import patch
+
+        hass = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                side_effect=ImportError("no recorder"),
+            ),
+            caplog.at_level(
+                logging.DEBUG,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Recorder not available" in caplog.text
+
+
+class TestConsumptionForecastModelGenericException:
+    """Cover generic Exception branch in async_update_pattern (lines 342-343)."""
+
+    async def test_generic_exception_handled(self, caplog):
+        """Generic exception during pattern update is caught and logged (lines 342-343)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            side_effect=RuntimeError("unexpected failure")
+        )
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                return_value=mock_instance,
+            ),
+            caplog.at_level(
+                logging.WARNING,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Failed to update consumption pattern" in caplog.text
+
+
+class TestPriceForecastModelStatDtNone:
+    """Cover _stat_dt returning None when start is None (line 509)."""
+
+    async def test_stat_with_none_start_skipped(self):
+        """Stats with start=None are skipped in the price model (line 509)."""
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
+        # Entry with start=None should be silently ignored
+        stats = {"sensor.price": [{"start": None, "mean": 0.25}]}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # No valid data parsed → model has no data
+        assert model.has_data() is False
+
+
+class TestPriceForecastModelStatDtNumeric:
+    """Cover _stat_dt unix timestamp branch (lines 513-516)."""
+
+    async def test_unix_timestamp_start_handled(self):
+        """Stats with unix timestamp as start are parsed correctly (lines 513-516)."""
+        from datetime import datetime, timezone
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
+        # 2024-01-01T10:00:00 UTC as unix timestamp
+        ts = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        stats = {"sensor.price": [{"start": ts, "mean": 0.22}]}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model.has_data() is True
+
+
+class TestPriceForecastModelImportError:
+    """Cover ImportError in price model async_update_pattern (lines 605-606)."""
+
+    async def test_import_error_handled(self, caplog):
+        """ImportError for recorder is caught and logged as debug (lines 605-606)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+        from unittest.mock import patch
+
+        hass = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                side_effect=ImportError("no recorder"),
+            ),
+            caplog.at_level(
+                logging.DEBUG,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Recorder not available" in caplog.text
+
+
+class TestPriceForecastModelGenericException:
+    """Cover generic Exception in price model async_update_pattern (lines 607-608)."""
+
+    async def test_generic_exception_handled(self, caplog):
+        """Generic exception is caught and logged as warning (lines 607-608)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            side_effect=RuntimeError("db error")
+        )
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                return_value=mock_instance,
+            ),
+            caplog.at_level(
+                logging.WARNING,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Failed to update price pattern" in caplog.text
+
+
+class TestPriceForecastModelEntityRegistryException:
+    """Cover Exception in entity registry lookup in price model (lines 490-491)."""
+
+    async def test_entity_registry_exception_handled(self, caplog):
+        """Exception resolving weather sensor IDs is caught (lines 490-491)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            PriceForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.price", entry_id="myentry"
+        )
+        _DT = "2024-01-01T10:00:00+00:00"
+        price_stats = {"sensor.price": [{"start": _DT, "mean": 0.20}]}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=price_stats)
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                return_value=mock_instance,
+            ),
+            patch(
+                "homeassistant.helpers.entity_registry.async_get",
+                side_effect=RuntimeError("registry unavailable"),
+            ),
+            caplog.at_level(
+                logging.DEBUG,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Could not resolve weather sensor IDs" in caplog.text
+
+
+class TestConsumptionForecastModelLayer2Exception:
+    """Cover exception in layer 2 pv forecast lookup (lines 291-292)."""
+
+    async def test_layer2_exception_caught_and_logged(self, caplog):
+        """Exception during entity registry pv_forecast lookup is caught (lines 291-292)."""
+        import logging
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+            production_sensors=["sensor.production"],
+            entry_id="myentry",
+            # No pv_production_sensors → layer 2 path
+        )
+        _TS = "2024-01-01T10:00:00"
+        base_stats = {
+            "sensor.consumption": [{"start": _TS, "change": 2.0}],
+            "sensor.production": [{"start": _TS, "change": 1.5}],
+        }
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=base_stats)
+
+        with (
+            patch(
+                "homeassistant.components.recorder.util.get_instance",
+                return_value=mock_instance,
+            ),
+            patch(
+                "homeassistant.helpers.entity_registry.async_get",
+                side_effect=RuntimeError("registry error in layer 2"),
+            ),
+            caplog.at_level(
+                logging.DEBUG,
+                logger="custom_components.battery_controller.forecast_models",
+            ),
+        ):
+            await model.async_update_pattern()
+
+        assert "Could not apply PV correction from forecast sensor" in caplog.text
+
+
+class TestConsumptionForecastModelNullDatetimeParse:
+    """Cover dt_util.parse_datetime returning None for unknown timestamp (line 314)."""
+
+    async def test_unparseable_timestamp_skipped(self):
+        """Stats with a timestamp that parse_datetime can't parse are skipped (line 314).
+
+        When start=None: ts_key = str(None or '') = '' → parse_datetime('') = None →
+        line 314: if dt is None: continue
+        """
+        from custom_components.battery_controller.forecast_models import (
+            ConsumptionForecastModel,
+        )
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+        )
+        # start=None + change=1.0: _ts_and_value returns ("", 1.0)
+        # hourly_net[""] = 1.0, but parse_datetime("") = None → line 314 continue
+        stats = {
+            "sensor.consumption": [
+                {"start": None, "change": 1.0},
+            ]
+        }
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # The empty ts_key fails parse_datetime → skipped → no hourly_pattern populated
+        assert model._hourly_pattern == {}
+
+
+class TestNetLoadForecastConsumptionPadded:
+    """Cover padding of consumption_forecast in NetLoadForecast (line 722)."""
+
+    def test_consumption_padded_when_shorter_than_hours(self):
+        """When consumption_model returns fewer entries than hours, base value is appended."""
+        from custom_components.battery_controller.forecast_models import (
+            NetLoadForecast as NetLoadForecastModel,
+        )
+        from unittest.mock import MagicMock
+
+        pv_model = MagicMock()
+        pv_model.forecast_from_radiation = MagicMock(return_value=[0.0] * 4)
+
+        consumption_model = MagicMock()
+        consumption_model.forecast = MagicMock(return_value=[0.5, 0.5])  # only 2
+        consumption_model.base_consumption_kw = 0.5
+
+        net_model = NetLoadForecastModel(pv_model, consumption_model)
+        pv_fc, consumption_fc, net_fc = net_model.forecast([0.0] * 4, hours=4)
+
+        assert len(consumption_fc) == 4
+        # Padded with base_consumption_kw
+        assert consumption_fc[2] == pytest.approx(0.5)
+        assert consumption_fc[3] == pytest.approx(0.5)

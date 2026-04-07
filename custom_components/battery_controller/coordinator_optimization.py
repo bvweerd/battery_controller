@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections import deque
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
+from homeassistant.helpers import issue_registry as ir, storage
 from homeassistant.helpers.event import (
     async_track_point_in_time,
     async_track_state_change_event,
@@ -19,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .const import (
+    DOMAIN,
     ACTION_CHARGING,
     ACTION_DISCHARGING,
     ACTION_IDLE,
@@ -39,6 +42,7 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
+    CONF_PV_DC_COUPLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
@@ -117,7 +121,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         # Control mode (restore from config or use default)
-        self._control_mode = config.get(CONF_CONTROL_MODE, DEFAULT_CONTROL_MODE)
+        self._control_mode: str = str(
+            config.get(CONF_CONTROL_MODE, DEFAULT_CONTROL_MODE)
+        )
 
         # Price sensor tracking
         self._price_sensor = config.get(CONF_PRICE_SENSOR)
@@ -200,6 +206,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._optimizer_run_log: deque[dict[str, Any]] = deque(maxlen=96)
         self._setpoint_log: deque[dict[str, Any]] = deque(maxlen=576)
 
+        # Charge efficiency calibration: rolling window of (actual_delta / planned_delta)
+        # samples collected during active charging steps. The smoothed correction
+        # is applied as a multiplier on sqrt(RTE) to account for systematic
+        # over-estimation of charge efficiency (e.g. CV-phase derating near full SoC).
+        # Only non-DC-coupled systems are sampled to avoid confounding with passive PV.
+        self._charge_eff_samples: deque[float] = deque(maxlen=20)
+        self._charge_eff_correction: float = 1.0
+
+        # Persistent storage for charge efficiency calibration (survives reboots).
+        entry_id = config.get("entry_id", "unknown")
+        self._charge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
+            hass, 1, f"battery_controller_{entry_id}_charge_eff"
+        )
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -237,13 +257,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
         _LOGGER.debug("Daily price model refresh triggered at %s", now)
-        await self._price_model.async_update_pattern()
-        await self._feed_in_price_model.async_update_pattern()
+        await asyncio.gather(
+            self._price_model.async_update_pattern(),
+            self._feed_in_price_model.async_update_pattern(),
+        )
 
     async def async_setup(self) -> None:
         """Set up event tracking for price changes and real-time control."""
-        await self._price_model.async_update_pattern()
-        await self._feed_in_price_model.async_update_pattern()
+        await asyncio.gather(
+            self._price_model.async_update_pattern(),
+            self._feed_in_price_model.async_update_pattern(),
+            self._async_load_charge_eff_calibration(),
+        )
 
         # Re-learn price pattern every 24 h so new data is picked up automatically,
         # and so the model becomes available shortly after a fresh install.
@@ -579,7 +604,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         (positive = charge, negative = discharge).
         """
         entry_id = self.config.get("entry_id", "")
-        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        entry = self.hass.config_entries.async_get_entry(entry_id)
         if entry is None:
             return DEFAULT_MANUAL_POWER_SETPOINT_W
         stored = float(
@@ -867,7 +892,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         made in the subentry config flow take effect without a full reload.
         """
         entry_id = self.config.get("entry_id", "")
-        entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        entry = self.hass.config_entries.async_get_entry(entry_id)
         if entry is None:
             return
 
@@ -896,7 +921,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._pending_optimization = True
             if self.data is not None:
                 return self.data
-            raise UpdateFailed("Optimization already in progress")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="optimization_in_progress",
+            )
 
         # When disabled via switch, skip re-running the optimizer but keep the
         # 15-minute scheduler alive so re-enabling resumes without any manual nudge.
@@ -920,6 +948,96 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 self.hass.async_create_task(self.async_request_refresh())
 
+    async def _async_load_charge_eff_calibration(self) -> None:
+        """Load persisted charge efficiency calibration from storage."""
+        stored = await self._charge_eff_store.async_load()
+        if stored is None:
+            return
+        samples = stored.get("samples", [])
+        correction = stored.get("correction", 1.0)
+        self._charge_eff_samples = deque(samples, maxlen=20)
+        self._charge_eff_correction = float(correction)
+        if self._charge_eff_correction < 0.995:
+            _LOGGER.info(
+                "Restored charge efficiency calibration: correction=%.3f, n=%d samples",
+                self._charge_eff_correction,
+                len(self._charge_eff_samples),
+            )
+
+    async def _async_save_charge_eff_calibration(self) -> None:
+        """Persist current charge efficiency calibration to storage."""
+        await self._charge_eff_store.async_save(
+            {
+                "samples": list(self._charge_eff_samples),
+                "correction": self._charge_eff_correction,
+            }
+        )
+
+    def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
+        """Compare previous planned SoC to actual SoC and update charge efficiency correction.
+
+        Samples are only collected when:
+        - The previous optimizer step planned active charging (mode == 'charging')
+        - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
+        - DC-coupled PV is not active (passive PV charging would inflate actual delta)
+
+        The correction is the mean of the last 20 ratios (actual/planned), clipped to
+        [0.5, 1.05].  It is applied as a squared factor on round_trip_efficiency so that
+        sqrt(corrected_RTE) = sqrt(RTE) * correction, affecting only the DP's charge
+        efficiency estimate without changing any other battery parameter.
+        """
+        if self._last_result is None:
+            return
+        if (
+            len(self._last_result.mode_schedule) < 1
+            or len(self._last_result.soc_schedule_kwh) < 2
+        ):
+            return
+
+        if self._last_result.mode_schedule[0] != ACTION_CHARGING:
+            return
+
+        # Skip DC-coupled systems: passive PV charging during the step would
+        # inflate actual_delta relative to the grid-only planned_delta.
+        if self.config.get(CONF_PV_DC_COUPLED, False):
+            return
+
+        prev_soc = self._last_result.soc_schedule_kwh[0]
+        planned_next_soc = self._last_result.soc_schedule_kwh[1]
+        planned_delta = planned_next_soc - prev_soc
+
+        if planned_delta < 0.1:
+            # Too small to measure reliably; skip.
+            return
+
+        actual_delta = battery_state.soc_kwh - prev_soc
+        # Cap upward to 1.2× planned to filter out unexpected external charge
+        # sources (e.g. brief grid export reversed, SoC sensor noise).
+        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
+        ratio = actual_delta / planned_delta
+        # Clip to a physically reasonable range; the correction should never
+        # indicate the battery charged *more* than modelled by more than 5%.
+        ratio = max(0.5, min(1.05, ratio))
+
+        self._charge_eff_samples.append(ratio)
+        new_correction = sum(self._charge_eff_samples) / len(self._charge_eff_samples)
+
+        changed = abs(new_correction - self._charge_eff_correction) > 0.005
+        if changed:
+            _LOGGER.info(
+                "Charge efficiency correction updated: %.3f → %.3f "
+                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                self._charge_eff_correction,
+                new_correction,
+                ratio,
+                len(self._charge_eff_samples),
+                planned_delta,
+                actual_delta,
+            )
+        self._charge_eff_correction = new_correction
+        if changed:
+            self.hass.async_create_task(self._async_save_charge_eff_calibration())
+
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
         # Re-read SoC limits and other hardware parameters from live options
@@ -939,7 +1057,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "OptimizationCoordinator: Forecast data is not available. Cannot run optimization."
             )
             self._last_failure_reason = "No forecast data available"
-            raise UpdateFailed("No forecast data available", retry_after=60)
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_price_data",
+                retry_after=60,
+            )
 
         # Get price forecast
         if not self._price_sensor:
@@ -947,7 +1069,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "OptimizationCoordinator: No price sensor configured. Cannot run optimization."
             )
             self._last_failure_reason = "No price sensor configured"
-            raise UpdateFailed("No price sensor configured")
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="no_price_sensor",
+            )
 
         _LOGGER.debug(
             "OptimizationCoordinator: Fetching price sensor state for %s.",
@@ -955,7 +1080,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         price_state = self.hass.states.get(self._price_sensor)
         price_forecast: list[float] = []
-        price_start_times: list = []
+        price_start_times: list[datetime] = []
         price_interval: int = 60
         price_forecast_source: str = "live"
 
@@ -1006,22 +1131,41 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         f"Cannot extract price data from '{self._price_sensor}'"
                     )
                     raise UpdateFailed(
-                        f"Cannot extract price data from '{self._price_sensor}'"
+                        translation_domain=DOMAIN,
+                        translation_key="price_parse_error",
+                        translation_placeholders={
+                            "sensor": self._price_sensor,
+                            "error": str(e),
+                        },
                     ) from e
             else:
-                # Sensor unavailable and no model data
+                # Sensor unavailable and no model data — create a repair issue
                 _LOGGER.error(
                     "OptimizationCoordinator: Price sensor '%s' not available and "
                     "no historical price model data yet.",
                     self._price_sensor,
                 )
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "price_sensor_unavailable",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="price_sensor_unavailable",
+                    translation_placeholders={"sensor": self._price_sensor},
+                )
                 self._last_failure_reason = (
                     f"Price sensor '{self._price_sensor}' not available"
                 )
                 raise UpdateFailed(
-                    f"Price sensor '{self._price_sensor}' not available",
+                    translation_domain=DOMAIN,
+                    translation_key="price_sensor_unavailable",
+                    translation_placeholders={"sensor": self._price_sensor},
                     retry_after=60,
                 )
+
+        # Price forecast obtained successfully — clear any prior repair issue
+        ir.async_delete_issue(self.hass, DOMAIN, "price_sensor_unavailable")
 
         # Get feed-in price forecast
         feed_in_is_dynamic = False  # True when feed-in came from a live sensor forecast
@@ -1050,7 +1194,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Get optimization parameters — read runtime-tunable values from live options
         entry_id = self.config.get("entry_id", "")
-        live_entry = self.hass.config_entries.async_get_known_entry(entry_id)
+        live_entry = self.hass.config_entries.async_get_entry(entry_id)
         live_options = live_entry.options if live_entry is not None else {}
         degradation_cost = float(
             live_options.get(
@@ -1231,6 +1375,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
+        # Charge efficiency calibration: compare previous planned SoC with actual SoC
+        # to detect systematic over-estimation of charge efficiency (e.g. CV-phase).
+        self._update_charge_eff_calibration(battery_state)
+
         # Uncertainty-based SoC reserve (P2.3): when GHI forecast is highly variable
         # (cloudy/intermittent conditions), keep extra buffer so the battery is not
         # discharged based on optimistic solar estimates that don't materialise.
@@ -1266,6 +1414,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     extra_pct,
                     new_min_pct,
                 )
+
+        # Apply charge efficiency correction: lower the effective RTE so the DP
+        # plans more conservatively (longer charge windows) when the battery
+        # consistently charges slower than modelled.
+        # corrected_rte = rte * correction² → sqrt(corrected_rte) = sqrt(rte) * correction
+        if self._charge_eff_correction < 0.995:
+            corrected_rte = max(
+                0.60,
+                battery_config.round_trip_efficiency * self._charge_eff_correction**2,
+            )
+            battery_config = dataclasses.replace(
+                battery_config, round_trip_efficiency=corrected_rte
+            )
+            _LOGGER.debug(
+                "Charge efficiency correction %.3f applied: RTE %.3f → %.3f",
+                self._charge_eff_correction,
+                self.battery_config.round_trip_efficiency,
+                corrected_rte,
+            )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
         # Run optimization
@@ -1563,6 +1730,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "grid_kw": round(current_grid / 1000, 3),
                 "commitment_locked": commitment_locked,
                 "commitment_reason": commitment_reason,
+                "charge_eff_correction": round(self._charge_eff_correction, 4),
+                "charge_eff_samples": len(self._charge_eff_samples),
             }
         )
 
@@ -1607,5 +1776,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
             "price_interval": price_interval,
+            "charge_eff_correction": round(self._charge_eff_correction, 4),
+            "charge_eff_samples": len(self._charge_eff_samples),
             "timestamp": dt_util.utcnow(),
         }

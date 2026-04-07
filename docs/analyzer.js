@@ -105,7 +105,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   if (terminalShadowPrice !== null && terminalShadowPrice !== undefined && terminalShadowPrice >= 0) {
     terminalPrice = terminalShadowPrice;
   } else if (feedInFc.length > 0) {
-    const lookback = Math.min(6, feedInFc.length);
+    const lookback = Math.max(1, Math.min(Math.round(6.0 / fullStepH), feedInFc.length));
     let sum = 0;
     for (let i = feedInFc.length - lookback; i < feedInFc.length; i++) sum += feedInFc[i];
     const avgTail = sum / lookback;
@@ -195,8 +195,32 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           bestAction = actionW;
         }
       }
-      // Match Python: keep Infinity for unreachable states (never triggers in practice
-      // since idle is always valid).
+      // Boundary actions: exact power to reach min/max SoC.
+      // new_soc_idx is known directly — no floating-point round-trip needed.
+      if (socWh > minSocWh) {
+        const drainW = (socWh - minSocWh) * sqrtRte / stepH;
+        if (drainW > 0 && drainW <= maxDisW) {
+          const stepCost = calculateStepCost(
+            stepH, socWh, -drainW, gridPrice, feedIn,
+            pvW, consumW, rte, degradCost,
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          );
+          const totalCost = stepCost + Vnext[0];
+          if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; }
+        }
+      }
+      if (socWh < maxSocWh) {
+        const fillW = (maxSocWh - socWh) / (stepH * sqrtRte);
+        if (fillW > 0 && fillW <= maxChgW) {
+          const stepCost = calculateStepCost(
+            stepH, socWh, fillW, gridPrice, feedIn,
+            pvW, consumW, rte, degradCost,
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          );
+          const totalCost = stepCost + Vnext[nSocStates - 1];
+          if (totalCost < bestCost) { bestCost = totalCost; bestAction = fillW; }
+        }
+      }
       V[t][s]      = bestCost;
       policy[t][s] = bestAction;
     }
