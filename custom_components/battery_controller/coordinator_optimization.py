@@ -980,6 +980,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         - The previous optimizer step planned active charging (mode == 'charging')
         - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
         - DC-coupled PV is not active (passive PV charging would inflate actual delta)
+        - The step does not cross the high-SoC charge derating threshold (the DP
+          plans at full power for the whole step, but the inverter throttles
+          mid-step once the threshold is reached, making actual < planned even
+          with perfect efficiency)
 
         The correction is the mean of the last 20 ratios (actual/planned), clipped to
         [0.5, 1.05].  It is applied as a squared factor on round_trip_efficiency so that
@@ -1009,6 +1013,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if planned_delta < 0.1:
             # Too small to measure reliably; skip.
             return
+
+        # Skip if the step crosses the high-SoC charge derating threshold.
+        # The DP plans at the start-SoC limit for the whole step, but the
+        # inverter throttles once the threshold is reached mid-step.  The
+        # resulting actual/planned ratio reflects the derating, not real
+        # efficiency losses, so including it would corrupt the calibration.
+        bc = self.battery_config
+        if bc.high_soc_max_charge_kw > 0:
+            threshold_kwh = bc.high_soc_charge_threshold_pct / 100 * bc.capacity_kwh
+            if prev_soc < threshold_kwh <= planned_next_soc:
+                _LOGGER.debug(
+                    "Charge efficiency calibration: skipping sample — step crosses "
+                    "high-SoC derating threshold (%.1f%% / %.2f kWh)",
+                    bc.high_soc_charge_threshold_pct,
+                    threshold_kwh,
+                )
+                return
 
         actual_delta = battery_state.soc_kwh - prev_soc
         # Cap upward to 1.2× planned to filter out unexpected external charge

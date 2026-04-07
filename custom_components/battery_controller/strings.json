@@ -234,6 +234,9 @@
       },
       "error": {
         "invalid_battery_input": "Invalid battery configuration. Check capacity, power limits, and efficiency values."
+      },
+      "abort": {
+        "reconfigure_successful": "Battery system updated successfully."
       }
     },
     "pv_array": {
@@ -274,6 +277,9 @@
       },
       "error": {
         "invalid_pv_input": "Invalid PV array configuration. Peak power must be greater than 0, orientation 0-360, tilt 0-90."
+      },
+      "abort": {
+        "reconfigure_successful": "PV array updated successfully."
       }
     }
   },
