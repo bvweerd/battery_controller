@@ -45,7 +45,6 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 "longitude": self.longitude,
                 "hourly": "temperature_2m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation,wind_speed_10m",
                 "wind_speed_unit": "ms",
-                "current_weather": "true",
                 "timezone": "UTC",
                 "forecast_days": "2",
             }

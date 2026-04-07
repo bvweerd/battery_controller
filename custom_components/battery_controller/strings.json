@@ -95,6 +95,10 @@
     "price_sensor_unavailable": {
       "title": "Electricity price sensor unavailable",
       "description": "The price sensor **{sensor}** is unavailable and no historical price model data exists yet. The battery optimizer cannot run without price data. Check that the sensor is working and has forecast attributes."
+    },
+    "weather_data_unavailable": {
+      "title": "Weather data unavailable (open-meteo)",
+      "description": "The battery controller cannot reach the open-meteo weather API. PV production is assumed to be zero until the connection is restored. Check your internet connection or open-meteo service status."
     }
   },
   "options": {
