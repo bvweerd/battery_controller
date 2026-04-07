@@ -170,7 +170,7 @@ class ConsumptionForecastModel:
             return
 
         try:
-            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.util import get_instance  # type: ignore[attr-defined, unused-ignore]
             from homeassistant.components.recorder.statistics import (
                 statistics_during_period,
             )
@@ -464,7 +464,7 @@ class PriceForecastModel:
             return
 
         try:
-            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.util import get_instance  # type: ignore[attr-defined, unused-ignore]
             from homeassistant.components.recorder.statistics import (
                 statistics_during_period,
             )
