@@ -130,8 +130,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Initializing coordinators for entry %s", entry.entry_id)
 
     # 1. Weather data coordinator (API calls to open-meteo)
+    # Use async_refresh() instead of async_config_entry_first_refresh() so a
+    # transient open-meteo error does not block setup. The integration loads
+    # with data=None; forecast/optimization coordinators fall back gracefully.
     weather_coordinator = WeatherDataCoordinator(hass)
-    await weather_coordinator.async_config_entry_first_refresh()
+    await weather_coordinator.async_refresh()
 
     # 2. Forecast coordinator (depends on weather coordinator)
     forecast_coordinator = ForecastCoordinator(hass, weather_coordinator, config)

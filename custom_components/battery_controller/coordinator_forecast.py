@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -136,17 +137,32 @@ class ForecastCoordinator(DataUpdateCoordinator):
         """Calculate PV and consumption forecasts."""
         weather_data = self.weather_coordinator.data
         if not weather_data:
-            raise UpdateFailed(
-                translation_domain=DOMAIN,
-                translation_key="no_weather_data",
+            _LOGGER.warning(
+                "Weather data unavailable; using zero radiation fallback "
+                "(PV forecast = 0, consumption forecast still active)"
             )
-
-        radiation_forecast = weather_data.get("radiation_forecast", [])
-        dni_forecast = weather_data.get("dni_forecast", [])
-        diffuse_forecast = weather_data.get("diffuse_forecast", [])
-        wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
-        temperature_forecast = weather_data.get("temperature_forecast", [])
-        forecast_start = weather_data.get("forecast_start_utc")
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "weather_data_unavailable",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="weather_data_unavailable",
+            )
+            radiation_forecast: list[float] = [0.0] * 48
+            dni_forecast: list[float] = []
+            diffuse_forecast: list[float] = []
+            wind_speed_forecast: list[float] = []
+            temperature_forecast: list[float] = []
+            forecast_start = None
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, "weather_data_unavailable")
+            radiation_forecast = weather_data.get("radiation_forecast", [])
+            dni_forecast = weather_data.get("dni_forecast", [])
+            diffuse_forecast = weather_data.get("diffuse_forecast", [])
+            wind_speed_forecast = weather_data.get("wind_speed_forecast", [])
+            temperature_forecast = weather_data.get("temperature_forecast", [])
+            forecast_start = weather_data.get("forecast_start_utc")
         current_hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
         if forecast_start and radiation_forecast:
             hours_elapsed = max(

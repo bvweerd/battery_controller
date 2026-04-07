@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.battery_controller.coordinator_forecast import (
     ForecastCoordinator,
@@ -191,19 +190,29 @@ async def test_async_shutdown_without_unsub(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_no_weather_data(hass):
-    """_async_update_data raises UpdateFailed when weather data unavailable."""
+    """_async_update_data falls back to zero radiation when weather data unavailable."""
     config = _minimal_config()
     weather_coord = MagicMock()
     weather_coord.data = None  # No weather data
 
+    mock_consumption = _make_mock_consumption()
+
     with patch(
         "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
-        return_value=_make_mock_consumption(),
+        return_value=mock_consumption,
     ):
         coord = ForecastCoordinator(hass, weather_coord, config)
 
-    with pytest.raises(UpdateFailed):
-        await coord._async_update_data()
+    # Mock net_load_model to return realistic data (same pattern as other tests)
+    coord.net_load_model = MagicMock()
+    coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 48, None))
+
+    result = await coord._async_update_data()
+
+    # Should succeed with zero PV forecast
+    assert result is not None
+    assert result["pv_forecast_kw"] == [0.0] * 48
+    assert result["consumption_forecast_kw"] == [0.5] * 48
 
 
 @pytest.mark.asyncio
