@@ -196,6 +196,9 @@
       },
       "error": {
         "invalid_battery_input": "Ongeldige batterijconfiguratie. Controleer capaciteit, vermogensgrenzen en rendementswaarden."
+      },
+      "abort": {
+        "reconfigure_successful": "Batterijsysteem succesvol bijgewerkt."
       }
     },
     "pv_array": {
@@ -231,6 +234,9 @@
       },
       "error": {
         "invalid_pv_input": "Ongeldige PV array configuratie. Piekvermogen moet groter zijn dan 0, oriëntatie 0-360, hellingshoek 0-90."
+      },
+      "abort": {
+        "reconfigure_successful": "PV array succesvol bijgewerkt."
       }
     }
   },
