@@ -104,6 +104,7 @@ async def test_turn_off_clears_is_on():
     assert switch._is_on is False
     assert switch.coordinator.optimization_enabled is False
     switch.async_write_ha_state.assert_called_once()
+    switch.coordinator.async_request_refresh.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,29 @@ async def test_async_added_to_hass_real_method_no_last_state():
     assert switch._is_on is True
 
 
+@pytest.mark.asyncio
+async def test_async_added_to_hass_real_method_unknown_state_restores_false():
+    """Unexpected restored state values are treated as off."""
+    switch = _make_switch(is_on_initial=True)
+
+    last_state = MagicMock()
+    last_state.state = "unknown"
+
+    with (
+        patch(
+            "custom_components.battery_controller.switch.CoordinatorEntity.async_added_to_hass",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(
+            switch, "async_get_last_state", new=AsyncMock(return_value=last_state)
+        ),
+    ):
+        await switch.async_added_to_hass()
+
+    assert switch._is_on is False
+    assert switch.coordinator.optimization_enabled is False
+
+
 # ---------------------------------------------------------------------------
 # async_setup_entry
 # ---------------------------------------------------------------------------
@@ -242,3 +266,31 @@ async def test_async_setup_entry_adds_entity():
 
     async_add_entities.assert_called_once()
     assert len(added) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
+    from custom_components.battery_controller.switch import async_setup_entry
+
+    entry = _make_entry()
+    entry.runtime_data = None
+    async_add_entities = MagicMock()
+
+    await async_setup_entry(_make_hass(), entry, async_add_entities)
+    async_add_entities.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_without_device_skips_entity_setup():
+    from custom_components.battery_controller.switch import async_setup_entry
+
+    runtime_data = MagicMock()
+    runtime_data.optimization_coordinator = _make_coord()
+    runtime_data.device = None
+
+    entry = _make_entry()
+    entry.runtime_data = runtime_data
+    async_add_entities = MagicMock()
+
+    await async_setup_entry(_make_hass(), entry, async_add_entities)
+    async_add_entities.assert_not_called()

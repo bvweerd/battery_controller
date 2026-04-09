@@ -29,8 +29,19 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller switch entities from a config entry."""
     data = entry.runtime_data
+    if data is None:
+        _LOGGER.warning(
+            "Skipping switch setup for %s: runtime_data missing", entry.entry_id
+        )
+        return
+
     device = data.device
     optimization_coordinator = data.optimization_coordinator
+    if device is None or optimization_coordinator is None:
+        _LOGGER.warning(
+            "Skipping switch setup for %s: incomplete runtime_data", entry.entry_id
+        )
+        return
 
     entities = [
         BatteryOptimizationSwitch(hass, entry, device, optimization_coordinator),

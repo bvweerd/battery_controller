@@ -140,6 +140,22 @@ async def test_async_update_data_client_error(hass):
 
 
 @pytest.mark.asyncio
+async def test_async_update_data_timeout_error(hass):
+    """TimeoutError raises UpdateFailed."""
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(side_effect=TimeoutError("request timed out"))
+
+    with patch(
+        "custom_components.battery_controller.coordinator_weather.async_get_clientsession",
+        return_value=mock_session,
+    ):
+        coord = WeatherDataCoordinator(hass)
+
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+
+@pytest.mark.asyncio
 async def test_async_update_data_no_radiation(hass):
     """Empty radiation data raises UpdateFailed."""
     mock_resp = AsyncMock()
@@ -294,3 +310,38 @@ async def test_async_update_data_invalid_timestamp_skipped(hass):
     # Invalid timestamp is skipped; start_idx advances to the valid "11:00" entry
     assert result is not None
     assert len(result["radiation_forecast"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_invalid_radiation_value_raises_update_failed(hass):
+    """Non-numeric radiation values should be surfaced as UpdateFailed."""
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(
+        return_value={
+            "hourly": {
+                "time": ["2024-06-15T10:00:00", "2024-06-15T11:00:00"],
+                "shortwave_radiation": ["bad-value", 200.0],
+            }
+        }
+    )
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_weather.async_get_clientsession",
+            return_value=mock_session,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_weather.dt_util.utcnow",
+            return_value=datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc),
+        ),
+    ):
+        coord = WeatherDataCoordinator(hass)
+
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()
