@@ -435,3 +435,178 @@ async def test_async_update_data_with_dc_pv_model(hass):
 
     assert "pv_dc_forecast_kw" in result
     assert "pv_dc_1" in result.get("per_pv_array_forecasts", {})
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_missing_weather_creates_issue(hass):
+    """Missing weather data should create the weather-data-unavailable issue."""
+    config = _minimal_config()
+    weather_coord = MagicMock()
+    weather_coord.data = None
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ir.async_create_issue"
+        ) as mock_create_issue,
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 48, None))
+
+        result = await coord._async_update_data()
+
+    assert result["pv_forecast_kw"] == [0.0] * 48
+    mock_create_issue.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_weather_recovery_deletes_issue(hass):
+    """Available weather data should delete the weather-data-unavailable issue."""
+    now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = {
+        "radiation_forecast": [100.0] * 4,
+        "dni_forecast": [50.0] * 4,
+        "diffuse_forecast": [20.0] * 4,
+        "wind_speed_forecast": [3.0] * 4,
+        "temperature_forecast": [20.0] * 4,
+        "forecast_start_utc": now,
+    }
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ir.async_delete_issue"
+        ) as mock_delete_issue,
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, _minimal_config())
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 4, None))
+
+        await coord._async_update_data()
+
+    mock_delete_issue.assert_called_once_with(
+        hass,
+        "battery_controller",
+        "weather_data_unavailable",
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_clamps_negative_pv_outputs(hass):
+    """Negative PV model output should be clamped to zero."""
+    pv_arrays = [
+        {
+            "subentry_id": "pv_ac_1",
+            "peak_power_kwp": 4.0,
+            "orientation": 180.0,
+            "tilt": 35.0,
+            "efficiency_factor": 0.85,
+            "dc_coupled": False,
+        }
+    ]
+    now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = {
+        "radiation_forecast": [100.0, 150.0],
+        "dni_forecast": [50.0, 60.0],
+        "diffuse_forecast": [20.0, 25.0],
+        "wind_speed_forecast": [3.0, 3.0],
+        "temperature_forecast": [20.0, 20.0],
+        "forecast_start_utc": now,
+    }
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, _minimal_config(pv_arrays))
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5, 0.5], None))
+        coord.pv_ac_models[0].forecast_from_radiation = MagicMock(
+            return_value=[-1.0, 0.2]
+        )
+
+        result = await coord._async_update_data()
+
+    assert result["pv_forecast_kw"] == [0.0, 0.2]
+    assert result["per_pv_array_forecasts"]["pv_ac_1"] == [0.0, 0.2]
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_without_subentry_id_omits_per_array_key(hass):
+    """PV arrays without subentry_id still contribute to totals but not per-array map."""
+    pv_arrays = [
+        {
+            "peak_power_kwp": 4.0,
+            "orientation": 180.0,
+            "tilt": 35.0,
+            "efficiency_factor": 0.85,
+            "dc_coupled": False,
+        }
+    ]
+    now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = {
+        "radiation_forecast": [100.0, 150.0],
+        "dni_forecast": [50.0, 60.0],
+        "diffuse_forecast": [20.0, 25.0],
+        "wind_speed_forecast": [3.0, 3.0],
+        "temperature_forecast": [20.0, 20.0],
+        "forecast_start_utc": now,
+    }
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, _minimal_config(pv_arrays))
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5, 0.5], None))
+        coord.pv_ac_models[0].forecast_from_radiation = MagicMock(
+            return_value=[0.1, 0.2]
+        )
+
+        result = await coord._async_update_data()
+
+    assert result["pv_forecast_kw"] == [0.1, 0.2]
+    assert result["per_pv_array_forecasts"] == {}

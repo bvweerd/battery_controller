@@ -40,8 +40,19 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller number entities from a config entry."""
     data = entry.runtime_data
+    if data is None:
+        _LOGGER.warning(
+            "Skipping number setup for %s: runtime_data missing", entry.entry_id
+        )
+        return
+
     config = data.config
     device = data.device
+    if config is None or device is None:
+        _LOGGER.warning(
+            "Skipping number setup for %s: incomplete runtime_data", entry.entry_id
+        )
+        return
 
     entities = [
         DegradationCostNumber(hass, entry, device, config),
@@ -80,7 +91,18 @@ class BatteryControllerNumber(NumberEntity):
 
     def _get_runtime_value(self, key: str, default: float) -> float:
         """Get runtime value from config entry options or data."""
-        return float(self._entry.options.get(key, self._entry.data.get(key, default)))
+        raw_value = self._entry.options.get(key, self._entry.data.get(key, default))
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "Invalid runtime value for %s on %s: %r; using default %s",
+                key,
+                self._entry.entry_id,
+                raw_value,
+                default,
+            )
+            return float(default)
 
     async def _set_runtime_value(self, key: str, value: float) -> None:
         """Set a runtime value in the config entry options."""
@@ -201,18 +223,34 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
 
     @property
     def native_min_value(self) -> float:
-        max_charge_kw = float(
-            self._config.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
-        )
+        try:
+            max_charge_kw = float(
+                self._config.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
+            )
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "Invalid max charge power in config for %s; using default %s",
+                self._entry.entry_id,
+                DEFAULT_MAX_CHARGE_POWER_KW,
+            )
+            max_charge_kw = DEFAULT_MAX_CHARGE_POWER_KW
         return -max_charge_kw * 1000
 
     @property
     def native_max_value(self) -> float:
-        max_discharge_kw = float(
-            self._config.get(
-                CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
+        try:
+            max_discharge_kw = float(
+                self._config.get(
+                    CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW
+                )
             )
-        )
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "Invalid max discharge power in config for %s; using default %s",
+                self._entry.entry_id,
+                DEFAULT_MAX_DISCHARGE_POWER_KW,
+            )
+            max_discharge_kw = DEFAULT_MAX_DISCHARGE_POWER_KW
         return max_discharge_kw * 1000
 
     @property

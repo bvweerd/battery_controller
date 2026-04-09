@@ -226,7 +226,25 @@ async def test_form_user_cannot_connect(hass: HomeAssistant, mock_config: dict) 
             result["flow_id"], user_input=mock_config
         )
     assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
     assert result["errors"]["base"] == "cannot_connect"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 0
+
+
+async def test_form_user_missing_price_sensor_returns_form_error(
+    hass: HomeAssistant,
+) -> None:
+    """Missing price sensor is rejected by schema validation before flow handling."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    with pytest.raises(InvalidData) as exc_info:
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={"sensors": {}},
+        )
+    assert "price_sensor" in str(exc_info.value)
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 0
 
 
 async def test_form_user_missing_price_sensor(hass: HomeAssistant) -> None:
@@ -261,6 +279,59 @@ async def test_already_configured_aborts(
     )
     assert result2["type"] is FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
+
+
+def test_extract_main_data_prefers_sections_and_defaults() -> None:
+    """Section values take precedence and defaults fill missing optional fields."""
+    from custom_components.battery_controller.config_flow import _extract_main_data
+
+    data = _extract_main_data(
+        {
+            "price_sensor": "sensor.flat_price",
+            "fixed_feed_in_price": "0.11",
+            "sensors": {"price_sensor": "sensor.section_price"},
+            "advanced": {"zero_grid_enabled": True},
+        }
+    )
+
+    assert data["price_sensor"] == "sensor.section_price"
+    assert data["feed_in_price_sensor"] is None
+    assert data["power_consumption_sensors"] == []
+    assert data["power_production_sensors"] == []
+    assert data["electricity_consumption_sensors"] == []
+    assert data["electricity_production_sensors"] == []
+    assert data["pv_production_sensors"] == []
+    assert data["fixed_feed_in_price"] == 0.11
+    assert data["zero_grid_enabled"] is True
+    assert data["zero_grid_response_time_s"] == 10.0
+    assert data["max_grid_power_kw"] == 0.0
+
+
+def test_extract_main_data_supports_flat_layout_fallback() -> None:
+    """Flat keys remain supported when section wrappers are absent."""
+    from custom_components.battery_controller.config_flow import _extract_main_data
+
+    data = _extract_main_data(
+        {
+            "price_sensor": "sensor.flat_price",
+            "feed_in_price_sensor": "sensor.feed_in",
+            "power_consumption_sensors": ["sensor.load_1"],
+            "pv_production_sensors": ["sensor.pv_total"],
+            "fixed_feed_in_price": "0.07",
+            "zero_grid_enabled": True,
+            "zero_grid_response_time_s": "12",
+            "max_grid_power_kw": "8.5",
+        }
+    )
+
+    assert data["price_sensor"] == "sensor.flat_price"
+    assert data["feed_in_price_sensor"] == "sensor.feed_in"
+    assert data["power_consumption_sensors"] == ["sensor.load_1"]
+    assert data["pv_production_sensors"] == ["sensor.pv_total"]
+    assert data["fixed_feed_in_price"] == 0.07
+    assert data["zero_grid_enabled"] is True
+    assert data["zero_grid_response_time_s"] == 12.0
+    assert data["max_grid_power_kw"] == 8.5
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +456,32 @@ async def test_battery_subentry_reconfigure(
     assert entry.subentries[subentry_id].data["capacity_kwh"] == 15.0
     assert entry.subentries[subentry_id].data["min_soc_percent"] == 15.0
     assert "15.0 kWh" in entry.subentries[subentry_id].title
+
+
+async def test_battery_subentry_reconfigure_invalid_input_keeps_existing_data(
+    hass: HomeAssistant,
+    v4_config_entry_with_battery: config_entries.ConfigEntry,
+) -> None:
+    """Schema-invalid battery reconfigure input should leave the subentry untouched."""
+    entry = v4_config_entry_with_battery
+    subentry_id = list(entry.subentries.keys())[0]
+    original_data = dict(entry.subentries[subentry_id].data)
+    original_title = entry.subentries[subentry_id].title
+
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, BATTERY_SUBENTRY_TYPE),
+        context={"source": "reconfigure", "subentry_id": subentry_id},
+    )
+    with pytest.raises(InvalidData):
+        await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                **original_data,
+                "max_soc_percent": 120.0,
+            },
+        )
+    assert dict(entry.subentries[subentry_id].data) == original_data
+    assert entry.subentries[subentry_id].title == original_title
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +668,32 @@ async def test_subentry_reconfigure_updates_data(
     assert entry.subentries[subentry_id].data["orientation"] == new_orientation
 
 
+async def test_subentry_reconfigure_invalid_input_keeps_existing_data(
+    hass: HomeAssistant,
+    v3_config_entry_with_subentries: config_entries.ConfigEntry,
+) -> None:
+    """Schema-invalid PV reconfigure input should leave the existing subentry untouched."""
+    entry = v3_config_entry_with_subentries
+    subentry_id = next(iter(entry.subentries.keys()))
+    original_data = dict(entry.subentries[subentry_id].data)
+    original_title = entry.subentries[subentry_id].title
+
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, PV_SUBENTRY_TYPE),
+        context={"source": "reconfigure", "subentry_id": subentry_id},
+    )
+    with pytest.raises(InvalidData):
+        await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            user_input={
+                **original_data,
+                "tilt": 120.0,
+            },
+        )
+    assert dict(entry.subentries[subentry_id].data) == original_data
+    assert entry.subentries[subentry_id].title == original_title
+
+
 async def test_subentry_reconfigure_leaves_others_unchanged(
     hass: HomeAssistant,
     v3_config_entry_with_subentries: config_entries.ConfigEntry,
@@ -710,6 +833,51 @@ def test_validate_battery_subentry_with_soc_derating_keys():
     assert result[CONF_HIGH_SOC_MAX_CHARGE_KW] == 2.5
 
 
+def test_validate_battery_subentry_whitespace_name_is_dropped():
+    """Whitespace-only names should not be stored in normalized battery data."""
+    from custom_components.battery_controller.config_flow import (
+        _validate_battery_subentry,
+    )
+
+    data = {
+        "name": "   ",
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+        "max_discharge_power_kw": 5.0,
+        "round_trip_efficiency": 0.9,
+        "min_soc_percent": 10.0,
+        "max_soc_percent": 90.0,
+        "battery_soc_sensor": "sensor.soc",
+        "pv_dc_efficiency": 0.97,
+    }
+    result = _validate_battery_subentry(data)
+    assert "name" not in result
+
+
+def test_validate_battery_subentry_omits_optional_keys_when_absent():
+    """Optional sensors and derating keys are omitted when not provided."""
+    from custom_components.battery_controller.config_flow import (
+        _validate_battery_subentry,
+    )
+
+    data = {
+        "capacity_kwh": 10.0,
+        "max_charge_power_kw": 5.0,
+        "max_discharge_power_kw": 5.0,
+        "round_trip_efficiency": 0.9,
+        "min_soc_percent": 10.0,
+        "max_soc_percent": 90.0,
+        "battery_soc_sensor": "sensor.soc",
+        "pv_dc_efficiency": 0.97,
+    }
+    result = _validate_battery_subentry(data)
+    assert "battery_power_sensor" not in result
+    assert "high_soc_charge_threshold_pct" not in result
+    assert "high_soc_max_charge_kw" not in result
+    assert "low_soc_discharge_threshold_pct" not in result
+    assert "low_soc_max_discharge_kw" not in result
+
+
 def test_battery_subentry_title_with_name():
     """_battery_subentry_title returns name when non-empty (line 196)."""
     from custom_components.battery_controller.config_flow import _battery_subentry_title
@@ -748,6 +916,22 @@ def test_validate_pv_subentry_with_name():
     assert result["name"] == "South Array"
 
 
+def test_validate_pv_subentry_whitespace_name_is_dropped():
+    """Whitespace-only names should not be stored in normalized PV data."""
+    from custom_components.battery_controller.config_flow import _validate_pv_subentry
+
+    data = {
+        "name": "   ",
+        "peak_power_kwp": 4.0,
+        "orientation": 180.0,
+        "tilt": 35.0,
+        "efficiency_factor": 0.85,
+        "dc_coupled": False,
+    }
+    result = _validate_pv_subentry(data)
+    assert "name" not in result
+
+
 # ---------------------------------------------------------------------------
 # Options flow — missing_required error path (line 569)
 # ---------------------------------------------------------------------------
@@ -757,18 +941,15 @@ async def test_options_flow_missing_price_sensor_shows_error(
     hass: HomeAssistant,
     v4_config_entry: config_entries.ConfigEntry,
 ) -> None:
-    """Submitting options without price_sensor sets errors (line 569)."""
+    """Submitting options without price_sensor fails schema validation."""
     result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
-
-    with pytest.raises(Exception):
-        # Missing price_sensor should either raise InvalidData or return FORM with errors
-        result2 = await hass.config_entries.options.async_configure(
+    with pytest.raises(InvalidData) as exc_info:
+        await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={"sensors": {}},
         )
-        # If it returns a FORM (not CREATE_ENTRY), the error path was hit
-        assert result2["type"] is FlowResultType.FORM
-        assert "base" in result2.get("errors", {})
+    assert "price_sensor" in str(exc_info.value)
+    assert v4_config_entry.options == {}
 
 
 # ---------------------------------------------------------------------------
@@ -947,3 +1128,80 @@ async def test_options_flow_subentries_untouched(
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert set(entry.subentries.keys()) == subentry_ids_before
+
+
+async def test_options_flow_missing_price_sensor_preserves_existing_options(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+) -> None:
+    """A failed options submit must not overwrite existing options."""
+    original_options = {
+        "price_sensor": "sensor.original_price",
+        "degradation_cost_per_cycle": 0.025,
+        "min_price_spread": 0.08,
+        "zero_grid_deadband_w": 50.0,
+    }
+    hass.config_entries.async_update_entry(v4_config_entry, options=original_options)
+
+    result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            user_input={"sensors": {}},
+        )
+    assert v4_config_entry.options == original_options
+
+
+async def test_options_flow_init_preserves_existing_options_until_submit(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+) -> None:
+    """Opening the options flow must not mutate existing option values."""
+    hass.config_entries.async_update_entry(
+        v4_config_entry,
+        data={
+            "price_sensor": "sensor.data_price",
+            "fixed_feed_in_price": 0.04,
+            "zero_grid_enabled": False,
+            "max_grid_power_kw": 3.0,
+        },
+        options={
+            "price_sensor": "sensor.option_price",
+            "fixed_feed_in_price": 0.09,
+            "zero_grid_enabled": True,
+            "max_grid_power_kw": 7.5,
+        },
+    )
+
+    result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "init"
+    assert v4_config_entry.options["price_sensor"] == "sensor.option_price"
+    assert v4_config_entry.options["fixed_feed_in_price"] == 0.09
+    assert v4_config_entry.options["zero_grid_enabled"] is True
+    assert v4_config_entry.options["max_grid_power_kw"] == 7.5
+
+
+async def test_options_flow_partial_submit_applies_defaults_and_empty_lists(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+) -> None:
+    """A minimal valid submit should normalize omitted sections consistently."""
+    result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"sensors": {"price_sensor": "sensor.updated_price"}},
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert v4_config_entry.options["price_sensor"] == "sensor.updated_price"
+    assert v4_config_entry.options["feed_in_price_sensor"] is None
+    assert v4_config_entry.options["power_consumption_sensors"] == []
+    assert v4_config_entry.options["power_production_sensors"] == []
+    assert v4_config_entry.options["electricity_consumption_sensors"] == []
+    assert v4_config_entry.options["electricity_production_sensors"] == []
+    assert v4_config_entry.options["pv_production_sensors"] == []
+    assert v4_config_entry.options["fixed_feed_in_price"] == 0.04
+    assert v4_config_entry.options["zero_grid_enabled"] is True
+    assert v4_config_entry.options["zero_grid_response_time_s"] == 10.0
+    assert v4_config_entry.options["max_grid_power_kw"] == 0.0
