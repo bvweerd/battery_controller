@@ -299,6 +299,7 @@ def run_dp(
     min_soc_wh = round(battery_config.min_soc_kwh * 1000)
     max_soc_wh = round(battery_config.max_soc_kwh * 1000)
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+    charge_eff = sqrt_rte  # Discharge always uses nominal sqrt_rte
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
@@ -307,11 +308,12 @@ def run_dp(
     V = [[INF] * n_soc_states for _ in range(n_steps + 1)]
     policy = [[0.0] * n_soc_states for _ in range(n_steps)]
 
-    if terminal_shadow_price is not None and terminal_shadow_price >= 0.0:
-        terminal_price = terminal_shadow_price
-    elif feed_in_forecast:
+    if feed_in_forecast:
         lookback = max(1, min(round(6.0 / full_step_hours), len(feed_in_forecast)))
-        avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
+        sorted_prices = sorted(feed_in_forecast)
+        median_price = sorted_prices[len(sorted_prices) // 2]
+        clipped_tail = [min(p, median_price) for p in feed_in_forecast[-lookback:]]
+        avg_tail = sum(clipped_tail) / len(clipped_tail)
         terminal_price = min(feed_in_forecast[-1], avg_tail)
     else:
         terminal_price = 0.0
@@ -356,7 +358,7 @@ def run_dp(
                 if action_w > 0:
                     if action_w > max_chg_w:
                         continue
-                    energy_change_wh = action_w * time_step_hours * sqrt_rte
+                    energy_change_wh = action_w * time_step_hours * charge_eff
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
@@ -414,7 +416,7 @@ def run_dp(
                         best_cost = total_cost
                         best_action = -drain_w
             if soc_wh < max_soc_wh:
-                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * sqrt_rte)
+                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * charge_eff)
                 if 0 < fill_w <= max_chg_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -463,6 +465,7 @@ def forward_pass(
 ):
     """Execute the forward pass to get the schedule."""
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+    charge_eff = sqrt_rte  # Discharge always uses nominal sqrt_rte
     current_soc = float(
         soc_states[_find_nearest_soc_idx(int(current_soc_kwh * 1000), soc_states)]
     )
@@ -483,7 +486,7 @@ def forward_pass(
         if action_w > 0:
             mode_schedule.append("charging")
             current_soc = min(
-                current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
+                current_soc + action_w * time_step_hours * charge_eff, float(max_soc_wh)
             )
         elif action_w < 0:
             mode_schedule.append("discharging")

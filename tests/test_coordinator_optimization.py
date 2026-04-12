@@ -11,6 +11,7 @@ from custom_components.battery_controller.battery_model import BatteryState
 from custom_components.battery_controller.const import (
     CONF_BATTERY_SOC_SENSOR,
     CONF_CONTROL_MODE,
+    CONF_FEED_IN_PRICE_SENSOR,
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
@@ -1816,6 +1817,223 @@ async def test_run_optimization_no_price_sensor_raises(hass, monkeypatch):
 
     with pytest.raises(UpdateFailed):
         await coord._run_optimization()
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_price_sensor_unavailable_creates_issue(
+    hass, monkeypatch
+):
+    """Unavailable price sensor without model data raises UpdateFailed and creates an issue."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    coord = _make_coordinator(hass)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0],
+        "consumption_forecast_kw": [0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    hass.states.async_set("sensor.test_price", "unavailable")
+
+    with patch(
+        "custom_components.battery_controller.coordinator_optimization.ir.async_create_issue"
+    ) as mock_create_issue:
+        with pytest.raises(UpdateFailed):
+            await coord._run_optimization()
+
+    mock_create_issue.assert_called_once()
+    assert "not available" in coord.last_failure_reason
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_price_sensor_unavailable_uses_model_fallback(
+    hass, monkeypatch
+):
+    """Unavailable live price sensor should fall back to the historical price model."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0, 0.0],
+        "consumption_forecast_kw": [0.5, 0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "unavailable")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: True)
+    monkeypatch.setattr(
+        coord._price_model,
+        "forecast",
+        lambda hours, **kwargs: [0.21 + 0.01 * i for i in range(hours)],
+    )
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.now",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["prices"] = args[2]
+        return OptimizationResult(
+            power_schedule_kw=[0.0, 0.0],
+            mode_schedule=["idle", "idle"],
+            soc_schedule_kwh=[5.0, 5.0, 5.0],
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=args[2],
+            pv_forecast=[0.0, 0.0],
+            consumption_forecast=[0.5, 0.5],
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        data = await coord._run_optimization()
+
+    assert captured["prices"][:2] == [0.21, 0.22]
+    assert len(captured["prices"]) >= 2
+    assert data["price_forecast_source"] == "historical_model"
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_feed_in_sensor_unavailable_uses_fixed_price(
+    hass, monkeypatch
+):
+    """Unavailable feed-in price sensor should fall back to the configured fixed price."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.config[CONF_FEED_IN_PRICE_SENSOR] = "sensor.feed_in"
+    coord.config[CONF_FIXED_FEED_IN_PRICE] = 0.07
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0, 0.0],
+        "consumption_forecast_kw": [0.5, 0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    hass.states.async_set("sensor.feed_in", "unavailable")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.20, 0.22], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.now",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["feed_in"] = args[3]
+        return OptimizationResult(
+            power_schedule_kw=[0.0, 0.0],
+            mode_schedule=["idle", "idle"],
+            soc_schedule_kwh=[5.0, 5.0, 5.0],
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=args[2],
+            pv_forecast=[0.0, 0.0],
+            consumption_forecast=[0.5, 0.5],
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    assert captured["feed_in"] == [0.07, 0.07]
 
 
 @pytest.mark.asyncio

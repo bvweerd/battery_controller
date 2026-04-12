@@ -77,8 +77,9 @@ function findNearestSocIdx(socWh, socStates) {
 function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
                stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice) {
 
-  const rte     = cfg.rte;
-  const sqrtRte = Math.sqrt(rte);
+  const rte      = cfg.rte;
+  const sqrtRte  = Math.sqrt(rte);
+  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
   const minSocWh = Math.round(cfg.minSocKwh * 1000);
   const maxSocWh = Math.round(cfg.maxSocKwh * 1000);
 
@@ -100,15 +101,14 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const socStates  = [];
   for (let i = 0; i < nSocStates; i++) socStates.push(minSocWh + i * socResWh);
 
-  // Terminal value
+  // Terminal value: clipped tail average (each tail price capped at median)
   let terminalPrice;
-  if (terminalShadowPrice !== null && terminalShadowPrice !== undefined && terminalShadowPrice >= 0) {
-    terminalPrice = terminalShadowPrice;
-  } else if (feedInFc.length > 0) {
+  if (feedInFc.length > 0) {
     const lookback = Math.max(1, Math.min(Math.round(6.0 / fullStepH), feedInFc.length));
-    let sum = 0;
-    for (let i = feedInFc.length - lookback; i < feedInFc.length; i++) sum += feedInFc[i];
-    const avgTail = sum / lookback;
+    const sortedPrices = [...feedInFc].sort((a, b) => a - b);
+    const medianPrice = sortedPrices[Math.floor(sortedPrices.length / 2)];
+    const clippedTail = feedInFc.slice(-lookback).map(p => Math.min(p, medianPrice));
+    const avgTail = clippedTail.reduce((s, p) => s + p, 0) / clippedTail.length;
     terminalPrice = Math.min(feedInFc[feedInFc.length - 1], avgTail);
   } else {
     terminalPrice = 0;
@@ -171,7 +171,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         let newSocWh;
         if (actionW > 0) {
           if (actionW > maxChgW) continue;
-          newSocWh = socWh + actionW * stepH * sqrtRte;
+          newSocWh = socWh + actionW * stepH * chargeEff;
           if (newSocWh > maxSocWh) continue;
         } else if (actionW < 0) {
           if (-actionW > maxDisW) continue;
@@ -210,7 +210,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         }
       }
       if (socWh < maxSocWh) {
-        const fillW = (maxSocWh - socWh) / (stepH * sqrtRte);
+        const fillW = (maxSocWh - socWh) / (stepH * chargeEff);
         if (fillW > 0 && fillW <= maxChgW) {
           const stepCost = calculateStepCost(
             stepH, socWh, fillW, gridPrice, feedIn,
@@ -231,7 +231,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
 function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
   const { policy, socStates, stepDurations, minSocWh, maxSocWh, nSteps } = dpResult;
-  const sqrtRte = Math.sqrt(cfg.rte);
+  const sqrtRte  = Math.sqrt(cfg.rte);
+  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
   let curSocWh = currentSocKwh * 1000;
   const powerKw = [], modes = [], socKwh = [currentSocKwh];
 
@@ -244,7 +245,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
     powerKw.push(-actionW / 1000);
     if (actionW > 0) {
       modes.push('charging');
-      curSocWh = Math.min(curSocWh + actionW * stepH * sqrtRte, maxSocWh);
+      curSocWh = Math.min(curSocWh + actionW * stepH * chargeEff, maxSocWh);
     } else if (actionW < 0) {
       modes.push('discharging');
       curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH / sqrtRte, minSocWh);
@@ -271,7 +272,8 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
  * (same as forwardPass output).
  */
 function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
-  const sqrtRte  = Math.sqrt(cfg.rte);
+  const sqrtRte   = Math.sqrt(cfg.rte);
+  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
   const minSocWh = cfg.minSocKwh * 1000;
   const maxSocWh = cfg.maxSocKwh * 1000;
   const socKwh   = [currentSocKwh];
@@ -284,7 +286,7 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
 
     if (modes[t] === 'charging' && p < -1e-9) {
       const actionW = -p * 1000;   // positive
-      curSocWh = Math.min(curSocWh + actionW * stepH * sqrtRte, maxSocWh);
+      curSocWh = Math.min(curSocWh + actionW * stepH * chargeEff, maxSocWh);
     } else if (modes[t] === 'discharging' && p > 1e-9) {
       const actionW = p * 1000;    // positive
       curSocWh = Math.max(curSocWh - actionW * stepH / sqrtRte, minSocWh);

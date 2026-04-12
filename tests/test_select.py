@@ -108,6 +108,20 @@ async def test_select_option_updates_entry_options():
 
 
 @pytest.mark.asyncio
+async def test_select_option_preserves_existing_option_keys():
+    sel = _make_select(control_mode=MODE_HYBRID)
+    sel._entry.options = {"existing_key": "keep-me"}
+    sel.async_write_ha_state = MagicMock()
+
+    await sel.async_select_option(MODE_ZERO_GRID)
+
+    sel.hass.config_entries.async_update_entry.assert_called_once_with(
+        sel._entry,
+        options={"existing_key": "keep-me", "control_mode": MODE_ZERO_GRID},
+    )
+
+
+@pytest.mark.asyncio
 async def test_select_option_invalid_mode_logs_warning(caplog):
     import logging
 
@@ -160,3 +174,31 @@ async def test_async_setup_entry_adds_entity():
 
     async_add_entities.assert_called_once()
     assert len(added) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
+    from custom_components.battery_controller.select import async_setup_entry
+
+    entry = _make_entry()
+    entry.runtime_data = None
+    async_add_entities = MagicMock()
+
+    await async_setup_entry(_make_hass(), entry, async_add_entities)
+    async_add_entities.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_without_coordinator_skips_entity_setup():
+    from custom_components.battery_controller.select import async_setup_entry
+
+    runtime_data = MagicMock()
+    runtime_data.device = _make_device()
+    runtime_data.optimization_coordinator = None
+
+    entry = _make_entry()
+    entry.runtime_data = runtime_data
+    async_add_entities = MagicMock()
+
+    await async_setup_entry(_make_hass(), entry, async_add_entities)
+    async_add_entities.assert_not_called()
