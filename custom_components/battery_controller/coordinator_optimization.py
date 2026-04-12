@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -1436,23 +1437,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     new_min_pct,
                 )
 
-        # Apply charge efficiency correction: lower the effective RTE so the DP
-        # plans more conservatively (longer charge windows) when the battery
-        # consistently charges slower than modelled.
-        # corrected_rte = rte * correction² → sqrt(corrected_rte) = sqrt(rte) * correction
+        # Apply charge efficiency correction: only the charge-side efficiency is
+        # reduced when the battery charges slower than modelled. Discharge
+        # efficiency stays at sqrt(nominal RTE) so that the break-even discharge
+        # price is not inflated by a charging-speed problem.
+        charge_eff_override: float | None = None
         if self._charge_eff_correction < 0.995:
-            corrected_rte = max(
-                0.60,
-                battery_config.round_trip_efficiency * self._charge_eff_correction**2,
-            )
-            battery_config = dataclasses.replace(
-                battery_config, round_trip_efficiency=corrected_rte
-            )
+            nominal_sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+            charge_eff_override = nominal_sqrt_rte * self._charge_eff_correction
             _LOGGER.debug(
-                "Charge efficiency correction %.3f applied: RTE %.3f → %.3f",
+                "Charge efficiency correction %.3f applied: charge_eff %.4f → %.4f"
+                " (discharge_eff stays %.4f)",
                 self._charge_eff_correction,
-                self.battery_config.round_trip_efficiency,
-                corrected_rte,
+                nominal_sqrt_rte,
+                charge_eff_override,
+                nominal_sqrt_rte,
             )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
@@ -1490,6 +1489,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             min_spread,
             pv_dc_forecast,
             self._last_shadow_price,
+            charge_eff_override,
         )
 
         self._last_shadow_price = result.shadow_price_eur_kwh
