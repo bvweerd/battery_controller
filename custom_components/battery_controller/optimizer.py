@@ -386,6 +386,7 @@ def optimize_battery_schedule(
     min_price_spread: float = 0.05,
     pv_dc_forecast: list[float] | None = None,  # kW (DC-coupled PV)
     terminal_shadow_price: float | None = None,  # EUR/kWh from previous run
+    charge_eff_override: float | None = None,  # Override charge-side efficiency only
 ) -> OptimizationResult:
     """Optimize battery schedule using dynamic programming.
 
@@ -411,6 +412,10 @@ def optimize_battery_schedule(
             stable rolling-horizon schedule because λ is derived from the full
             price structure rather than a single end-of-horizon price point.
             Must be ≥ 0; negative values are ignored (fallback to feed-in tail).
+        charge_eff_override: Override for the charge-side efficiency only (AC→DC).
+            When provided, charging SoC transitions use this value instead of
+            sqrt(RTE). Discharge efficiency is always sqrt(RTE) — only charging
+            is affected (e.g. when the battery charges slower than modelled).
 
     Returns:
         OptimizationResult with optimal schedule
@@ -436,6 +441,10 @@ def optimize_battery_schedule(
         ] * (n_steps - len(step_durations_hours))
 
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+    # Charging uses the (possibly corrected) efficiency; discharging always uses
+    # the nominal sqrt(RTE). Separating them prevents a charging-speed correction
+    # from inflating the break-even discharge price.
+    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
 
     # Discretize SoC space.
     min_step_hours = min(step_durations_hours[:n_steps])
@@ -496,9 +505,19 @@ def optimize_battery_schedule(
     # used to initialise V[T].
     # The lookback window is time-based (6 h) so behaviour is identical for
     # 15-min, 30-min and 60-min price intervals.
+    #
+    # Clipped tail average: each price in the tail is capped at the median of
+    # the full forecast before averaging.  This prevents an evening price spike
+    # at the end of the horizon from inflating the terminal value and
+    # suppressing discharge at those same hours within the horizon — the same
+    # self-suppression the shadow price had, but for end-of-horizon peaks.
+    # When the tail contains no outliers the clip has no effect.
     if feed_in_forecast:
         lookback = max(1, min(round(6.0 / full_step_hours), len(feed_in_forecast)))
-        avg_tail = sum(feed_in_forecast[-lookback:]) / lookback
+        sorted_prices = sorted(feed_in_forecast)
+        median_price = sorted_prices[len(sorted_prices) // 2]
+        clipped_tail = [min(p, median_price) for p in feed_in_forecast[-lookback:]]
+        avg_tail = sum(clipped_tail) / len(clipped_tail)
         terminal_price = min(feed_in_forecast[-1], avg_tail)
     else:
         terminal_price = 0.0
@@ -562,7 +581,7 @@ def optimize_battery_schedule(
                 if action_w > 0:
                     if action_w > max_chg_w:
                         continue
-                    energy_change_wh = action_w * time_step_hours * sqrt_rte
+                    energy_change_wh = action_w * time_step_hours * charge_eff
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
@@ -613,6 +632,7 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    charge_eff_override=charge_eff,
                 )
 
                 # Total cost = immediate + future
@@ -626,6 +646,7 @@ def optimize_battery_schedule(
             # new_soc_idx is known directly (0 or n_soc_states-1), avoiding the
             # floating-point round-trip through the energy formula.
             if soc_wh > min_soc_wh:
+                # Discharge uses sqrt_rte (nominal); charge_eff only affects charging.
                 drain_w = (soc_wh - min_soc_wh) * sqrt_rte / time_step_hours
                 if 0 < drain_w <= max_dis_w:
                     step_cost = calculate_step_cost(
@@ -640,13 +661,14 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        charge_eff_override=charge_eff,
                     )
                     total_cost = step_cost + V[t + 1][0]
                     if total_cost < best_cost:
                         best_cost = total_cost
                         best_action = -drain_w
             if soc_wh < max_soc_wh:
-                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * sqrt_rte)
+                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * charge_eff)
                 if 0 < fill_w <= max_chg_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -660,6 +682,7 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        charge_eff_override=charge_eff,
                     )
                     total_cost = step_cost + V[t + 1][n_soc_states - 1]
                     if total_cost < best_cost:
@@ -694,7 +717,7 @@ def optimize_battery_schedule(
         if action_w > 0:
             mode_schedule.append(ACTION_CHARGING)
             current_soc = min(
-                current_soc + action_w * time_step_hours * sqrt_rte, float(max_soc_wh)
+                current_soc + action_w * time_step_hours * charge_eff, float(max_soc_wh)
             )
         elif action_w < 0:
             mode_schedule.append(ACTION_DISCHARGING)
