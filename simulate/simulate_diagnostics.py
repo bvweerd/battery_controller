@@ -13,7 +13,6 @@ compared with the raw optimizer schedule.
 
 import json
 import math
-import sys
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -909,7 +908,22 @@ def print_min_spread_analysis(battery, degradation_cost, price_forecast):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "diagnostics.json"
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Battery controller diagnostic simulator"
+    )
+    parser.add_argument(
+        "path", nargs="?", default="diagnostics.json", help="Diagnostics JSON file"
+    )
+    parser.add_argument(
+        "--pv-curtailed",
+        action="store_true",
+        help="Simulate PV curtailment: zero out all PV forecasts before running the DP",
+    )
+    args = parser.parse_args()
+
+    path = args.path
     diag = load_diagnostics(path)
 
     (
@@ -932,7 +946,12 @@ def main():
     n_steps = len(price_forecast)
     pv_dc_forecast = [0.0] * n_steps
 
-    print(f"\nLoaded {path}")
+    # PV curtailment override (mirrors the coordinator's PV Curtailed switch)
+    if args.pv_curtailed:
+        pv_forecast = [0.0] * n_steps
+        pv_dc_forecast = [0.0] * n_steps
+
+    print(f"\nLoaded {path}" + (" [PV CURTAILED]" if args.pv_curtailed else ""))
     print(
         f"  {n_steps} steps, SoC={current_soc_kwh:.4f} kWh, "
         f"degradation={degradation_cost:.3f} €/kWh, "

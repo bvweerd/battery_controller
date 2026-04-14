@@ -73,6 +73,18 @@ from .zero_grid_controller import create_zero_grid_controller
 
 _LOGGER = logging.getLogger(__name__)
 
+# Multi-battery dispatch: SoC-gap thresholds
+# When the relative-SoC gap between batteries is below _SOC_SPLIT_THRESHOLD,
+# concentrate the full setpoint on one battery (better tracking, avoids
+# low-power inefficiency). Above the threshold, split proportionally to
+# rebalance diverging SoC levels.
+_SOC_SPLIT_THRESHOLD = 0.10
+# Minimum rel-SoC advantage for a challenger battery to displace the current
+# active battery within concentration mode. Must be < _SOC_SPLIT_THRESHOLD so
+# there is a middle zone [_SOC_HYSTERESIS, _SOC_SPLIT_THRESHOLD) where a switch
+# to a clearly better battery happens before proportional splitting kicks in.
+_SOC_HYSTERESIS = 0.05
+
 
 class OptimizationCoordinator(DataUpdateCoordinator):
     """Coordinator for battery optimization."""
@@ -115,6 +127,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Per-battery state cache (updated by get_current_battery_state)
         self._per_battery_states: dict[str, BatteryState] = {}
+
+        # Active battery for concentration dispatch (None = select fresh next call)
+        # zero_grid: one battery for both charge and discharge (stable across direction changes)
+        # scheduled: separate tracker; direction determines selection criterion
+        self._zero_grid_active_battery: str | None = None
+        self._scheduled_active_battery: str | None = None
 
         # Zero-grid controller
         self.zero_grid_controller = create_zero_grid_controller(
@@ -189,6 +207,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # is trivial to re-enable without manual intervention.
         self._optimization_enabled: bool = True
 
+        # PV curtailment flag: when True the optimizer receives zeroed PV forecasts
+        # and zero_grid mode follows the DP schedule instead of the live grid sensor.
+        # Intended for use when the solar inverter curtails production at negative prices.
+        self._pv_curtailed: bool = False
+
         # Guard against concurrent optimizer runs (e.g. price change + timer overlap).
         self._optimization_running: bool = False
 
@@ -254,6 +277,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def optimization_enabled(self, value: bool) -> None:
         """Enable or disable the optimizer."""
         self._optimization_enabled = value
+
+    @property
+    def pv_curtailed(self) -> bool:
+        """Return whether PV curtailment mode is active."""
+        return self._pv_curtailed
+
+    @pv_curtailed.setter
+    def pv_curtailed(self, value: bool) -> None:
+        """Enable or disable PV curtailment mode."""
+        self._pv_curtailed = value
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
@@ -502,8 +535,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # mode switch (e.g. hybrid → follow_schedule) takes effect in the
         # real-time loop immediately, without waiting for the next 15-min run.
         if self._control_mode == MODE_ZERO_GRID:
-            rt_effective_mode = "zero_grid"
-            controller_schedule_w = 0.0
+            if self._pv_curtailed:
+                # Follow the cached DP schedule (set during the last 15-min run)
+                # instead of the live grid sensor — same logic as hybrid/follow_schedule.
+                rt_effective_mode = self._effective_mode
+                controller_schedule_w = self._controller_schedule_w
+            else:
+                rt_effective_mode = "zero_grid"
+                controller_schedule_w = 0.0
         elif self._control_mode == MODE_MANUAL:
             # Manual reads the live setpoint (may change between 15-min runs)
             rt_effective_mode = "manual"
@@ -581,7 +620,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             }
         )
 
-        battery_setpoints = self._split_setpoint(control_action["target_power_kw"])
+        battery_setpoints = self._split_setpoint(
+            control_action["target_power_kw"], control_action["mode"]
+        )
         self.async_set_updated_data(
             {
                 **self.data,
@@ -840,50 +881,203 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             mode=mode,
         )
 
-    def _split_setpoint(self, total_kw: float) -> dict[str, float]:
+    def _split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
         """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
 
-        Distributes proportionally to available headroom (charging) or available
-        energy (discharging).  Each battery is clamped to its individual power limit.
+        Uses SoC-gap triggered concentration:
+        - Gap < _SOC_SPLIT_THRESHOLD: concentrate on one battery. Avoids
+          splitting tiny setpoints across inverters and provides stable
+          single-inverter tracking for zero-grid corrections.
+        - Gap >= _SOC_SPLIT_THRESHOLD: proportional split with iterative
+          power-overflow redistribution to rebalance diverging SoC levels.
+
+        Battery selection for concentration (with _SOC_HYSTERESIS to prevent
+        rapid switching):
+        - zero_grid / hybrid: battery closest to 50% rel_soc — handles both
+          charge and discharge direction changes without switching inverters.
+        - scheduled charge: battery with lowest rel_soc (most headroom).
+        - scheduled discharge: battery with highest rel_soc (most energy).
         """
         if not self._individual_battery_configs:
             return {}
+        if abs(total_kw) < 1e-6:
+            return {sid: 0.0 for sid, _ in self._individual_battery_configs}
 
+        rel_socs = self._compute_rel_socs()
+        soc_gap = max(rel_socs.values()) - min(rel_socs.values())
+
+        if soc_gap >= _SOC_SPLIT_THRESHOLD:
+            # SoC has diverged — proportional split to rebalance; reset active batteries
+            self._zero_grid_active_battery = None
+            self._scheduled_active_battery = None
+            return self._proportional_split(total_kw, self._individual_battery_configs)
+
+        winner = self._select_active_battery(total_kw, rel_socs, mode)
+        return self._concentrate(total_kw, winner)
+
+    def _compute_rel_socs(self) -> dict[str, float]:
+        """Compute relative SoC position [0, 1] per battery within its usable range."""
         result: dict[str, float] = {}
+        for sid, cfg in self._individual_battery_configs:
+            usable = cfg.max_soc_kwh - cfg.min_soc_kwh
+            if usable > 0 and sid in self._per_battery_states:
+                soc = self._per_battery_states[sid].soc_kwh
+                result[sid] = (soc - cfg.min_soc_kwh) / usable
+            else:
+                result[sid] = 0.5
+        return result
 
-        if total_kw > 0:  # charging
-            headrooms = {
-                sid: max(0.0, cfg.max_soc_kwh - self._per_battery_states[sid].soc_kwh)
-                if sid in self._per_battery_states
-                else cfg.max_soc_kwh * 0.5
-                for sid, cfg in self._individual_battery_configs
-            }
-            total_headroom = sum(headrooms.values())
-            for sid, cfg in self._individual_battery_configs:
-                if total_headroom > 0:
-                    raw = total_kw * headrooms[sid] / total_headroom
-                else:
-                    raw = 0.0
-                result[sid] = min(raw, cfg.max_charge_power_kw)
+    def _select_active_battery(
+        self, total_kw: float, rel_socs: dict[str, float], mode: str
+    ) -> str:
+        """Select which battery to concentrate the setpoint on.
 
-        elif total_kw < 0:  # discharging
-            availables = {
-                sid: max(0.0, self._per_battery_states[sid].soc_kwh - cfg.min_soc_kwh)
-                if sid in self._per_battery_states
-                else cfg.capacity_kwh * 0.4
-                for sid, cfg in self._individual_battery_configs
-            }
-            total_available = sum(availables.values())
-            for sid, cfg in self._individual_battery_configs:
-                if total_available > 0:
-                    raw = total_kw * availables[sid] / total_available
-                else:
-                    raw = 0.0
-                result[sid] = max(raw, -cfg.max_discharge_power_kw)
+        Applies hysteresis: only displaces the current active battery when the
+        best candidate's score exceeds the current battery's by _SOC_HYSTERESIS.
+        """
+        sids = [sid for sid, _ in self._individual_battery_configs]
 
+        if mode in (MODE_ZERO_GRID, MODE_HYBRID):
+            # Prefer battery closest to 50% rel_soc: stays within limits longest
+            # regardless of whether the next setpoint is charge or discharge.
+            def score(sid: str) -> float:
+                return -abs(rel_socs[sid] - 0.5)
+
+            active_attr = "_zero_grid_active_battery"
+        elif total_kw > 0:
+            # Scheduled charge: prefer lowest rel_soc (most room)
+            def score(sid: str) -> float:
+                return -rel_socs[sid]
+
+            active_attr = "_scheduled_active_battery"
         else:
-            result = {sid: 0.0 for sid, _ in self._individual_battery_configs}
+            # Scheduled discharge: prefer highest rel_soc (most energy)
+            def score(sid: str) -> float:
+                return rel_socs[sid]
 
+            active_attr = "_scheduled_active_battery"
+
+        best = max(sids, key=score)
+        current: str | None = getattr(self, active_attr)
+
+        if current is not None and current in rel_socs:
+            if score(best) - score(current) <= _SOC_HYSTERESIS:
+                best = current  # stay with current battery
+
+        setattr(self, active_attr, best)
+        return best
+
+    def _concentrate(self, total_kw: float, winner: str) -> dict[str, float]:
+        """Send full setpoint to winner; redistribute overflow above max_power to others."""
+        result: dict[str, float] = {
+            sid: 0.0 for sid, _ in self._individual_battery_configs
+        }
+        winner_cfg = next(
+            cfg for sid, cfg in self._individual_battery_configs if sid == winner
+        )
+        winner_state = self._per_battery_states.get(winner)
+
+        if total_kw > 0:
+            headroom = (
+                max(0.0, winner_cfg.max_soc_kwh - winner_state.soc_kwh)
+                if winner_state is not None
+                else winner_cfg.max_soc_kwh * 0.5
+            )
+            if headroom <= 0:
+                return result
+            clamped = min(total_kw, winner_cfg.max_charge_power_kw)
+        else:
+            available = (
+                max(0.0, winner_state.soc_kwh - winner_cfg.min_soc_kwh)
+                if winner_state is not None
+                else winner_cfg.capacity_kwh * 0.4
+            )
+            if available <= 0:
+                return result
+            clamped = max(total_kw, -winner_cfg.max_discharge_power_kw)
+
+        result[winner] = clamped
+        overflow = total_kw - clamped
+        if abs(overflow) > 1e-6:
+            others = [
+                (sid, cfg)
+                for sid, cfg in self._individual_battery_configs
+                if sid != winner
+            ]
+            if others:
+                for sid, val in self._proportional_split(overflow, others).items():
+                    result[sid] = val
+        return result
+
+    def _proportional_split(
+        self,
+        total_kw: float,
+        configs: list[tuple[str, BatteryConfig]],
+    ) -> dict[str, float]:
+        """Proportional split with iterative overflow redistribution.
+
+        Splits total_kw proportionally to available headroom (charging) or
+        available energy (discharging). Batteries that hit their max_power
+        limit have the overflow redistributed to the remaining batteries.
+        Iterates at most len(configs) rounds until all overflow is absorbed
+        or no capacity remains.
+        """
+        result: dict[str, float] = {}
+        remaining_kw = total_kw
+        remaining = list(configs)
+
+        for _ in range(len(configs)):
+            if not remaining or abs(remaining_kw) < 1e-6:
+                break
+
+            if remaining_kw > 0:
+                weights = {
+                    sid: max(
+                        0.0,
+                        cfg.max_soc_kwh - self._per_battery_states[sid].soc_kwh,
+                    )
+                    if sid in self._per_battery_states
+                    else cfg.max_soc_kwh * 0.5
+                    for sid, cfg in remaining
+                }
+            else:
+                weights = {
+                    sid: max(
+                        0.0,
+                        self._per_battery_states[sid].soc_kwh - cfg.min_soc_kwh,
+                    )
+                    if sid in self._per_battery_states
+                    else cfg.capacity_kwh * 0.4
+                    for sid, cfg in remaining
+                }
+
+            total_weight = sum(weights.values())
+            overflow = 0.0
+            next_remaining: list[tuple[str, BatteryConfig]] = []
+
+            for sid, cfg in remaining:
+                raw = (
+                    remaining_kw * weights[sid] / total_weight
+                    if total_weight > 0
+                    else remaining_kw / len(remaining)
+                )
+                if remaining_kw > 0:
+                    clamped = min(raw, cfg.max_charge_power_kw)
+                    at_limit = clamped >= cfg.max_charge_power_kw - 1e-6
+                else:
+                    clamped = max(raw, -cfg.max_discharge_power_kw)
+                    at_limit = clamped <= -cfg.max_discharge_power_kw + 1e-6
+
+                result[sid] = result.get(sid, 0.0) + clamped
+                overflow += raw - clamped
+                if not at_limit:
+                    next_remaining.append((sid, cfg))
+
+            remaining_kw = overflow
+            remaining = next_remaining
+
+        for sid, _ in configs:
+            result.setdefault(sid, 0.0)
         return result
 
     def _refresh_battery_config(self) -> None:
@@ -1336,6 +1530,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if raw_dc and any(v > 0 for v in raw_dc):
                 pv_dc_forecast = resample_forecast(raw_dc, 60, price_interval)
 
+        # PV curtailment override: zero out all PV when the switch is active.
+        # The optimizer then plans charging from the grid instead of relying on
+        # phantom solar production.
+        if self._pv_curtailed:
+            _LOGGER.debug(
+                "PV curtailment active: zeroing AC PV (%d steps) and DC PV forecast",
+                len(pv_forecast),
+            )
+            pv_forecast = [0.0] * len(pv_forecast)
+            if pv_dc_forecast is not None:
+                pv_dc_forecast = [0.0] * len(pv_dc_forecast)
+
         # Pad shorter forecasts to match price horizon.
         # Priority: own feed-in model → grid model × ratio → last value.
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
@@ -1518,8 +1724,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Determine effective mode/power based on control mode
         if self._control_mode == MODE_ZERO_GRID:
-            effective_mode = "zero_grid"
-            effective_power = 0.0
+            if self._pv_curtailed:
+                # PV is unavailable: follow the DP schedule so the battery charges
+                # from the grid at negative prices instead of trying to maintain
+                # zero-grid by discharging.
+                effective_mode = result.optimal_mode
+                effective_power = result.optimal_power_kw
+            else:
+                effective_mode = "zero_grid"
+                effective_power = 0.0
         elif self._control_mode == MODE_MANUAL:
             manual_w = self._get_manual_setpoint_w()
             effective_mode = "manual"
@@ -1758,7 +1971,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
-        battery_setpoints = self._split_setpoint(combined_setpoint_kw)
+        battery_setpoints = self._split_setpoint(
+            combined_setpoint_kw, control_action["mode"]
+        )
 
         return {
             "optimization_result": result,
