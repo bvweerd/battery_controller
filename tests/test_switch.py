@@ -265,7 +265,7 @@ async def test_async_setup_entry_adds_entity():
     await async_setup_entry(_make_hass(), entry, async_add_entities)
 
     async_add_entities.assert_called_once()
-    assert len(added) == 1
+    assert len(added) == 2
 
 
 @pytest.mark.asyncio
