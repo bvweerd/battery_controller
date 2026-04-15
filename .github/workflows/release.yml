@@ -34,14 +34,25 @@ jobs:
         id: changelog
         uses: mikepenz/release-changelog-builder-action@v6
         with:
+          commitMode: true
           configuration: |
             {
-              "categories": [
-                { "title": "## ✨ New features", "labels": ["enhancement", "feature"] },
-                { "title": "## 🐛 Bug fixes", "labels": ["bug", "fix"] },
-                { "title": "## 📚 Documentation", "labels": ["documentation"] },
-                { "title": "## 🔧 Other", "labels": [] }
+              "label_extractor": [
+                { "pattern": "^(feat|feature|add)(\\(.+\\))?!?[:\\s]", "target": "feature" },
+                { "pattern": "^(fix|bug|bugfix|hotfix)(\\(.+\\))?!?[:\\s]", "target": "bug" },
+                { "pattern": "^(docs?|documentation)(\\(.+\\))?[:\\s]", "target": "documentation" },
+                { "pattern": "^(ci|github.?actions?)(\\(.+\\))?[:\\s]", "target": "ci" },
+                { "pattern": "^(chore|refactor|test|perf|style|build|bump)(\\(.+\\))?[:\\s]", "target": "chore" }
               ],
+              "categories": [
+                { "title": "## ✨ New features",    "labels": ["feature", "enhancement"] },
+                { "title": "## 🐛 Bug fixes",       "labels": ["bug", "fix"] },
+                { "title": "## 📚 Documentation",   "labels": ["documentation"] },
+                { "title": "## 🔧 Other",           "labels": ["chore"] },
+                { "title": "## 👷 CI",              "labels": ["ci"] },
+                { "title": "## 📦 Uncategorized",  "labels": [] }
+              ],
+              "ignore_labels": ["dependabot"],
               "template": "#{{CHANGELOG}}\n\n**Full changelog**: #{{RELEASE_DIFF}}"
             }
         env:
