@@ -63,13 +63,15 @@ jobs:
         with:
           files: battery_controller.zip
           body: |
+            ${{ steps.changelog.outputs.changelog }}
+
+            ---
+
             ## Installation via HACS
             Install or update via HACS — the new version will be offered automatically.
 
             ## Manual installation
             Download `battery_controller.zip`, extract and copy `battery_controller/` to your `custom_components/` directory.
-
-            ${{ steps.changelog.outputs.changelog }}
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
