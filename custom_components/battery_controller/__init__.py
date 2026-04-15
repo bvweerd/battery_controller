@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -47,6 +48,9 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _MANIFEST: dict[str, Any] = json.loads(
     (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
 )
+SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION = "reset_charge_efficiency_calibration"
+SERVICE_ENTRY_ID = "entry_id"
+SERVICE_RESET_SCHEMA = vol.Schema({vol.Optional(SERVICE_ENTRY_ID): cv.string})
 
 # Keys stored in entry.options by number/select/switch entities that do NOT
 # require a full reload of the integration when they change.  Everything else
@@ -76,9 +80,56 @@ class BatteryControllerData:
     pv_devices: dict[str, DeviceInfo]  # keyed by subentry_id
 
 
+async def _async_handle_reset_charge_efficiency_calibration(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Reset charge-efficiency calibration for one or more entries."""
+    requested_entry_id = call.data.get(SERVICE_ENTRY_ID)
+    entries = hass.config_entries.async_entries(DOMAIN)
+
+    matched = [
+        entry
+        for entry in entries
+        if requested_entry_id is None or entry.entry_id == requested_entry_id
+    ]
+    if not matched:
+        _LOGGER.warning(
+            "Charge efficiency reset requested for unknown entry_id=%s",
+            requested_entry_id,
+        )
+        return
+
+    for entry in matched:
+        runtime_data = getattr(entry, "runtime_data", None)
+        if runtime_data is None:
+            _LOGGER.warning(
+                "Skipping charge efficiency reset for entry %s: runtime_data missing",
+                entry.entry_id,
+            )
+            continue
+        await runtime_data.optimization_coordinator.async_reset_charge_eff_calibration()
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register domain services once."""
+    if hass.services.has_service(DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION):
+        return
+
+    async def _handle_service(call: ServiceCall) -> None:
+        await _async_handle_reset_charge_efficiency_calibration(hass, call)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
+        _handle_service,
+        schema=SERVICE_RESET_SCHEMA,
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry by forwarding to sensor & number platforms."""
     _LOGGER.info("Setting up entry %s", entry.entry_id)
+    _async_register_services(hass)
 
     # Collect subentries by type
     pv_arrays = [
@@ -261,5 +312,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         _LOGGER.debug("Successfully unloaded entry %s", entry.entry_id)
+        remaining_entries = [
+            cfg_entry
+            for cfg_entry in hass.config_entries.async_entries(DOMAIN)
+            if cfg_entry.entry_id != entry.entry_id
+        ]
+        if not remaining_entries and hass.services.has_service(
+            DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION
+        ):
+            hass.services.async_remove(
+                DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION
+            )
 
     return unload_ok

@@ -390,6 +390,8 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 - If the current grid buy price is less than `λ / sqrt(RTE)`, it is profitable to charge — the stored energy is worth more than its purchase cost.
 - If the current feed-in price is greater than `λ × sqrt(RTE)`, it is profitable to discharge/export.
 
+Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces only the **charge-side SoC transition** for planning. The economic cost model and arbitrage thresholds continue to use the nominal `sqrt(RTE)` so a charging-speed limit is not double-counted as extra energy loss.
+
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
 **Use as terminal condition**: λ is passed to the next optimizer run as `terminal_shadow_price`, replacing the end-of-horizon feed-in price in the terminal condition. This makes consecutive 15-minute runs consistent with each other (rolling-horizon stability).
