@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from custom_components.battery_controller.__init__ import (
     BatteryControllerData,
+    _async_handle_reset_charge_efficiency_calibration,
+    _async_register_services,
     _update_listener,
 )
+from custom_components.battery_controller.const import DOMAIN
 from custom_components.battery_controller.const import (
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_CYCLE,
@@ -143,6 +147,9 @@ async def test_async_unload_entry_with_runtime_data():
 
     mock_hass = MagicMock()
     mock_hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    mock_hass.config_entries.async_entries = MagicMock(return_value=[entry])
+    mock_hass.services.has_service = MagicMock(return_value=True)
+    mock_hass.services.async_remove = MagicMock()
 
     result = await async_unload_entry(mock_hass, entry)
 
@@ -150,6 +157,9 @@ async def test_async_unload_entry_with_runtime_data():
     entry.runtime_data.forecast_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.optimization_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.weather_coordinator.async_shutdown.assert_called_once()
+    mock_hass.services.async_remove.assert_called_once_with(
+        DOMAIN, "reset_charge_efficiency_calibration"
+    )
 
 
 @pytest.mark.asyncio
@@ -162,6 +172,8 @@ async def test_async_unload_entry_no_runtime_data():
 
     mock_hass = MagicMock()
     mock_hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    mock_hass.config_entries.async_entries = MagicMock(return_value=[entry])
+    mock_hass.services.has_service = MagicMock(return_value=False)
 
     result = await async_unload_entry(mock_hass, entry)
     assert result is True
@@ -191,6 +203,8 @@ async def test_async_setup_entry_no_subentries():
 
     mock_hass = MagicMock()
     mock_hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    mock_hass.services.has_service = MagicMock(return_value=False)
+    mock_hass.services.async_register = MagicMock()
 
     entry = _make_entry(
         data={"price_sensor": "sensor.price"},
@@ -223,6 +237,7 @@ async def test_async_setup_entry_no_subentries():
     assert entry.runtime_data.optimization_coordinator is mock_opt_coord
     assert entry.runtime_data.battery_devices == {}
     assert entry.runtime_data.pv_devices == {}
+    mock_hass.services.async_register.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -246,6 +261,8 @@ async def test_async_setup_entry_with_battery_and_pv_subentries():
 
     mock_hass = MagicMock()
     mock_hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    mock_hass.services.has_service = MagicMock(return_value=False)
+    mock_hass.services.async_register = MagicMock()
 
     battery_sub = MagicMock()
     battery_sub.subentry_type = BATTERY_SUBENTRY_TYPE
@@ -307,6 +324,8 @@ async def test_async_setup_entry_battery_subentry_without_title():
 
     mock_hass = MagicMock()
     mock_hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    mock_hass.services.has_service = MagicMock(return_value=False)
+    mock_hass.services.async_register = MagicMock()
 
     battery_sub = MagicMock()
     battery_sub.subentry_type = BATTERY_SUBENTRY_TYPE
@@ -340,3 +359,41 @@ async def test_async_setup_entry_battery_subentry_without_title():
         await async_setup_entry(mock_hass, entry)
 
     assert "bat1" in entry.runtime_data.battery_devices
+
+
+def test_register_services_only_once():
+    """Service registration is idempotent."""
+    mock_hass = MagicMock()
+    mock_hass.services.has_service = MagicMock(side_effect=[False, True])
+    mock_hass.services.async_register = MagicMock()
+
+    _async_register_services(mock_hass)
+    _async_register_services(mock_hass)
+
+    mock_hass.services.async_register.assert_called_once()
+    handler = mock_hass.services.async_register.call_args.args[2]
+    assert inspect.iscoroutinefunction(handler)
+
+
+@pytest.mark.asyncio
+async def test_reset_charge_efficiency_service_targets_requested_entry():
+    """Reset service only affects the selected config entry."""
+    runtime_1 = _make_runtime_data()
+    runtime_1.optimization_coordinator.async_reset_charge_eff_calibration = AsyncMock()
+    runtime_2 = _make_runtime_data()
+    runtime_2.optimization_coordinator.async_reset_charge_eff_calibration = AsyncMock()
+
+    entry_1 = _make_entry(entry_id="entry-1")
+    entry_1.runtime_data = runtime_1
+    entry_2 = _make_entry(entry_id="entry-2")
+    entry_2.runtime_data = runtime_2
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_entries = MagicMock(return_value=[entry_1, entry_2])
+    call = MagicMock()
+    call.data = {"entry_id": "entry-2"}
+
+    await _async_handle_reset_charge_efficiency_calibration(mock_hass, call)
+
+    runtime_1.optimization_coordinator.async_reset_charge_eff_calibration.assert_not_called()
+    runtime_2.optimization_coordinator.async_reset_charge_eff_calibration.assert_called_once()

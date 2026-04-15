@@ -232,9 +232,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Charge efficiency calibration: rolling window of (actual_delta / planned_delta)
         # samples collected during active charging steps. The smoothed correction
-        # is applied as a multiplier on sqrt(RTE) to account for systematic
-        # over-estimation of charge efficiency (e.g. CV-phase derating near full SoC).
-        # Only non-DC-coupled systems are sampled to avoid confounding with passive PV.
+        # is applied as a multiplier on the DP's charge-side SoC transition only,
+        # to account for systematic over-estimation of how much SoC can be added
+        # within one step (e.g. CV-phase derating near full SoC). It does not
+        # change the economic cost model. Only non-DC-coupled systems are sampled
+        # to avoid confounding with passive PV.
         self._charge_eff_samples: deque[float] = deque(maxlen=20)
         self._charge_eff_correction: float = 1.0
 
@@ -1168,11 +1170,64 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             }
         )
 
+    async def async_reset_charge_eff_calibration(self) -> None:
+        """Reset charge-efficiency calibration to the nominal uncorrected state."""
+        if self._charge_eff_samples or abs(self._charge_eff_correction - 1.0) > 1e-9:
+            _LOGGER.info(
+                "Resetting charge efficiency calibration: %.3f (%d samples) -> 1.000",
+                self._charge_eff_correction,
+                len(self._charge_eff_samples),
+            )
+        self._charge_eff_samples.clear()
+        self._charge_eff_correction = 1.0
+        await self._async_save_charge_eff_calibration()
+
+    def _previous_charge_step_complete(self) -> bool:
+        """Return whether the previously planned first step has elapsed.
+
+        Charge-efficiency calibration compares the current SoC against the
+        previous optimizer run's first planned charging step. That comparison is
+        only valid once the entire scheduled step has finished; otherwise we
+        would compare a partial real-world step against a full-step plan and
+        systematically underestimate efficiency.
+
+        If timing metadata is unavailable or unparsable, fall back to the
+        previous behaviour and allow calibration rather than silently disabling
+        it.
+        """
+        if not isinstance(self.data, dict):
+            return True
+
+        step_start_times = self.data.get("step_start_times_iso")
+        step_durations = self.data.get("step_durations_hours")
+        if not step_start_times or not step_durations:
+            return True
+
+        step_start_raw = step_start_times[0]
+        if isinstance(step_start_raw, str):
+            step_start = dt_util.parse_datetime(step_start_raw)
+        elif isinstance(step_start_raw, datetime):
+            step_start = step_start_raw
+        else:
+            return True
+
+        if step_start is None:
+            return True
+
+        try:
+            step_duration_hours = float(step_durations[0])
+        except (TypeError, ValueError, IndexError):
+            return True
+
+        step_end_utc = dt_util.as_utc(step_start) + timedelta(hours=step_duration_hours)
+        return bool(dt_util.utcnow() >= step_end_utc)
+
     def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
         """Compare previous planned SoC to actual SoC and update charge efficiency correction.
 
         Samples are only collected when:
         - The previous optimizer step planned active charging (mode == 'charging')
+        - The full planned step has elapsed
         - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
         - DC-coupled PV is not active (passive PV charging would inflate actual delta)
         - The step does not cross the high-SoC charge derating threshold (the DP
@@ -1181,9 +1236,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
           with perfect efficiency)
 
         The correction is the mean of the last 20 ratios (actual/planned), clipped to
-        [0.5, 1.05].  It is applied as a squared factor on round_trip_efficiency so that
-        sqrt(corrected_RTE) = sqrt(RTE) * correction, affecting only the DP's charge
-        efficiency estimate without changing any other battery parameter.
+        [0.5, 1.05]. It is applied as a multiplier on the DP's charge-side SoC
+        transition so the optimizer plans less charge within one time step when
+        the battery charges slower than modelled. It does not alter the economic
+        cost calculation or degradation model.
         """
         if self._last_result is None:
             return
@@ -1194,6 +1250,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return
 
         if self._last_result.mode_schedule[0] != ACTION_CHARGING:
+            return
+
+        if not self._previous_charge_step_complete():
             return
 
         # Skip DC-coupled systems: passive PV charging during the step would
@@ -1643,10 +1702,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     new_min_pct,
                 )
 
-        # Apply charge efficiency correction: only the charge-side efficiency is
-        # reduced when the battery charges slower than modelled. Discharge
-        # efficiency stays at sqrt(nominal RTE) so that the break-even discharge
-        # price is not inflated by a charging-speed problem.
+        # Apply charge efficiency correction only to the charge-side SoC
+        # transition: when the battery charges slower than modelled, the DP
+        # should plan less charge within the step. Economic costs still use the
+        # nominal RTE so a charging-speed problem is not double-counted as extra
+        # energy cost or degradation.
         charge_eff_override: float | None = None
         if self._charge_eff_correction < 0.995:
             nominal_sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)

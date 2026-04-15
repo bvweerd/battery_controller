@@ -170,6 +170,27 @@ describe('runOptimizer', () => {
     expect(result.modes[0]).toBe('charging');
   });
 
+  test('charge efficiency correction reduces charged energy in the optimizer result', () => {
+    const baseInputs = {
+      priceFc: [0.10, 0.40],
+      feedInFc: [0.07, 0.07],
+      pvFc: [0, 0],
+      consumFc: [1.0, 1.0],
+      stepDurations: [0.25, 0.25],
+      degradCost: 0.004,
+      minPriceSpread: 0.05,
+      pvDcFc: null,
+      terminalShadowPrice: 0.25,
+    };
+    const nominal = runOptimizer(makeCfg(), 1.0, baseInputs);
+    const corrected = runOptimizer(makeCfg(), 1.0, {
+      ...baseInputs,
+      chargeEffCorrection: 0.7,
+    });
+
+    expect(corrected.socKwh[1]).toBeLessThan(nominal.socKwh[1]);
+  });
+
   test('discharges when price is high after cheap charging', () => {
     // Start at high SoC so discharge is possible at the expensive step
     const result = runSimple([0.10, 0.40], [0.07, 0.07], null, null, 5);

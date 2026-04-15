@@ -1,0 +1,10 @@
+reset_charge_efficiency_calibration:
+  name: Reset charge efficiency calibration
+  description: Reset the stored charge-efficiency correction back to 1.0 and clear all calibration samples.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: Optional. Reset only the specified Battery Controller config entry. Leave empty to reset all Battery Controller entries.
+      example: 01KK4RJJQZBD9C3FMEVYAB0VAB
+      selector:
+        text:

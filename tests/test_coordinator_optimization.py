@@ -2315,6 +2315,59 @@ def test_calibration_perfect_efficiency_no_correction(hass):
     assert coord._charge_eff_correction == pytest.approx(1.0)
 
 
+def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
+    """Do not sample halfway through the previously planned charging step."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],
+    )
+    coord.data = {
+        "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
+        "step_durations_hours": [1.0],
+    }
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: datetime(2026, 4, 15, 10, 15, tzinfo=timezone.utc),
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=5.25, soc_percent=52.5, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
+    """Collect a sample once the previous planned charging step has finished."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],
+    )
+    coord.data = {
+        "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
+        "step_durations_hours": [1.0],
+    }
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 1
+    assert coord._charge_eff_samples[0] == pytest.approx(1.0)
+    assert coord._charge_eff_correction == pytest.approx(1.0)
+
+
 def test_calibration_low_efficiency_updates_correction(hass):
     """When battery only charged to 80% of plan, correction moves below 1."""
     coord = _make_coordinator(hass)

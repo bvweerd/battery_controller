@@ -217,8 +217,6 @@ def calculate_step_cost(
     degradation_cost_per_kwh: float,  # EUR/kWh throughput
     battery_config: BatteryConfig,
     pv_dc_production_w: float = 0.0,  # DC-coupled PV production in W
-    charge_eff_override: float | None = None,  # Override sqrt(RTE) for charging
-    discharge_eff_override: float | None = None,  # Override sqrt(RTE) for discharging
 ) -> float:
     """Calculate cost for a single time step.
 
@@ -234,8 +232,6 @@ def calculate_step_cost(
          is action_w / sqrt_rte (also captured in SoC transition)
        - Throughput for degradation: charging = action_w * sqrt_rte * dt / 1000 (Wh
          actually stored); discharging = abs(action_w) / sqrt_rte * dt / 1000 (Wh drawn)
-       - When overrides are provided (from calculate_efficiency), these include
-         C-rate and SoC derating on top of the base sqrt(RTE).
 
     2. DC-coupled PV:
        - PV panels connected directly to battery inverter DC bus
@@ -265,18 +261,13 @@ def calculate_step_cost(
         degradation_cost_per_kwh: Degradation cost in EUR/kWh throughput
         battery_config: Battery configuration
         pv_dc_production_w: DC-coupled PV production in W (before inverter, clamped >= 0)
-        charge_eff_override: Actual charge efficiency including C-rate/SoC derating.
-        discharge_eff_override: Actual discharge efficiency including C-rate/SoC derating.
 
     Returns:
         Total cost in EUR for this time step
     """
     sqrt_rte = math.sqrt(rte)
-    # Use overridden efficiencies if provided (include C-rate/SoC derating)
-    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
-    discharge_eff = (
-        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
-    )
+    charge_eff = sqrt_rte
+    discharge_eff = sqrt_rte
     dc_eff = (
         battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else sqrt_rte
     )
@@ -412,10 +403,11 @@ def optimize_battery_schedule(
             stable rolling-horizon schedule because λ is derived from the full
             price structure rather than a single end-of-horizon price point.
             Must be ≥ 0; negative values are ignored (fallback to feed-in tail).
-        charge_eff_override: Override for the charge-side efficiency only (AC→DC).
-            When provided, charging SoC transitions use this value instead of
-            sqrt(RTE). Discharge efficiency is always sqrt(RTE) — only charging
-            is affected (e.g. when the battery charges slower than modelled).
+        charge_eff_override: Override for the charge-side SoC transition only.
+            When provided, charging state transitions use this value instead of
+            sqrt(RTE) so the DP plans less charge within the step when charging
+            is slower than modelled. The economic cost model still uses nominal
+            sqrt(RTE).
 
     Returns:
         OptimizationResult with optimal schedule
@@ -632,7 +624,6 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
-                    charge_eff_override=charge_eff,
                 )
 
                 # Total cost = immediate + future
@@ -661,7 +652,6 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
-                        charge_eff_override=charge_eff,
                     )
                     total_cost = step_cost + V[t + 1][0]
                     if total_cost < best_cost:
@@ -682,7 +672,6 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
-                        charge_eff_override=charge_eff,
                     )
                     total_cost = step_cost + V[t + 1][n_soc_states - 1]
                     if total_cost < best_cost:
