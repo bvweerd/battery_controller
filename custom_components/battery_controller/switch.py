@@ -45,6 +45,7 @@ async def async_setup_entry(
 
     entities = [
         BatteryOptimizationSwitch(hass, entry, device, optimization_coordinator),
+        PVCurtailmentSwitch(hass, entry, device, optimization_coordinator),
     ]
 
     async_add_entities(entities)
@@ -106,4 +107,67 @@ class BatteryOptimizationSwitch(
         _LOGGER.info("Disabling battery optimization")
         self._is_on = False
         self.coordinator.optimization_enabled = False
+        self.async_write_ha_state()
+
+
+class PVCurtailmentSwitch(
+    CoordinatorEntity[OptimizationCoordinator], RestoreEntity, SwitchEntity
+):
+    """Switch to signal that PV production is being curtailed.
+
+    When ON the optimizer receives zeroed PV forecasts and zero-grid mode
+    follows the DP schedule instead of the live grid sensor.  This prevents
+    the battery from discharging to maintain zero-grid when solar panels are
+    shut down by a negative feed-in price.
+
+    State is restored from the recorder on restart.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "pv_curtailed"
+    _attr_name = "PV Curtailed"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        device: DeviceInfo,
+        optimization_coordinator: OptimizationCoordinator,
+    ):
+        """Initialize the switch entity."""
+        super().__init__(optimization_coordinator)
+        self.hass = hass
+        self._entry = entry
+        self._attr_device_info = device
+        self._attr_unique_id = f"{entry.entry_id}_pv_curtailed"
+        self._is_on = False
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known state on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self._is_on = last_state.state == STATE_ON
+        self.coordinator.pv_curtailed = self._is_on
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if PV curtailment is active."""
+        return self._is_on
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Activate PV curtailment and immediately re-run the optimizer."""
+        _LOGGER.info("PV curtailment activated")
+        self._is_on = True
+        self.coordinator.pv_curtailed = True
+        await self.coordinator.async_request_refresh()
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Deactivate PV curtailment and immediately re-run the optimizer."""
+        _LOGGER.info("PV curtailment deactivated")
+        self._is_on = False
+        self.coordinator.pv_curtailed = False
+        await self.coordinator.async_request_refresh()
         self.async_write_ha_state()

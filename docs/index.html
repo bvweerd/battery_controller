@@ -311,6 +311,10 @@
         <input id="sp-step-h" type="number" value="0.25" step="0.0833" min="0.0833" max="1" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Terminal shadow price (€/kWh, 0=auto)</span>
         <input id="sp-terminal" type="number" value="0" step="0.01" class="sim-input mt-0.5"></label>
+      <label class="flex items-center gap-2 mt-2 cursor-pointer">
+        <input id="sp-pv-curtailed" type="checkbox" class="w-4 h-4 rounded">
+        <span class="kv-label">PV Curtailed (zero out all PV forecasts)</span>
+      </label>
 
       <div class="pt-2">
         <button id="sim-run" class="w-full py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 active:bg-blue-800 transition-colors">
@@ -735,8 +739,11 @@ function renderDiagnostics(raw) {
     kv('Max charge', `${bc.max_charge_power_kw?.toFixed(2)} kW`) +
     kv('Max discharge', `${bc.max_discharge_power_kw?.toFixed(2)} kW`);
 
-  const chgEffCorr = opt.charge_eff_correction;
-  const chgEffSamples = opt.charge_eff_samples;
+  const lastRun = (opt.optimizer_run_log && opt.optimizer_run_log.length)
+    ? opt.optimizer_run_log[opt.optimizer_run_log.length - 1]
+    : null;
+  const chgEffCorr = opt.charge_eff_correction ?? lastRun?.charge_eff_correction;
+  const chgEffSamples = opt.charge_eff_samples ?? lastRun?.charge_eff_samples;
   const chgEffCorrStr = chgEffCorr !== undefined
     ? `${(chgEffCorr * 100).toFixed(1)}%` + (chgEffSamples !== undefined ? ` (n=${chgEffSamples})` : '')
     : '—';
@@ -1076,6 +1083,7 @@ function getSimParams() {
     minPriceSpread:g('sp-spread'),
     stepH:         g('sp-step-h') || 0.25,
     terminalShadowPrice: g('sp-terminal') || null,
+    charge_eff_correction: window._simChargeEffCorrection ?? null,
   };
 }
 
@@ -1141,6 +1149,11 @@ function prefillSim(d) {
   if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
     set('sp-terminal', sched.terminal_shadow_price);
   }
+  window._simChargeEffCorrection =
+    opt.charge_eff_correction
+    ?? ((opt.optimizer_run_log && opt.optimizer_run_log.length)
+      ? opt.optimizer_run_log[opt.optimizer_run_log.length - 1].charge_eff_correction
+      : null);
 }
 
 function runSimulator() {
@@ -1158,11 +1171,16 @@ function runSimulator() {
       const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
       const simUsableKwh = (p.maxSocKwh - p.minSocKwh) || 1;
       const degradPerKwhSim = p.degradation / simUsableKwh;
+      const pvCurtailed = document.getElementById('sp-pv-curtailed').checked;
+      const zeroes = new Array(price.length).fill(0);
       const inputs  = {
-        priceFc: price, feedInFc: feedIn, pvFc: pv, consumFc: consump,
+        priceFc: price, feedInFc: feedIn,
+        pvFc: pvCurtailed ? zeroes : pv,
+        consumFc: consump,
         stepDurations: new Array(price.length).fill(stepH),
         degradCost: degradPerKwhSim, minPriceSpread: p.minPriceSpread,
         pvDcFc: null, terminalShadowPrice: termSP,
+        chargeEffCorrection: p.charge_eff_correction,
       };
 
       const t0  = performance.now();

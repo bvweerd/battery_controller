@@ -75,11 +75,11 @@ function findNearestSocIdx(socWh, socStates) {
 }
 
 function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice) {
+               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride) {
 
   const rte      = cfg.rte;
   const sqrtRte  = Math.sqrt(rte);
-  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
+  const chargeEff = chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
   const minSocWh = Math.round(cfg.minSocKwh * 1000);
   const maxSocWh = Math.round(cfg.maxSocKwh * 1000);
 
@@ -229,10 +229,10 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh, terminalPrice, nSteps };
 }
 
-function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
+function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, chargeEffOverride) {
   const { policy, socStates, stepDurations, minSocWh, maxSocWh, nSteps } = dpResult;
   const sqrtRte  = Math.sqrt(cfg.rte);
-  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
+  const chargeEff = chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
   let curSocWh = currentSocKwh * 1000;
   const powerKw = [], modes = [], socKwh = [currentSocKwh];
 
@@ -273,7 +273,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc) {
  */
 function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
   const sqrtRte   = Math.sqrt(cfg.rte);
-  const chargeEff = sqrtRte;  // Discharge always uses nominal sqrtRte
+  const chargeEff = cfg.chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
   const minSocWh = cfg.minSocKwh * 1000;
   const maxSocWh = cfg.maxSocKwh * 1000;
   const socKwh   = [currentSocKwh];
@@ -496,11 +496,16 @@ function computeTotalCost(powerKw, socKwh, inputs, cfg) {
 
 function runOptimizer(cfg, currentSocKwh, inputs) {
   const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost,
-          minPriceSpread, pvDcFc, terminalShadowPrice } = inputs;
+          minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffCorrection } = inputs;
+  const nominalSqrtRte = Math.sqrt(cfg.rte);
+  const chargeEffOverride =
+    chargeEffCorrection != null && chargeEffCorrection < 0.995
+      ? nominalSqrtRte * chargeEffCorrection
+      : null;
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice);
-  let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc);
+                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride);
+  let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc, chargeEffOverride);
 
   // Post-processing filters (matching optimizer.py)
   const oscResult = filterOscillations(
@@ -515,11 +520,15 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   modes   = mcResult.modes;
 
   // Rebuild SoC from filtered schedule
-  const socKwh = rebuildSoc(powerKw, modes, cfg, currentSocKwh, dp.stepDurations, pvDcFc);
+  const socKwh = rebuildSoc(
+    powerKw, modes, { ...cfg, chargeEffOverride }, currentSocKwh, dp.stepDurations, pvDcFc
+  );
 
   const shadow   = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);
   const baseline = computeBaselineCost(inputs, cfg);
-  const total    = computeScheduleCost(powerKw, socKwh, inputs, cfg, dp.terminalPrice);
+  const total    = computeScheduleCost(
+    powerKw, socKwh, inputs, cfg, dp.terminalPrice
+  );
 
   // Savings: value added by battery actions only.
   // Subtract initial terminal value so savings = 0 when battery is idle,

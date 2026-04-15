@@ -13,7 +13,6 @@ compared with the raw optimizer schedule.
 
 import json
 import math
-import sys
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -69,6 +68,15 @@ class BatteryConfig:
 def load_diagnostics(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def get_charge_eff_override(
+    rte: float, charge_eff_correction: float | None
+) -> float | None:
+    """Return corrected charge-side efficiency when diagnostics contain a calibration."""
+    if charge_eff_correction is None or charge_eff_correction >= 0.995:
+        return None
+    return math.sqrt(rte) * charge_eff_correction
 
 
 def extract_inputs(diag: dict) -> tuple:
@@ -142,6 +150,11 @@ def extract_inputs(diag: dict) -> tuple:
 
     # Terminal shadow price stored in schedule for DP reproduction
     terminal_shadow_price = sched.get("terminal_shadow_price")
+    charge_eff_correction = opt_data.get("charge_eff_correction")
+    if charge_eff_correction is None:
+        run_log = opt_data.get("optimizer_run_log") or []
+        if run_log:
+            charge_eff_correction = run_log[-1].get("charge_eff_correction")
 
     return (
         battery,
@@ -156,6 +169,7 @@ def extract_inputs(diag: dict) -> tuple:
         min_price_spread,
         fixed_feed_in_price,
         terminal_shadow_price,
+        charge_eff_correction,
         opt_data,
         sched,
     )
@@ -275,6 +289,7 @@ def run_dp(
     min_price_spread,
     pv_dc_forecast=None,
     terminal_shadow_price=None,
+    charge_eff_override=None,
 ):
     """Run the DP backward pass and return V, policy, soc_states, soc_resolution_wh."""
     if pv_dc_forecast is None:
@@ -299,7 +314,9 @@ def run_dp(
     min_soc_wh = round(battery_config.min_soc_kwh * 1000)
     max_soc_wh = round(battery_config.max_soc_kwh * 1000)
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = sqrt_rte  # Discharge always uses nominal sqrt_rte
+    charge_eff = (
+        charge_eff_override if charge_eff_override is not None else sqrt_rte
+    )  # Discharge always uses nominal sqrt_rte
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
@@ -462,10 +479,13 @@ def forward_pass(
     n_steps,
     battery_config,
     pv_dc_forecast,
+    charge_eff_override=None,
 ):
     """Execute the forward pass to get the schedule."""
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = sqrt_rte  # Discharge always uses nominal sqrt_rte
+    charge_eff = (
+        charge_eff_override if charge_eff_override is not None else sqrt_rte
+    )  # Discharge always uses nominal sqrt_rte
     current_soc = float(
         soc_states[_find_nearest_soc_idx(int(current_soc_kwh * 1000), soc_states)]
     )
@@ -909,7 +929,22 @@ def print_min_spread_analysis(battery, degradation_cost, price_forecast):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "diagnostics.json"
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Battery controller diagnostic simulator"
+    )
+    parser.add_argument(
+        "path", nargs="?", default="diagnostics.json", help="Diagnostics JSON file"
+    )
+    parser.add_argument(
+        "--pv-curtailed",
+        action="store_true",
+        help="Simulate PV curtailment: zero out all PV forecasts before running the DP",
+    )
+    args = parser.parse_args()
+
+    path = args.path
     diag = load_diagnostics(path)
 
     (
@@ -925,6 +960,7 @@ def main():
         min_price_spread,
         fixed_feed_in_price,
         terminal_shadow_price,
+        charge_eff_correction,
         opt_data,
         sched,
     ) = extract_inputs(diag)
@@ -932,7 +968,16 @@ def main():
     n_steps = len(price_forecast)
     pv_dc_forecast = [0.0] * n_steps
 
-    print(f"\nLoaded {path}")
+    # PV curtailment override (mirrors the coordinator's PV Curtailed switch)
+    if args.pv_curtailed:
+        pv_forecast = [0.0] * n_steps
+        pv_dc_forecast = [0.0] * n_steps
+
+    charge_eff_override = get_charge_eff_override(
+        battery.round_trip_efficiency, charge_eff_correction
+    )
+
+    print(f"\nLoaded {path}" + (" [PV CURTAILED]" if args.pv_curtailed else ""))
     print(
         f"  {n_steps} steps, SoC={current_soc_kwh:.4f} kWh, "
         f"degradation={degradation_cost:.3f} €/kWh, "
@@ -985,6 +1030,7 @@ def main():
         min_price_spread=min_price_spread,
         pv_dc_forecast=pv_dc_forecast,
         terminal_shadow_price=terminal_shadow_price,
+        charge_eff_override=charge_eff_override,
     )
 
     print(
@@ -1005,6 +1051,7 @@ def main():
         n_steps=n_steps,
         battery_config=battery,
         pv_dc_forecast=pv_dc_forecast,
+        charge_eff_override=charge_eff_override,
     )
 
     # Recorded schedule from diagnostics

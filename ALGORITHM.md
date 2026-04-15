@@ -17,6 +17,7 @@ This document explains step by step how the dynamic programming (DP) engine in B
 9. [Shadow Price Calculation](#9-shadow-price-calculation)
 10. [Rolling-Horizon Execution](#10-rolling-horizon-execution)
 11. [Numerical Considerations](#11-numerical-considerations)
+12. [Multi-Battery Dispatch](#12-multi-battery-dispatch)
 
 ---
 
@@ -351,6 +352,23 @@ The window size is `max(2 h, battery_capacity / max_discharge_power)` — larger
 
 After suppression, the SoC schedule is recalculated to remain consistent.
 
+### 8.3 PV Curtailment Override
+
+When the **PV Curtailed** switch is enabled in the integration, the coordinator zeroes both `pv_forecast` and `pv_dc_forecast` before passing them to the optimizer. This corrects for the case where solar inverters automatically shut down at negative feed-in prices, leaving the controller with a phantom PV production in its forecast.
+
+Effect on the optimizer:
+- `net_load` is higher (consumption is no longer offset by PV) → more incentive to charge at negative prices.
+- DC PV passive charging is removed from SoC transitions → the DP no longer expects "free" battery top-up from the sun.
+- With negative prices the optimal action is charging from the grid; zeroing PV ensures the planned charge rate is not artificially reduced by expected solar contribution.
+
+Effect on real-time control:
+- **Zero-grid mode**: instead of reacting to the live grid sensor (which would trigger discharging to cover load), the controller follows the DP schedule. With negative prices and zeroed PV that schedule is charging, not discharging.
+- **Hybrid/follow-schedule**: unchanged — the corrected forecast is already reflected in the optimizer output.
+
+This flag is a manual override, intended to be toggled by a Home Assistant automation that watches the inverter's export-limitation status sensor.
+
+---
+
 ### 8.2 Micro-Cycle Filter
 
 Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
@@ -371,6 +389,8 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 **Interpretation**:
 - If the current grid buy price is less than `λ / sqrt(RTE)`, it is profitable to charge — the stored energy is worth more than its purchase cost.
 - If the current feed-in price is greater than `λ × sqrt(RTE)`, it is profitable to discharge/export.
+
+Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces only the **charge-side SoC transition** for planning. The economic cost model and arbitrage thresholds continue to use the nominal `sqrt(RTE)` so a charging-speed limit is not double-counted as extra energy loss.
 
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
@@ -517,3 +537,49 @@ Output: power_schedule_kw, mode_schedule, soc_schedule_kwh,
          ▼
 [10] Execute step 0, save λ, wait 15 min, repeat
 ```
+
+---
+
+## 12. Multi-Battery Dispatch
+
+The DP optimizer treats all configured batteries as a single aggregated virtual battery (`aggregate_battery_configs`). After the optimizer produces a combined setpoint, `_split_setpoint` distributes it across the individual inverters.
+
+### SoC-gap triggered concentration
+
+The dispatch strategy is determined by the **relative-SoC gap** between batteries:
+
+```
+rel_soc_i = (soc_i - min_soc_i) / (max_soc_i - min_soc_i)   ∈ [0, 1]
+gap = max(rel_soc) − min(rel_soc)
+```
+
+| Gap | Strategy |
+|-----|----------|
+| `gap < 0.10` | **Concentrate** on one battery |
+| `gap ≥ 0.10` | **Proportional split** to rebalance |
+
+**Why concentration at low gap:** splitting a small setpoint (e.g. 100 W) across two inverters results in each receiving ~50 W. Most home battery inverters are inefficient at very low power (high fixed conversion losses relative to throughput). Concentrating on one inverter avoids this and provides more stable real-time tracking in zero-grid mode.
+
+**Why proportional split at high gap:** when SoC has diverged, one battery is being disproportionately cycled. Proportional splitting (weighted by available headroom/energy) rebalances the SoC levels over time.
+
+### Battery selection for concentration
+
+When concentrating, which battery is chosen depends on the control mode:
+
+| Mode | Selection criterion |
+|------|---------------------|
+| `zero_grid` / `hybrid` | Closest to 50% rel\_soc — can handle charge and discharge direction changes longest without hitting a SoC limit |
+| Scheduled charge | Lowest rel\_soc (most headroom) |
+| Scheduled discharge | Highest rel\_soc (most energy available) |
+
+**Hysteresis:** the active battery only changes when the best candidate's score exceeds the current battery's score by more than `_SOC_HYSTERESIS = 0.05`. This creates three zones:
+
+```
+gap < 0.05   → concentrate, no switch (hysteresis holds)
+0.05 ≤ gap < 0.10 → concentrate, switch to better battery
+gap ≥ 0.10   → proportional split, reset active battery selection
+```
+
+### Power-overflow redistribution
+
+Within the proportional split path, batteries that reach their `max_charge_power_kw` or `max_discharge_power_kw` limit have the overflow redistributed iteratively to the remaining batteries. This ensures the combined setpoint is fully absorbed even when one inverter is at its power limit.

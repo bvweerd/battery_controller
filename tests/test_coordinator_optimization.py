@@ -114,7 +114,7 @@ async def test_follow_schedule_commitment_locks_published_setpoint(hass, monkeyp
     monkeypatch.setattr(
         coordinator,
         "_split_setpoint",
-        lambda combined_setpoint_kw: {"bat1": combined_setpoint_kw},
+        lambda combined_setpoint_kw, _mode="": {"bat1": combined_setpoint_kw},
     )
     monkeypatch.setattr(coordinator._price_model, "has_data", lambda: False)
     monkeypatch.setattr(coordinator._feed_in_price_model, "has_data", lambda: False)
@@ -696,7 +696,7 @@ def test_split_setpoint_no_batteries(hass):
 
 
 def test_split_setpoint_charging(hass):
-    """_split_setpoint distributes charge proportionally to headroom (lines 828-841)."""
+    """_split_setpoint proportionally splits charge when SoC gap >= threshold."""
     from custom_components.battery_controller.battery_model import (
         BatteryConfig,
         BatteryState,
@@ -734,7 +734,7 @@ def test_split_setpoint_charging(hass):
 
 
 def test_split_setpoint_discharging(hass):
-    """_split_setpoint distributes discharge proportionally to available energy (843-856)."""
+    """_split_setpoint sends full discharge to single battery when gap < threshold."""
     from custom_components.battery_controller.battery_model import (
         BatteryConfig,
         BatteryState,
@@ -759,7 +759,7 @@ def test_split_setpoint_discharging(hass):
 
 
 def test_split_setpoint_idle(hass):
-    """_split_setpoint returns zeros for idle (line 859)."""
+    """_split_setpoint returns zeros for idle."""
     from custom_components.battery_controller.battery_model import BatteryConfig
 
     coord = _make_coordinator(hass)
@@ -1398,7 +1398,7 @@ async def test_handle_realtime_update_changed_setpoint(hass, monkeypatch):
     )
     monkeypatch.setattr(coord, "get_current_battery_state", lambda: new_battery_state)
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -300.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     coord.zero_grid_controller = MagicMock()
     coord.zero_grid_controller.get_control_action = MagicMock(
         return_value={
@@ -1539,7 +1539,7 @@ def test_resolve_controller_mode_unknown_effective_mode(hass):
 
 
 def test_split_setpoint_charging_zero_headroom(hass):
-    """_split_setpoint returns 0 when total_headroom is 0 (line 842)."""
+    """_split_setpoint returns 0 when the concentrated battery is already at max SoC."""
     from custom_components.battery_controller.battery_model import (
         BatteryConfig,
         BatteryState,
@@ -1567,7 +1567,7 @@ def test_split_setpoint_charging_zero_headroom(hass):
 
 
 def test_split_setpoint_discharging_zero_available(hass):
-    """_split_setpoint returns 0 when total_available is 0 (line 857)."""
+    """_split_setpoint returns 0 when the concentrated battery is already at min SoC."""
     from custom_components.battery_controller.battery_model import (
         BatteryConfig,
         BatteryState,
@@ -1714,7 +1714,7 @@ async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
         lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 50.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
     monkeypatch.setattr(coord, "async_set_updated_data", lambda d: None)
 
     await coord._handle_realtime_update(datetime.now(timezone.utc))
@@ -1772,7 +1772,7 @@ async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
         ),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 100.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
     monkeypatch.setattr(coord, "async_set_updated_data", lambda d: None)
 
     await coord._handle_realtime_update(datetime.now(timezone.utc))
@@ -1872,7 +1872,7 @@ async def test_run_optimization_price_sensor_unavailable_uses_model_fallback(
         lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     monkeypatch.setattr(coord._price_model, "has_data", lambda: True)
     monkeypatch.setattr(
         coord._price_model,
@@ -1969,7 +1969,7 @@ async def test_run_optimization_feed_in_sensor_unavailable_uses_fixed_price(
         lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
     monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
     monkeypatch.setattr(
@@ -2084,7 +2084,7 @@ async def test_run_optimization_mode_zero_grid(hass, monkeypatch):
         lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 50.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
     monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
 
@@ -2178,7 +2178,7 @@ async def test_run_optimization_mode_manual(hass, monkeypatch):
         lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 50.0)
-    monkeypatch.setattr(coord, "_split_setpoint", lambda kw: {"bat1": kw})
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     monkeypatch.setattr(coord, "_get_manual_setpoint_w", lambda: -900.0)
     monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
     monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
@@ -2305,6 +2305,59 @@ def test_calibration_perfect_efficiency_no_correction(hass):
     )
 
     # Actual SoC reached exactly the planned value
+    battery_state = BatteryState(
+        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 1
+    assert coord._charge_eff_samples[0] == pytest.approx(1.0)
+    assert coord._charge_eff_correction == pytest.approx(1.0)
+
+
+def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
+    """Do not sample halfway through the previously planned charging step."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],
+    )
+    coord.data = {
+        "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
+        "step_durations_hours": [1.0],
+    }
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: datetime(2026, 4, 15, 10, 15, tzinfo=timezone.utc),
+    )
+
+    battery_state = BatteryState(
+        soc_kwh=5.25, soc_percent=52.5, power_kw=1.0, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
+    """Collect a sample once the previous planned charging step has finished."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[5.0, 6.0],
+    )
+    coord.data = {
+        "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
+        "step_durations_hours": [1.0],
+    }
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
+    )
+
     battery_state = BatteryState(
         soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
     )
@@ -2445,3 +2498,179 @@ def test_calibration_not_applied_for_dc_coupled(hass):
     # No sample should have been added for DC-coupled system
     assert len(coord._charge_eff_samples) == 0
     assert coord._charge_eff_correction == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-battery dispatch: SoC-gap triggered concentration
+# ---------------------------------------------------------------------------
+
+
+def _make_two_battery_coord(hass, soc1_kwh: float, soc2_kwh: float):
+    """Helper: coordinator with two identical 10 kWh batteries at given SoC levels."""
+    from custom_components.battery_controller.battery_model import (
+        BatteryConfig,
+        BatteryState,
+    )
+
+    coord = _make_coordinator(hass)
+    cfg = BatteryConfig(
+        capacity_kwh=10.0,
+        max_charge_power_kw=5.0,
+        max_discharge_power_kw=5.0,
+        round_trip_efficiency=0.90,
+        min_soc_percent=10.0,
+        max_soc_percent=90.0,
+    )
+    coord._individual_battery_configs = [("bat1", cfg), ("bat2", cfg)]
+    coord._per_battery_states = {
+        "bat1": BatteryState(
+            soc_kwh=soc1_kwh, soc_percent=soc1_kwh * 10, power_kw=0.0, mode="idle"
+        ),
+        "bat2": BatteryState(
+            soc_kwh=soc2_kwh, soc_percent=soc2_kwh * 10, power_kw=0.0, mode="idle"
+        ),
+    }
+    return coord
+
+
+def test_split_setpoint_concentrate_small_charge(hass):
+    """Below gap threshold: full charge setpoint goes to lowest-rel_soc battery."""
+    # bat1 rel_soc=(5-1)/8=0.5, bat2 rel_soc=(5.2-1)/8=0.525 → gap=0.025 < 0.10
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    result = coord._split_setpoint(0.1, "follow_schedule")  # 100 W charge
+    # bat1 has lower rel_soc → gets the setpoint; bat2 stays at 0
+    assert result["bat1"] == pytest.approx(0.1, abs=1e-6)
+    assert result["bat2"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_split_setpoint_concentrate_small_discharge(hass):
+    """Below gap threshold: full discharge setpoint goes to highest-rel_soc battery."""
+    # bat1 rel_soc=0.5, bat2 rel_soc=0.525 → gap=0.025 < 0.10
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    result = coord._split_setpoint(-0.1, "follow_schedule")  # 100 W discharge
+    # bat2 has higher rel_soc → gets the discharge
+    assert result["bat2"] == pytest.approx(-0.1, abs=1e-6)
+    assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_split_setpoint_proportional_above_gap(hass):
+    """Above split threshold: proportional split is used to rebalance SoC."""
+    # bat1 rel_soc=(3-1)/8=0.25, bat2 rel_soc=(7-1)/8=0.75 → gap=0.5 >= 0.10
+    coord = _make_two_battery_coord(hass, soc1_kwh=3.0, soc2_kwh=7.0)
+    result = coord._split_setpoint(2.0, "follow_schedule")
+    # Both batteries should receive power
+    assert result["bat1"] > 0
+    assert result["bat2"] > 0
+    assert result["bat1"] + result["bat2"] == pytest.approx(2.0, abs=0.01)
+    # bat1 has more headroom (9-3=6) vs bat2 (9-7=2) → bat1 gets more
+    assert result["bat1"] > result["bat2"]
+
+
+def test_split_setpoint_overflow_redistribution(hass):
+    """Power overflow above max_charge_power is redistributed to the other battery."""
+    from custom_components.battery_controller.battery_model import (
+        BatteryConfig,
+        BatteryState,
+    )
+
+    coord = _make_coordinator(hass)
+    cfg_small = BatteryConfig(
+        capacity_kwh=5.0,
+        max_charge_power_kw=1.0,  # low max
+        max_discharge_power_kw=5.0,
+        round_trip_efficiency=0.90,
+        min_soc_percent=10.0,
+        max_soc_percent=90.0,
+    )
+    cfg_large = BatteryConfig(
+        capacity_kwh=5.0,
+        max_charge_power_kw=5.0,
+        max_discharge_power_kw=5.0,
+        round_trip_efficiency=0.90,
+        min_soc_percent=10.0,
+        max_soc_percent=90.0,
+    )
+    # rel_soc: bat1=(2.5-0.5)/4=0.5, bat2=(3.0-0.5)/4=0.625 → gap=0.125 >= 0.05 → proportional
+    coord._individual_battery_configs = [("bat1", cfg_small), ("bat2", cfg_large)]
+    coord._per_battery_states = {
+        "bat1": BatteryState(soc_kwh=2.5, soc_percent=50.0, power_kw=0.0, mode="idle"),
+        "bat2": BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    }
+    result = coord._split_setpoint(4.0, "follow_schedule")
+    # bat1 capped at 1 kW, bat2 absorbs remainder → total must equal 4 kW
+    assert result["bat1"] == pytest.approx(1.0, abs=0.01)
+    assert result["bat1"] + result["bat2"] == pytest.approx(4.0, abs=0.01)
+
+
+def test_split_setpoint_zero_grid_closest_to_midpoint(hass):
+    """Zero-grid: concentrate on battery closest to 50% rel_soc."""
+    # bat1 rel_soc=0.5 (exact mid), bat2 rel_soc=0.525 → gap=0.025 < 0.10
+    # zero_grid should pick bat1 (closer to 50%)
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    result = coord._split_setpoint(0.1, "zero_grid")
+    assert result["bat1"] == pytest.approx(0.1, abs=1e-6)
+    assert result["bat2"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_split_setpoint_zero_grid_discharge_same_battery(hass):
+    """Zero-grid: same battery used for discharge as for charge (no direction switch)."""
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    # First call: charge → bat1 selected (closest to 50%)
+    coord._split_setpoint(0.1, "zero_grid")
+    active_after_charge = coord._zero_grid_active_battery
+    # Second call: discharge → should stay on same battery (hysteresis, gap still < 0.10)
+    coord._split_setpoint(-0.1, "zero_grid")
+    assert coord._zero_grid_active_battery == active_after_charge
+
+
+def test_split_setpoint_hysteresis_prevents_switch(hass):
+    """Active battery is not replaced unless challenger advantage exceeds hysteresis."""
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    # Initial selection for scheduled charge: bat1 (rel_soc=0.5 < 0.525)
+    coord._split_setpoint(0.1, "follow_schedule")
+    assert coord._scheduled_active_battery == "bat1"
+    # Nudge bat2 slightly lower but advantage still within hysteresis (< 0.05)
+    from custom_components.battery_controller.battery_model import BatteryState
+
+    coord._per_battery_states["bat2"] = BatteryState(
+        soc_kwh=4.7, soc_percent=47.0, power_kw=0.0, mode="idle"
+    )
+    # bat2 rel_soc=(4.7-1)/8=0.4625, bat1=0.5 → advantage=0.0375 < 0.05 hysteresis
+    # gap=0.0375 < 0.10 → still in concentration mode
+    coord._split_setpoint(0.1, "follow_schedule")
+    assert coord._scheduled_active_battery == "bat1"  # no switch
+
+
+def test_split_setpoint_hysteresis_allows_switch(hass):
+    """Active battery switches when challenger advantage exceeds hysteresis (gap still < split threshold)."""
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    coord._split_setpoint(0.1, "follow_schedule")
+    assert coord._scheduled_active_battery == "bat1"
+    # Drop bat2 so advantage = 0.5 - 0.3875 = 0.1125 > 0.05 hysteresis, gap=0.1125 > 0.10 split
+    # → need gap in (0.05, 0.10): bat2 at rel_soc such that advantage > 0.05 but gap < 0.10
+    # bat2 rel_soc = 0.5 - 0.07 = 0.43 → advantage=0.07 > 0.05, gap=0.07 < 0.10
+    from custom_components.battery_controller.battery_model import BatteryState
+
+    # rel_soc=0.43 → soc_kwh = 0.43*8 + 1 = 4.44
+    coord._per_battery_states["bat2"] = BatteryState(
+        soc_kwh=4.44, soc_percent=44.4, power_kw=0.0, mode="idle"
+    )
+    coord._split_setpoint(0.1, "follow_schedule")
+    assert coord._scheduled_active_battery == "bat2"  # switched
+
+
+def test_split_setpoint_gap_resets_active_battery(hass):
+    """When gap crosses split threshold, active battery state is cleared for fresh selection."""
+    coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
+    coord._split_setpoint(0.1, "follow_schedule")
+    assert coord._scheduled_active_battery == "bat1"
+    # Force SoC gap >= 0.10
+    from custom_components.battery_controller.battery_model import BatteryState
+
+    coord._per_battery_states["bat2"] = BatteryState(
+        soc_kwh=7.5, soc_percent=75.0, power_kw=0.0, mode="idle"
+    )
+    # bat1 rel_soc=0.5, bat2 rel_soc=(7.5-1)/8=0.8125 → gap=0.3125 >= 0.10
+    coord._split_setpoint(0.1, "follow_schedule")
+    # Gap crossed threshold → proportional split → active battery reset to None
+    assert coord._scheduled_active_battery is None

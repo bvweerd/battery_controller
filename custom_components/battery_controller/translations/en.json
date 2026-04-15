@@ -371,6 +371,9 @@
     "switch": {
       "optimization_enabled": {
         "name": "Optimization Enabled"
+      },
+      "pv_curtailed": {
+        "name": "PV Curtailed"
       }
     },
     "binary_sensor": {
