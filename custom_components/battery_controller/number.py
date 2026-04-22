@@ -111,6 +111,7 @@ class BatteryControllerNumber(NumberEntity):
         )
 
     async def async_set_native_value(self, value: float) -> None:
+        value = max(self.native_min_value, min(self.native_max_value, value))
         await self._set_runtime_value(self._conf_key, value)
         self.async_write_ha_state()
 
