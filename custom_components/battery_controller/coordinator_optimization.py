@@ -978,25 +978,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             cfg for sid, cfg in self._individual_battery_configs if sid == winner
         )
         winner_state = self._per_battery_states.get(winner)
+        winner_soc_kwh = (
+            winner_state.soc_kwh
+            if winner_state is not None
+            else (winner_cfg.min_soc_kwh + winner_cfg.max_soc_kwh) / 2
+        )
 
         if total_kw > 0:
-            headroom = (
-                max(0.0, winner_cfg.max_soc_kwh - winner_state.soc_kwh)
-                if winner_state is not None
-                else winner_cfg.max_soc_kwh * 0.5
-            )
+            headroom = max(0.0, winner_cfg.max_soc_kwh - winner_soc_kwh)
             if headroom <= 0:
                 return result
-            clamped = min(total_kw, winner_cfg.max_charge_power_kw)
+            clamped = min(total_kw, winner_cfg.max_charge_at_soc(winner_soc_kwh))
         else:
-            available = (
-                max(0.0, winner_state.soc_kwh - winner_cfg.min_soc_kwh)
-                if winner_state is not None
-                else winner_cfg.capacity_kwh * 0.4
-            )
+            available = max(0.0, winner_soc_kwh - winner_cfg.min_soc_kwh)
             if available <= 0:
                 return result
-            clamped = max(total_kw, -winner_cfg.max_discharge_power_kw)
+            clamped = max(total_kw, -winner_cfg.max_discharge_at_soc(winner_soc_kwh))
 
         result[winner] = clamped
         overflow = total_kw - clamped
@@ -1063,12 +1060,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     if total_weight > 0
                     else remaining_kw / len(remaining)
                 )
+                state = self._per_battery_states.get(sid)
+                soc_kwh = (
+                    state.soc_kwh
+                    if state is not None
+                    else (cfg.min_soc_kwh + cfg.max_soc_kwh) / 2
+                )
                 if remaining_kw > 0:
-                    clamped = min(raw, cfg.max_charge_power_kw)
-                    at_limit = clamped >= cfg.max_charge_power_kw - 1e-6
+                    max_chg = cfg.max_charge_at_soc(soc_kwh)
+                    clamped = min(raw, max_chg)
+                    at_limit = clamped >= max_chg - 1e-6
                 else:
-                    clamped = max(raw, -cfg.max_discharge_power_kw)
-                    at_limit = clamped <= -cfg.max_discharge_power_kw + 1e-6
+                    max_dchg = cfg.max_discharge_at_soc(soc_kwh)
+                    clamped = max(raw, -max_dchg)
+                    at_limit = clamped <= -max_dchg + 1e-6
 
                 result[sid] = result.get(sid, 0.0) + clamped
                 overflow += raw - clamped
