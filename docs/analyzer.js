@@ -75,11 +75,12 @@ function findNearestSocIdx(socWh, socStates) {
 }
 
 function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride) {
+               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride, dischargeEffOverride) {
 
   const rte      = cfg.rte;
   const sqrtRte  = Math.sqrt(rte);
-  const chargeEff = chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
+  const chargeEff    = chargeEffOverride    ?? sqrtRte;
+  const dischargeEff = dischargeEffOverride ?? sqrtRte;
   const minSocWh = Math.round(cfg.minSocKwh * 1000);
   const maxSocWh = Math.round(cfg.maxSocKwh * 1000);
 
@@ -175,7 +176,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           if (newSocWh > maxSocWh) continue;
         } else if (actionW < 0) {
           if (-actionW > maxDisW) continue;
-          newSocWh = socWh - Math.abs(actionW) * stepH / sqrtRte;
+          newSocWh = socWh - Math.abs(actionW) * stepH / dischargeEff;
           if (newSocWh < minSocWh) continue;
         } else {
           newSocWh = socWh;
@@ -198,7 +199,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
       // Boundary actions: exact power to reach min/max SoC.
       // new_soc_idx is known directly — no floating-point round-trip needed.
       if (socWh > minSocWh) {
-        const drainW = (socWh - minSocWh) * sqrtRte / stepH;
+        const drainW = (socWh - minSocWh) * dischargeEff / stepH;
         if (drainW > 0 && drainW <= maxDisW) {
           const stepCost = calculateStepCost(
             stepH, socWh, -drainW, gridPrice, feedIn,
@@ -229,10 +230,11 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh, terminalPrice, nSteps };
 }
 
-function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, chargeEffOverride) {
+function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, chargeEffOverride, dischargeEffOverride) {
   const { policy, socStates, stepDurations, minSocWh, maxSocWh, nSteps } = dpResult;
-  const sqrtRte  = Math.sqrt(cfg.rte);
-  const chargeEff = chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
+  const sqrtRte      = Math.sqrt(cfg.rte);
+  const chargeEff    = chargeEffOverride    ?? sqrtRte;
+  const dischargeEff = dischargeEffOverride ?? sqrtRte;
   let curSocWh = currentSocKwh * 1000;
   const powerKw = [], modes = [], socKwh = [currentSocKwh];
 
@@ -248,7 +250,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, chargeEffOverride) {
       curSocWh = Math.min(curSocWh + actionW * stepH * chargeEff, maxSocWh);
     } else if (actionW < 0) {
       modes.push('discharging');
-      curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH / sqrtRte, minSocWh);
+      curSocWh = Math.max(curSocWh - Math.abs(actionW) * stepH / dischargeEff, minSocWh);
     } else {
       if (cfg.pvDcCoupled && pvDcW > 0) {
         const dcEff      = cfg.pvDcEfficiency;
@@ -272,8 +274,9 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, chargeEffOverride) {
  * (same as forwardPass output).
  */
 function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
-  const sqrtRte   = Math.sqrt(cfg.rte);
-  const chargeEff = cfg.chargeEffOverride ?? sqrtRte;  // Discharge always uses nominal sqrtRte
+  const sqrtRte      = Math.sqrt(cfg.rte);
+  const chargeEff    = cfg.chargeEffOverride    ?? sqrtRte;
+  const dischargeEff = cfg.dischargeEffOverride ?? sqrtRte;
   const minSocWh = cfg.minSocKwh * 1000;
   const maxSocWh = cfg.maxSocKwh * 1000;
   const socKwh   = [currentSocKwh];
@@ -289,7 +292,7 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
       curSocWh = Math.min(curSocWh + actionW * stepH * chargeEff, maxSocWh);
     } else if (modes[t] === 'discharging' && p > 1e-9) {
       const actionW = p * 1000;    // positive
-      curSocWh = Math.max(curSocWh - actionW * stepH / sqrtRte, minSocWh);
+      curSocWh = Math.max(curSocWh - actionW * stepH / dischargeEff, minSocWh);
     } else {
       if (cfg.pvDcCoupled && pvDcW > 0) {
         const dcEff      = cfg.pvDcEfficiency;
@@ -496,16 +499,21 @@ function computeTotalCost(powerKw, socKwh, inputs, cfg) {
 
 function runOptimizer(cfg, currentSocKwh, inputs) {
   const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost,
-          minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffCorrection } = inputs;
+          minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffCorrection,
+          dischargeEffCorrection } = inputs;
   const nominalSqrtRte = Math.sqrt(cfg.rte);
   const chargeEffOverride =
     chargeEffCorrection != null && chargeEffCorrection < 0.995
       ? nominalSqrtRte * chargeEffCorrection
       : null;
+  const dischargeEffOverride =
+    dischargeEffCorrection != null && dischargeEffCorrection < 0.995
+      ? nominalSqrtRte * dischargeEffCorrection
+      : null;
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride);
-  let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc, chargeEffOverride);
+                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride, dischargeEffOverride);
+  let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc, chargeEffOverride, dischargeEffOverride);
 
   // Post-processing filters (matching optimizer.py)
   const oscResult = filterOscillations(
@@ -521,7 +529,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
 
   // Rebuild SoC from filtered schedule
   const socKwh = rebuildSoc(
-    powerKw, modes, { ...cfg, chargeEffOverride }, currentSocKwh, dp.stepDurations, pvDcFc
+    powerKw, modes, { ...cfg, chargeEffOverride, dischargeEffOverride }, currentSocKwh, dp.stepDurations, pvDcFc
   );
 
   const shadow   = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);

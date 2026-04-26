@@ -162,6 +162,8 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalise battery subentry user input."""
     schema = _build_battery_subentry_schema()
     validated = schema(user_input)
+    if validated[CONF_MIN_SOC_PERCENT] >= validated[CONF_MAX_SOC_PERCENT]:
+        raise vol.Invalid("min_soc_percent must be less than max_soc_percent")
     result: dict[str, Any] = {}
     if name := validated.get(CONF_NAME, "").strip():
         result[CONF_NAME] = name
@@ -304,7 +306,7 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),
                 description={"suggested_value": d.get(CONF_FIXED_FEED_IN_PRICE)},
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
             vol.Optional(
                 CONF_ZERO_GRID_ENABLED,
                 default=d.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED),

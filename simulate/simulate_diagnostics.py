@@ -79,6 +79,15 @@ def get_charge_eff_override(
     return math.sqrt(rte) * charge_eff_correction
 
 
+def get_discharge_eff_override(
+    rte: float, discharge_eff_correction: float | None
+) -> float | None:
+    """Return corrected discharge-side efficiency when diagnostics contain a calibration."""
+    if discharge_eff_correction is None or discharge_eff_correction >= 0.995:
+        return None
+    return math.sqrt(rte) * discharge_eff_correction
+
+
 def extract_inputs(diag: dict) -> tuple:
     """Extract all optimizer inputs from diagnostics.json."""
     bc = diag["data"]["battery_config"]
@@ -156,6 +165,12 @@ def extract_inputs(diag: dict) -> tuple:
         if run_log:
             charge_eff_correction = run_log[-1].get("charge_eff_correction")
 
+    discharge_eff_correction = opt_data.get("discharge_eff_correction")
+    if discharge_eff_correction is None:
+        run_log = opt_data.get("optimizer_run_log") or []
+        if run_log:
+            discharge_eff_correction = run_log[-1].get("discharge_eff_correction")
+
     return (
         battery,
         current_soc_kwh,
@@ -170,6 +185,7 @@ def extract_inputs(diag: dict) -> tuple:
         fixed_feed_in_price,
         terminal_shadow_price,
         charge_eff_correction,
+        discharge_eff_correction,
         opt_data,
         sched,
     )
@@ -290,6 +306,7 @@ def run_dp(
     pv_dc_forecast=None,
     terminal_shadow_price=None,
     charge_eff_override=None,
+    discharge_eff_override=None,
 ):
     """Run the DP backward pass and return V, policy, soc_states, soc_resolution_wh."""
     if pv_dc_forecast is None:
@@ -314,9 +331,10 @@ def run_dp(
     min_soc_wh = round(battery_config.min_soc_kwh * 1000)
     max_soc_wh = round(battery_config.max_soc_kwh * 1000)
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = (
-        charge_eff_override if charge_eff_override is not None else sqrt_rte
-    )  # Discharge always uses nominal sqrt_rte
+    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
+    discharge_eff = (
+        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    )
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
@@ -382,7 +400,7 @@ def run_dp(
                 elif action_w < 0:
                     if -action_w > max_dis_w:
                         continue
-                    energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
+                    energy_change_wh = abs(action_w) * time_step_hours / discharge_eff
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
@@ -413,7 +431,7 @@ def run_dp(
                     best_action = action_w
 
             if soc_wh > min_soc_wh:
-                drain_w = (soc_wh - min_soc_wh) * sqrt_rte / time_step_hours
+                drain_w = (soc_wh - min_soc_wh) * discharge_eff / time_step_hours
                 if 0 < drain_w <= max_dis_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -480,12 +498,14 @@ def forward_pass(
     battery_config,
     pv_dc_forecast,
     charge_eff_override=None,
+    discharge_eff_override=None,
 ):
     """Execute the forward pass to get the schedule."""
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = (
-        charge_eff_override if charge_eff_override is not None else sqrt_rte
-    )  # Discharge always uses nominal sqrt_rte
+    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
+    discharge_eff = (
+        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    )
     current_soc = float(
         soc_states[_find_nearest_soc_idx(int(current_soc_kwh * 1000), soc_states)]
     )
@@ -511,7 +531,7 @@ def forward_pass(
         elif action_w < 0:
             mode_schedule.append("discharging")
             current_soc = max(
-                current_soc - abs(action_w) * time_step_hours / sqrt_rte,
+                current_soc - abs(action_w) * time_step_hours / discharge_eff,
                 float(min_soc_wh),
             )
         else:
@@ -961,6 +981,7 @@ def main():
         fixed_feed_in_price,
         terminal_shadow_price,
         charge_eff_correction,
+        discharge_eff_correction,
         opt_data,
         sched,
     ) = extract_inputs(diag)
@@ -976,6 +997,9 @@ def main():
     charge_eff_override = get_charge_eff_override(
         battery.round_trip_efficiency, charge_eff_correction
     )
+    discharge_eff_override = get_discharge_eff_override(
+        battery.round_trip_efficiency, discharge_eff_correction
+    )
 
     print(f"\nLoaded {path}" + (" [PV CURTAILED]" if args.pv_curtailed else ""))
     print(
@@ -988,14 +1012,14 @@ def main():
             f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
         )
 
-    # Show charge efficiency calibration state if present in diagnostics
+    # Show charge/discharge efficiency calibration state if present in diagnostics
     opt_top = diag.get("data", diag).get("optimization", {})
-    charge_eff_correction = opt_top.get("charge_eff_correction")
+    _charge_eff_correction = opt_top.get("charge_eff_correction")
     charge_eff_samples = opt_top.get("charge_eff_samples")
-    if charge_eff_correction is not None:
+    if _charge_eff_correction is not None:
         flag = (
             " ⚠ correction active"
-            if charge_eff_correction < 0.995
+            if _charge_eff_correction < 0.995
             else " ✓ uncorrected"
         )
         samples_str = (
@@ -1004,7 +1028,23 @@ def main():
             else ""
         )
         print(
-            f"  charge_eff_correction: {charge_eff_correction:.4f}{samples_str}{flag}"
+            f"  charge_eff_correction: {_charge_eff_correction:.4f}{samples_str}{flag}"
+        )
+    _discharge_eff_correction = opt_top.get("discharge_eff_correction")
+    discharge_eff_samples = opt_top.get("discharge_eff_samples")
+    if _discharge_eff_correction is not None:
+        flag = (
+            " ⚠ correction active"
+            if _discharge_eff_correction < 0.995
+            else " ✓ uncorrected"
+        )
+        samples_str = (
+            f", n={discharge_eff_samples} samples"
+            if discharge_eff_samples is not None
+            else ""
+        )
+        print(
+            f"  discharge_eff_correction: {_discharge_eff_correction:.4f}{samples_str}{flag}"
         )
 
     # Run DP
@@ -1031,6 +1071,7 @@ def main():
         pv_dc_forecast=pv_dc_forecast,
         terminal_shadow_price=terminal_shadow_price,
         charge_eff_override=charge_eff_override,
+        discharge_eff_override=discharge_eff_override,
     )
 
     print(
@@ -1052,6 +1093,7 @@ def main():
         battery_config=battery,
         pv_dc_forecast=pv_dc_forecast,
         charge_eff_override=charge_eff_override,
+        discharge_eff_override=discharge_eff_override,
     )
 
     # Recorded schedule from diagnostics
