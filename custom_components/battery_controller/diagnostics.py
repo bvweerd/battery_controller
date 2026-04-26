@@ -160,6 +160,10 @@ async def async_get_config_entry_diagnostics(
                     optimization_coord, "_committed_step_start", None
                 ),
             },
+            "charge_eff_correction": data.get("charge_eff_correction"),
+            "charge_eff_samples": data.get("charge_eff_samples"),
+            "discharge_eff_correction": data.get("discharge_eff_correction"),
+            "discharge_eff_samples": data.get("discharge_eff_samples"),
             "timestamp": str(data.get("timestamp")),
         }
 

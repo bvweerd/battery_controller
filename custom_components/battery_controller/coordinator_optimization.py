@@ -246,6 +246,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             hass, 1, f"battery_controller_{entry_id}_charge_eff"
         )
 
+        # Discharge efficiency calibration: rolling window of (actual_delta / planned_delta)
+        # samples collected during active discharging steps. The smoothed correction
+        # is applied as a multiplier on the DP's discharge-side SoC transition only,
+        # to account for systematic over-estimation of how much SoC can be removed
+        # within one step. It does not change the economic cost model.
+        self._discharge_eff_samples: deque[float] = deque(maxlen=20)
+        self._discharge_eff_correction: float = 1.0
+
+        # Persistent storage for discharge efficiency calibration (survives reboots).
+        self._discharge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
+            hass, 1, f"battery_controller_{entry_id}_discharge_eff"
+        )
+
     @property
     def control_mode(self) -> str:
         """Get current control mode."""
@@ -304,6 +317,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._price_model.async_update_pattern(),
             self._feed_in_price_model.async_update_pattern(),
             self._async_load_charge_eff_calibration(),
+            self._async_load_discharge_eff_calibration(),
         )
 
         # Re-learn price pattern every 24 h so new data is picked up automatically,
@@ -1318,6 +1332,120 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if changed:
             self.hass.async_create_task(self._async_save_charge_eff_calibration())
 
+    async def _async_load_discharge_eff_calibration(self) -> None:
+        """Load persisted discharge efficiency calibration from storage."""
+        stored = await self._discharge_eff_store.async_load()
+        if stored is None:
+            return
+        samples = stored.get("samples", [])
+        correction = stored.get("correction", 1.0)
+        self._discharge_eff_samples = deque(samples, maxlen=20)
+        self._discharge_eff_correction = float(correction)
+        if self._discharge_eff_correction < 0.995:
+            _LOGGER.info(
+                "Restored discharge efficiency calibration: correction=%.3f, n=%d samples",
+                self._discharge_eff_correction,
+                len(self._discharge_eff_samples),
+            )
+
+    async def _async_save_discharge_eff_calibration(self) -> None:
+        """Persist current discharge efficiency calibration to storage."""
+        await self._discharge_eff_store.async_save(
+            {
+                "samples": list(self._discharge_eff_samples),
+                "correction": self._discharge_eff_correction,
+            }
+        )
+
+    async def async_reset_discharge_eff_calibration(self) -> None:
+        """Reset discharge-efficiency calibration to the nominal uncorrected state."""
+        if (
+            self._discharge_eff_samples
+            or abs(self._discharge_eff_correction - 1.0) > 1e-9
+        ):
+            _LOGGER.info(
+                "Resetting discharge efficiency calibration: %.3f (%d samples) -> 1.000",
+                self._discharge_eff_correction,
+                len(self._discharge_eff_samples),
+            )
+        self._discharge_eff_samples.clear()
+        self._discharge_eff_correction = 1.0
+        await self._async_save_discharge_eff_calibration()
+
+    def _update_discharge_eff_calibration(self, battery_state: BatteryState) -> None:
+        """Compare previous planned SoC to actual SoC and update discharge efficiency correction.
+
+        Samples are only collected when:
+        - The previous optimizer step planned active discharging (mode == 'discharging')
+        - The full planned step has elapsed
+        - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
+        - DC-coupled PV is not active (passive PV charging during a discharge step
+          partially offsets the SoC reduction, making actual_delta smaller than
+          planned_delta and producing a spuriously low efficiency reading)
+
+        The correction is the mean of the last 20 ratios (actual/planned), clipped to
+        [0.5, 1.05]. It is applied as a multiplier on the DP's discharge-side SoC
+        transition so the optimizer plans less discharge within one time step when
+        the battery discharges slower than modelled. It does not alter the economic
+        cost calculation or degradation model.
+        """
+        if self._last_result is None:
+            return
+        if (
+            len(self._last_result.mode_schedule) < 1
+            or len(self._last_result.soc_schedule_kwh) < 2
+        ):
+            return
+
+        if self._last_result.mode_schedule[0] != ACTION_DISCHARGING:
+            return
+
+        if not self._previous_charge_step_complete():
+            return
+
+        # Skip DC-coupled systems: passive PV charging during a discharge step partially
+        # offsets SoC reduction, making actual_delta smaller than planned_delta.
+        if self.config.get(CONF_PV_DC_COUPLED, False):
+            return
+
+        prev_soc = self._last_result.soc_schedule_kwh[0]
+        planned_next_soc = self._last_result.soc_schedule_kwh[1]
+        planned_delta = prev_soc - planned_next_soc  # positive: SoC goes down
+
+        if planned_delta < 0.1:
+            # Too small to measure reliably; skip.
+            return
+
+        actual_delta = prev_soc - battery_state.soc_kwh  # positive: SoC went down
+        # Cap upward to 1.2× planned to filter out unexpected external discharge
+        # (e.g. grid outage, SoC sensor noise causing apparent over-discharge).
+        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
+        ratio = actual_delta / planned_delta
+        # Clip to a physically reasonable range; the correction should never
+        # indicate the battery discharged *more* than modelled by more than 5%.
+        ratio = max(0.5, min(1.05, ratio))
+
+        self._discharge_eff_samples.append(ratio)
+        new_correction = sum(self._discharge_eff_samples) / len(
+            self._discharge_eff_samples
+        )
+
+        changed = abs(new_correction - self._discharge_eff_correction) > 0.005
+        if changed:
+            _LOGGER.info(
+                "Discharge efficiency correction updated: %.3f → %.3f "
+                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                self._discharge_eff_correction,
+                new_correction,
+                ratio,
+                len(self._discharge_eff_samples),
+                planned_delta,
+                actual_delta,
+            )
+        self._discharge_eff_correction = new_correction
+        if changed:
+            self.hass.async_create_task(self._async_save_discharge_eff_calibration())
+
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
         # Re-read SoC limits and other hardware parameters from live options
@@ -1670,6 +1798,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Charge efficiency calibration: compare previous planned SoC with actual SoC
         # to detect systematic over-estimation of charge efficiency (e.g. CV-phase).
         self._update_charge_eff_calibration(battery_state)
+        # Discharge efficiency calibration: same principle for discharging steps.
+        self._update_discharge_eff_calibration(battery_state)
 
         # Uncertainty-based SoC reserve (P2.3): when GHI forecast is highly variable
         # (cloudy/intermittent conditions), keep extra buffer so the battery is not
@@ -1712,17 +1842,29 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # should plan less charge within the step. Economic costs still use the
         # nominal RTE so a charging-speed problem is not double-counted as extra
         # energy cost or degradation.
+        nominal_sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
         charge_eff_override: float | None = None
         if self._charge_eff_correction < 0.995:
-            nominal_sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
             charge_eff_override = nominal_sqrt_rte * self._charge_eff_correction
             _LOGGER.debug(
-                "Charge efficiency correction %.3f applied: charge_eff %.4f → %.4f"
-                " (discharge_eff stays %.4f)",
+                "Charge efficiency correction %.3f applied: charge_eff %.4f → %.4f",
                 self._charge_eff_correction,
                 nominal_sqrt_rte,
                 charge_eff_override,
+            )
+
+        # Apply discharge efficiency correction only to the discharge-side SoC
+        # transition: when the battery discharges slower than modelled, the DP
+        # should plan less discharge within the step. Economic costs still use
+        # the nominal RTE.
+        discharge_eff_override: float | None = None
+        if self._discharge_eff_correction < 0.995:
+            discharge_eff_override = nominal_sqrt_rte * self._discharge_eff_correction
+            _LOGGER.debug(
+                "Discharge efficiency correction %.3f applied: discharge_eff %.4f → %.4f",
+                self._discharge_eff_correction,
                 nominal_sqrt_rte,
+                discharge_eff_override,
             )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
@@ -1761,6 +1903,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             pv_dc_forecast,
             self._last_shadow_price,
             charge_eff_override,
+            discharge_eff_override,
         )
 
         self._last_shadow_price = result.shadow_price_eur_kwh
@@ -2031,6 +2174,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "commitment_reason": commitment_reason,
                 "charge_eff_correction": round(self._charge_eff_correction, 4),
                 "charge_eff_samples": len(self._charge_eff_samples),
+                "discharge_eff_correction": round(self._discharge_eff_correction, 4),
+                "discharge_eff_samples": len(self._discharge_eff_samples),
             }
         )
 
@@ -2079,5 +2224,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "price_interval": price_interval,
             "charge_eff_correction": round(self._charge_eff_correction, 4),
             "charge_eff_samples": len(self._charge_eff_samples),
+            "discharge_eff_correction": round(self._discharge_eff_correction, 4),
+            "discharge_eff_samples": len(self._discharge_eff_samples),
             "timestamp": dt_util.utcnow(),
         }
