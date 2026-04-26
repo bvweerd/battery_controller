@@ -63,9 +63,11 @@ def _rebuild_schedule(
     pv_dc_forecast: list[float] | None = None,
     pv_dc_coupled: bool = False,
     pv_dc_efficiency: float = 0.97,
+    discharge_eff: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Rebuild schedule after post-processing so SoC stays physically consistent."""
     sqrt_rte = math.sqrt(rte)
+    _discharge_eff = discharge_eff if discharge_eff is not None else sqrt_rte
     rebuilt_power = list(power_schedule_kw)
     rebuilt_mode: list[str] = []
     soc_schedule = [initial_soc_kwh]
@@ -91,11 +93,11 @@ def _rebuild_schedule(
             actual_power_kw = delta_soc / (step_h * sqrt_rte) if step_h > 0 else 0.0
         elif commanded_power_kw < 0:
             current_soc_kwh = max(
-                current_soc_kwh - abs(commanded_power_kw) * step_h / sqrt_rte,
+                current_soc_kwh - abs(commanded_power_kw) * step_h / _discharge_eff,
                 min_soc_kwh,
             )
             delta_soc = current_soc_kwh - prev_soc_kwh
-            actual_power_kw = delta_soc * sqrt_rte / step_h if step_h > 0 else 0.0
+            actual_power_kw = delta_soc * _discharge_eff / step_h if step_h > 0 else 0.0
         else:
             if pv_dc_coupled and t < len(pv_dc_forecast) and pv_dc_forecast[t] > 0:
                 headroom_kwh = max(0.0, max_soc_kwh - current_soc_kwh)
@@ -378,6 +380,8 @@ def optimize_battery_schedule(
     pv_dc_forecast: list[float] | None = None,  # kW (DC-coupled PV)
     terminal_shadow_price: float | None = None,  # EUR/kWh from previous run
     charge_eff_override: float | None = None,  # Override charge-side efficiency only
+    discharge_eff_override: float
+    | None = None,  # Override discharge-side efficiency only
 ) -> OptimizationResult:
     """Optimize battery schedule using dynamic programming.
 
@@ -408,6 +412,11 @@ def optimize_battery_schedule(
             sqrt(RTE) so the DP plans less charge within the step when charging
             is slower than modelled. The economic cost model still uses nominal
             sqrt(RTE).
+        discharge_eff_override: Override for the discharge-side SoC transition only.
+            When provided, discharging state transitions use this value instead of
+            sqrt(RTE) so the DP plans less discharge within the step when discharging
+            is slower than modelled. The economic cost model still uses nominal
+            sqrt(RTE).
 
     Returns:
         OptimizationResult with optimal schedule
@@ -433,10 +442,13 @@ def optimize_battery_schedule(
         ] * (n_steps - len(step_durations_hours))
 
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    # Charging uses the (possibly corrected) efficiency; discharging always uses
-    # the nominal sqrt(RTE). Separating them prevents a charging-speed correction
-    # from inflating the break-even discharge price.
+    # Charging uses the (possibly corrected) efficiency; discharging uses its own
+    # correction independently. Separating them prevents a speed correction on one
+    # side from inflating the break-even price on the other.
     charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
+    discharge_eff = (
+        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    )
 
     # Discretize SoC space.
     min_step_hours = min(step_durations_hours[:n_steps])
@@ -582,7 +594,7 @@ def optimize_battery_schedule(
                         continue
                     # Discharge: action_w is AC setpoint → battery must supply
                     # abs(action_w) / discharge_eff from its DC side.
-                    energy_change_wh = abs(action_w) * time_step_hours / sqrt_rte
+                    energy_change_wh = abs(action_w) * time_step_hours / discharge_eff
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
@@ -637,8 +649,7 @@ def optimize_battery_schedule(
             # new_soc_idx is known directly (0 or n_soc_states-1), avoiding the
             # floating-point round-trip through the energy formula.
             if soc_wh > min_soc_wh:
-                # Discharge uses sqrt_rte (nominal); charge_eff only affects charging.
-                drain_w = (soc_wh - min_soc_wh) * sqrt_rte / time_step_hours
+                drain_w = (soc_wh - min_soc_wh) * discharge_eff / time_step_hours
                 if 0 < drain_w <= max_dis_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -711,7 +722,7 @@ def optimize_battery_schedule(
         elif action_w < 0:
             mode_schedule.append(ACTION_DISCHARGING)
             current_soc = max(
-                current_soc - abs(action_w) * time_step_hours / sqrt_rte,
+                current_soc - abs(action_w) * time_step_hours / discharge_eff,
                 float(min_soc_wh),
             )
         else:
@@ -757,6 +768,7 @@ def optimize_battery_schedule(
         pv_dc_forecast=pv_dc_forecast[:n_steps] if pv_dc_forecast else None,
         pv_dc_coupled=battery_config.pv_dc_coupled,
         pv_dc_efficiency=battery_config.pv_dc_efficiency,
+        discharge_eff_override=discharge_eff_override,
     )
 
     # Post-process: suppress micro-cycles (P5.1)
@@ -772,6 +784,7 @@ def optimize_battery_schedule(
         pv_dc_coupled=battery_config.pv_dc_coupled,
         pv_dc_efficiency=battery_config.pv_dc_efficiency,
         min_cycle_kwh=MIN_CYCLE_KWH,
+        discharge_eff_override=discharge_eff_override,
     )
 
     # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
@@ -872,6 +885,7 @@ def _filter_oscillations(
     pv_dc_forecast: list[float] | None = None,
     pv_dc_coupled: bool = False,
     pv_dc_efficiency: float = 0.97,
+    discharge_eff_override: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out unprofitable oscillations from the schedule.
 
@@ -1061,6 +1075,7 @@ def _filter_oscillations(
         pv_dc_forecast=pv_dc_forecast,
         pv_dc_coupled=pv_dc_coupled,
         pv_dc_efficiency=pv_dc_efficiency,
+        discharge_eff=discharge_eff_override,
     )
 
 
@@ -1076,6 +1091,7 @@ def _filter_micro_cycles(
     pv_dc_coupled: bool = False,
     pv_dc_efficiency: float = 0.97,
     min_cycle_kwh: float = 0.2,
+    discharge_eff_override: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out micro-cycles whose total energy is below min_cycle_kwh.
 
@@ -1143,6 +1159,7 @@ def _filter_micro_cycles(
                 pv_dc_forecast=pv_dc_forecast,
                 pv_dc_coupled=pv_dc_coupled,
                 pv_dc_efficiency=pv_dc_efficiency,
+                discharge_eff=discharge_eff_override,
             )[2],
         )
 
@@ -1156,6 +1173,7 @@ def _filter_micro_cycles(
         pv_dc_forecast=pv_dc_forecast,
         pv_dc_coupled=pv_dc_coupled,
         pv_dc_efficiency=pv_dc_efficiency,
+        discharge_eff=discharge_eff_override,
     )
 
 
