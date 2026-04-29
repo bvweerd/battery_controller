@@ -1857,9 +1857,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # transition: when the battery discharges slower than modelled, the DP
         # should plan less discharge within the step. Economic costs still use
         # the nominal RTE.
+        #
+        # The SoC transition is: soc -= power * hours / discharge_eff
+        # To reduce planned SoC drop by factor `correction`, we need a LARGER
+        # discharge_eff (dividing by a larger value gives a smaller drop).
+        # Hence we divide sqrt(RTE) by the correction, not multiply.
+        # This may yield discharge_eff_override > 1, which is fine here because
+        # the override only affects SoC state transitions, not the economic cost.
         discharge_eff_override: float | None = None
         if self._discharge_eff_correction < 0.995:
-            discharge_eff_override = nominal_sqrt_rte * self._discharge_eff_correction
+            discharge_eff_override = nominal_sqrt_rte / self._discharge_eff_correction
             _LOGGER.debug(
                 "Discharge efficiency correction %.3f applied: discharge_eff %.4f → %.4f",
                 self._discharge_eff_correction,

@@ -414,9 +414,9 @@ def optimize_battery_schedule(
             sqrt(RTE).
         discharge_eff_override: Override for the discharge-side SoC transition only.
             When provided, discharging state transitions use this value instead of
-            sqrt(RTE) so the DP plans less discharge within the step when discharging
-            is slower than modelled. The economic cost model still uses nominal
-            sqrt(RTE).
+            sqrt(RTE) so the DP plans less SoC depletion within the step when
+            discharging is slower than modelled. May be > 1 (calibration artefact);
+            this only affects SoC state transitions, not the economic cost model.
 
     Returns:
         OptimizationResult with optimal schedule
