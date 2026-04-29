@@ -85,7 +85,11 @@ def get_discharge_eff_override(
     """Return corrected discharge-side efficiency when diagnostics contain a calibration."""
     if discharge_eff_correction is None or discharge_eff_correction >= 0.995:
         return None
-    return math.sqrt(rte) * discharge_eff_correction
+    # SoC transition: soc -= power * hours / discharge_eff.
+    # To reduce planned SoC drop by factor `correction`, divide sqrt(RTE) by it
+    # (a larger divisor yields a smaller SoC drop). May be > 1; only used for
+    # SoC state transitions, not for economic cost.
+    return math.sqrt(rte) / discharge_eff_correction
 
 
 def extract_inputs(diag: dict) -> tuple:
