@@ -1736,6 +1736,775 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
         assert len(result_power) == 3
 
 
+class TestOptimizeWithMultiplePacks:
+    """Integration tests: aggregate_battery_configs → optimize_battery_schedule.
+
+    These tests verify the full path from multiple physical battery packs
+    (each with their own BatteryConfig) through aggregation and into the DP
+    optimizer.  The unit-level aggregate_battery_configs tests live in
+    test_battery_model.py; here we care about whether the aggregated config
+    drives the optimizer correctly end-to-end.
+    """
+
+    def _run(self, battery_config, **kwargs):
+        """Helper to call optimize_battery_schedule with sensible defaults."""
+        defaults = dict(
+            current_soc_kwh=None,  # caller must override
+            price_forecast=[0.05] * 4 + [0.30] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+        defaults.update(kwargs)
+        return optimize_battery_schedule(battery_config=battery_config, **defaults)
+
+    # ------------------------------------------------------------------
+    # 1. Two identical packs → equivalent to one doubled pack
+    # ------------------------------------------------------------------
+
+    def test_two_identical_packs_valid_schedule(self):
+        """Aggregating two identical packs gives a valid schedule."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        single = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([single, single])
+        # Combined: 10 kWh, 5 kW charge/discharge
+        assert combined.capacity_kwh == pytest.approx(10.0)
+        assert combined.max_charge_power_kw == pytest.approx(5.0)
+
+        result = self._run(combined, current_soc_kwh=5.0)
+
+        assert isinstance(result, OptimizationResult)
+        assert len(result.power_schedule_kw) == 8
+        for power in result.power_schedule_kw:
+            assert power <= combined.max_charge_power_kw + 1e-6
+            assert power >= -combined.max_discharge_power_kw - 1e-6
+
+    def test_two_identical_packs_soc_in_bounds(self):
+        """SoC never leaves the combined bounds when running two identical packs."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([pack, pack])
+        result = self._run(combined, current_soc_kwh=5.0)
+
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+    # ------------------------------------------------------------------
+    # 2. Asymmetric capacity packs
+    # ------------------------------------------------------------------
+
+    def test_asymmetric_capacity_combined_soc_limits(self):
+        """SoC limits of asymmetric packs are correctly combined (kWh sum)."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        small = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        large = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([small, large])
+
+        # min_soc_kwh = 0.5 + 1.0 = 1.5, max_soc_kwh = 4.5 + 9.0 = 13.5
+        assert combined.min_soc_kwh == pytest.approx(1.5)
+        assert combined.max_soc_kwh == pytest.approx(13.5)
+
+        result = self._run(combined, current_soc_kwh=7.5)
+        assert len(result.power_schedule_kw) == 8
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+    # ------------------------------------------------------------------
+    # 3. Asymmetric RTE packs
+    # ------------------------------------------------------------------
+
+    def test_asymmetric_rte_optimizer_runs(self):
+        """DP runs without error when packs have very different RTEs."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        low_rte = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.80,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        high_rte = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.95,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([low_rte, high_rte])
+
+        # Weighted average RTE = (0.80*5 + 0.95*5) / 10 = 0.875
+        assert combined.round_trip_efficiency == pytest.approx(0.875)
+
+        result = self._run(combined, current_soc_kwh=5.0)
+        assert len(result.power_schedule_kw) == 8
+        # With a clear price spread, the optimizer should find arbitrage
+        assert result.savings >= 0
+
+    # ------------------------------------------------------------------
+    # 4. Asymmetric power limits
+    # ------------------------------------------------------------------
+
+    def test_asymmetric_power_limits_sum_respected(self):
+        """Optimizer never exceeds the summed power of asymmetric packs."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        weak = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        strong = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([weak, strong])
+        assert combined.max_charge_power_kw == pytest.approx(6.2)
+        assert combined.max_discharge_power_kw == pytest.approx(6.2)
+
+        result = self._run(combined, current_soc_kwh=5.0)
+        for power in result.power_schedule_kw:
+            assert power <= combined.max_charge_power_kw + 1e-6
+            assert power >= -combined.max_discharge_power_kw - 1e-6
+
+    # ------------------------------------------------------------------
+    # 5. DC-coupled pack combined with AC-only pack
+    # ------------------------------------------------------------------
+
+    def test_dc_plus_ac_pack_combined(self):
+        """One DC-coupled and one AC-only pack are combined correctly."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        ac_pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        dc_pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=True,
+            pv_dc_peak_power_kwp=3.0,
+            pv_dc_efficiency=0.97,
+        )
+        combined = aggregate_battery_configs([ac_pack, dc_pack])
+
+        assert combined.pv_dc_coupled is True
+        assert combined.pv_dc_peak_power_kwp == pytest.approx(3.0)
+
+        pv_dc = [2.0] * 8
+        result = self._run(
+            combined,
+            current_soc_kwh=5.0,
+            pv_dc_forecast=pv_dc,
+        )
+        assert len(result.power_schedule_kw) == 8
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+    # ------------------------------------------------------------------
+    # 6. Derating on one pack only
+    # ------------------------------------------------------------------
+
+    def test_derating_one_pack_only_limits_combined_power(self):
+        """When only one of two packs has high-SoC derating, the combined derated
+        power is the sum of individual derated powers (0 + 0.45 = 0.45 kW).
+
+        The combined threshold is a capacity-weighted average:
+          (100.0 * 5 + 95.0 * 5) / 10 = 97.5 %  →  9.75 kWh of 10 kWh
+
+        Starting at 9.8 kWh (98 %) puts us above the combined threshold, so the
+        DP must respect the 0.45 kW derated limit instead of the nominal 2.4 kW.
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        plain = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            round_trip_efficiency=0.92,
+            min_soc_percent=10.0,
+            max_soc_percent=100.0,
+        )
+        derated = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=1.2,
+            max_discharge_power_kw=1.2,
+            round_trip_efficiency=0.92,
+            min_soc_percent=10.0,
+            max_soc_percent=100.0,
+            high_soc_charge_threshold_pct=95.0,
+            high_soc_max_charge_kw=0.45,
+        )
+        combined = aggregate_battery_configs([plain, derated])
+
+        # Only the derated pack contributes → combined derated kw = 0 + 0.45 = 0.45
+        assert combined.high_soc_max_charge_kw == pytest.approx(0.45)
+        # Capacity-weighted threshold: (100*5 + 95*5)/10 = 97.5 %
+        assert combined.high_soc_charge_threshold_pct == pytest.approx(97.5)
+
+        combined_threshold_kwh = (
+            combined.high_soc_charge_threshold_pct / 100.0 * combined.capacity_kwh
+        )  # = 9.75 kWh
+
+        # Start at 9.8 kWh (98 %), clearly above the 97.5 % threshold
+        start_soc = 9.8
+        result = self._run(
+            combined,
+            current_soc_kwh=start_soc,
+            price_forecast=[0.05] * 4 + [0.30] * 4,
+        )
+        # Any charge step while SoC is at or above the combined threshold must
+        # not exceed the derated limit (0.45 kW).
+        for i, (mode, power) in enumerate(
+            zip(result.mode_schedule, result.power_schedule_kw)
+        ):
+            if (
+                mode == "charging"
+                and result.soc_schedule_kwh[i] >= combined_threshold_kwh
+            ):
+                assert power <= 0.46, (
+                    f"step {i}: charge {power:.3f} kW exceeds derated limit 0.45 kW"
+                )
+
+    # ------------------------------------------------------------------
+    # 7. Floating-point SoC boundary regression (known bug #3)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "cap_a, cap_b, min_pct",
+        [
+            (10.1, 5.2, 10.0),  # min_soc_kwh = 1.01 + 0.52 = 1.53 (not round)
+            (7.68, 3.84, 15.0),  # min_soc_kwh = 1.152 + 0.576 = 1.728
+            (4.8, 9.6, 20.0),  # min_soc_kwh = 0.96 + 1.92 = 2.88
+        ],
+    )
+    def test_floating_point_soc_boundary_no_crash(self, cap_a, cap_b, min_pct):
+        """Awkward fractional capacities must not cause SoC boundary skipping."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        pack_a = BatteryConfig(
+            capacity_kwh=cap_a,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=min_pct,
+            max_soc_percent=90.0,
+        )
+        pack_b = BatteryConfig(
+            capacity_kwh=cap_b,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=min_pct,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([pack_a, pack_b])
+        mid_soc = (combined.min_soc_kwh + combined.max_soc_kwh) / 2.0
+
+        result = self._run(combined, current_soc_kwh=mid_soc)
+
+        assert len(result.power_schedule_kw) == 8
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+
+class TestMultiPackEdgeCases:
+    """Edge cases for multi-pack aggregation → optimizer integration.
+
+    These tests cover degenerate and boundary situations that can occur in
+    production: offline packs, BMS locks, sensor errors, and extreme configs.
+    """
+
+    def _run(self, battery_config, **kwargs):
+        defaults = dict(
+            price_forecast=[0.05] * 4 + [0.30] * 4,
+            feed_in_forecast=None,
+            pv_forecast=[0.0] * 8,
+            consumption_forecast=[0.5] * 8,
+            step_durations_hours=[0.25] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+        defaults.update(kwargs)
+        return optimize_battery_schedule(battery_config=battery_config, **defaults)
+
+    # ------------------------------------------------------------------
+    # 1. Inoperative pack (zero power) — simulates a tripped BMS
+    # ------------------------------------------------------------------
+
+    def test_zero_power_pack_combined_with_normal_idles(self):
+        """A zero-power pack (BMS tripped) combined with a normal pack
+        should behave exactly like the normal pack alone.
+
+        aggregate_battery_configs sums powers: 0 + 2.5 = 2.5 kW.
+        The optimizer must not crash and must respect the actual limit.
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        offline = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=0.0,
+            max_discharge_power_kw=0.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        normal = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([offline, normal])
+        assert combined.max_charge_power_kw == pytest.approx(2.5)
+        assert combined.max_discharge_power_kw == pytest.approx(2.5)
+
+        result = self._run(combined, current_soc_kwh=5.0)
+
+        assert len(result.power_schedule_kw) == 8
+        for power in result.power_schedule_kw:
+            assert power <= combined.max_charge_power_kw + 1e-6
+            assert power >= -combined.max_discharge_power_kw - 1e-6
+
+    def test_both_packs_zero_power_all_idle(self):
+        """When every pack has zero power, the optimizer can only idle."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        dead_a = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=0.0,
+            max_discharge_power_kw=0.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        dead_b = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=0.0,
+            max_discharge_power_kw=0.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([dead_a, dead_b])
+        result = self._run(combined, current_soc_kwh=5.0)
+
+        assert all(abs(p) < 1e-6 for p in result.power_schedule_kw), (
+            f"All-zero-power pack should produce idle schedule: {result.power_schedule_kw}"
+        )
+        assert all(m == "idle" for m in result.mode_schedule)
+
+    # ------------------------------------------------------------------
+    # 2. Degenerate pack: min_soc == max_soc (BMS locked at fixed SoC)
+    # ------------------------------------------------------------------
+
+    def test_degenerate_pack_min_equals_max_soc(self):
+        """A pack with min_soc_percent == max_soc_percent has zero usable capacity.
+
+        n_soc_states = 1 → only one state exists.  The optimizer must not crash
+        and should return a valid (idle) schedule since no SoC transitions are
+        possible.
+        """
+        locked = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=50.0,
+            max_soc_percent=50.0,  # zero usable capacity
+        )
+        result = self._run(locked, current_soc_kwh=2.5)
+
+        assert len(result.power_schedule_kw) == 8
+        # With no usable capacity, every action transitions to the same SoC bin
+        # (sub-resolution → skipped), so all steps are idle.
+        assert all(m == "idle" for m in result.mode_schedule)
+
+    def test_degenerate_pack_combined_with_normal(self):
+        """A locked pack aggregated with a normal pack: the locked pack adds
+        capacity but contributes zero usable range of its own.
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        locked = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=50.0,
+            max_soc_percent=50.0,
+        )
+        normal = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([locked, normal])
+        # min_soc_kwh = 2.5 + 0.5 = 3.0, max_soc_kwh = 2.5 + 4.5 = 7.0
+        assert combined.min_soc_kwh == pytest.approx(3.0)
+        assert combined.max_soc_kwh == pytest.approx(7.0)
+
+        result = self._run(combined, current_soc_kwh=5.0)
+        assert len(result.power_schedule_kw) == 8
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+    # ------------------------------------------------------------------
+    # 3. start_soc outside combined bounds — sensor error / miscalibration
+    # ------------------------------------------------------------------
+
+    def test_start_soc_below_min_clamps_gracefully(self):
+        """If the SoC sensor reports below the configured minimum, _find_nearest_soc_idx
+        clamps to index 0 (min SoC state) and the optimizer must not crash.
+        """
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        # Report SoC 0.1 kWh below the 1.0 kWh minimum
+        result = self._run(config, current_soc_kwh=0.9)
+
+        assert len(result.power_schedule_kw) == 8
+        assert isinstance(result.optimal_mode, str)
+
+    def test_start_soc_above_max_clamps_gracefully(self):
+        """If the SoC sensor reports above the configured maximum, the optimizer
+        must clamp to the top SoC state without crashing.
+        """
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        # Report SoC 0.5 kWh above the 9.0 kWh maximum
+        result = self._run(config, current_soc_kwh=9.5)
+
+        assert len(result.power_schedule_kw) == 8
+        # At or above max SoC there is no room to charge
+        assert all(p <= 0.0 + 1e-6 for p in result.power_schedule_kw), (
+            f"Should not charge above max SoC: {result.power_schedule_kw}"
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Many packs — stress test of aggregation + optimizer
+    # ------------------------------------------------------------------
+
+    def test_five_packs_aggregate_and_optimize(self):
+        """Five identical packs aggregated must produce a valid schedule with
+        power limits equal to 5× the individual pack's limits.
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([pack] * 5)
+        assert combined.capacity_kwh == pytest.approx(25.0)
+        assert combined.max_charge_power_kw == pytest.approx(12.5)
+
+        result = self._run(combined, current_soc_kwh=12.5)
+
+        assert len(result.power_schedule_kw) == 8
+        for power in result.power_schedule_kw:
+            assert power <= combined.max_charge_power_kw + 1e-6
+            assert power >= -combined.max_discharge_power_kw - 1e-6
+
+    # ------------------------------------------------------------------
+    # 5. Very low RTE — arbitrage is suppressed
+    # ------------------------------------------------------------------
+
+    def test_very_low_rte_no_arbitrage(self):
+        """With RTE=0.5 the round-trip loss is 50 %.  Even a 0.20 EUR/kWh spread
+        is unprofitable (threshold ≈ (2×0.03 + 0.05)/√0.5 ≈ 0.156; but the
+        effective buy/sell spread through a √0.5 ≈ 0.707 inverter is much worse).
+        The optimizer must not arbitrage.
+        """
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.50,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        # Price spread 0.20 EUR/kWh: clear spread but huge RTE loss
+        result = self._run(
+            config,
+            current_soc_kwh=5.0,
+            price_forecast=[0.10] * 4 + [0.30] * 4,
+            feed_in_forecast=[0.07] * 8,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+        has_charge_then_discharge = any(
+            result.mode_schedule[i] == "charging"
+            and any(
+                result.mode_schedule[j] == "discharging"
+                for j in range(i + 1, len(result.mode_schedule))
+            )
+            for i in range(len(result.mode_schedule))
+        )
+        assert not has_charge_then_discharge, (
+            f"RTE=0.5: should not arbitrage, got {result.mode_schedule}"
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Mixed grid caps: one unlimited + one capped → combined unlimited
+    # ------------------------------------------------------------------
+
+    def test_mixed_grid_cap_unlimited_wins(self):
+        """aggregate_battery_configs: if any pack has max_grid_power_kw=0 (unlimited),
+        the combined cap is also 0 (unlimited).
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        unlimited = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=0.0,  # unlimited
+        )
+        capped = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=3.0,  # capped at 3 kW
+        )
+        combined = aggregate_battery_configs([unlimited, capped])
+        assert combined.max_grid_power_kw == pytest.approx(0.0), (
+            "One unlimited pack → combined must be unlimited (0)"
+        )
+
+        # Optimizer must run without error
+        result = self._run(combined, current_soc_kwh=5.0)
+        assert len(result.power_schedule_kw) == 8
+
+    def test_both_packs_capped_sums_caps(self):
+        """When both packs have a grid cap, the combined cap is the sum."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        cap_a = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=2.0,
+        )
+        cap_b = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=3.0,
+        )
+        combined = aggregate_battery_configs([cap_a, cap_b])
+        assert combined.max_grid_power_kw == pytest.approx(5.0)
+
+    # ------------------------------------------------------------------
+    # 7. Packs start at SoC extremes
+    # ------------------------------------------------------------------
+
+    def test_all_packs_fully_charged_no_charging(self):
+        """When combined SoC is at max, the optimizer must not charge."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([pack, pack])
+
+        result = self._run(
+            combined,
+            current_soc_kwh=combined.max_soc_kwh,  # 9.0 kWh (90% of 10)
+            price_forecast=[0.05] * 4 + [0.30] * 4,
+        )
+        assert all(p <= 1e-6 for p in result.power_schedule_kw), (
+            f"At max SoC should not charge: {result.power_schedule_kw}"
+        )
+
+    def test_all_packs_fully_discharged_no_discharging(self):
+        """When combined SoC is at min, the optimizer must not discharge."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        pack = BatteryConfig(
+            capacity_kwh=5.0,
+            max_charge_power_kw=2.5,
+            max_discharge_power_kw=2.5,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        combined = aggregate_battery_configs([pack, pack])
+
+        result = self._run(
+            combined,
+            current_soc_kwh=combined.min_soc_kwh,  # 1.0 kWh (10% of 10)
+            price_forecast=[0.30] * 4 + [0.05] * 4,
+        )
+        assert all(p >= -1e-6 for p in result.power_schedule_kw), (
+            f"At min SoC should not discharge: {result.power_schedule_kw}"
+        )
+
+    # ------------------------------------------------------------------
+    # 8. Asymmetric min/max SoC percent across packs
+    # ------------------------------------------------------------------
+
+    def test_asymmetric_soc_limits_combined_usable_range(self):
+        """Two packs with different min/max SoC % must yield the correct combined
+        kWh limits (sum of individual kWh limits).
+        """
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        conservative = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=20.0,  # min = 2.0 kWh
+            max_soc_percent=80.0,  # max = 8.0 kWh  → 6.0 kWh usable
+        )
+        aggressive = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=5.0,  # min = 0.5 kWh
+            max_soc_percent=95.0,  # max = 9.5 kWh  → 9.0 kWh usable
+        )
+        combined = aggregate_battery_configs([conservative, aggressive])
+
+        assert combined.min_soc_kwh == pytest.approx(2.5)  # 2.0 + 0.5
+        assert combined.max_soc_kwh == pytest.approx(17.5)  # 8.0 + 9.5
+
+        result = self._run(combined, current_soc_kwh=10.0)
+        assert len(result.power_schedule_kw) == 8
+        for soc in result.soc_schedule_kwh:
+            assert soc >= combined.min_soc_kwh - 0.1
+            assert soc <= combined.max_soc_kwh + 0.1
+
+
 class TestFilterOscillationsGetDischargeCostZeroTotal:
     """Cover line 922: get_discharge_value returns price when total_kw == 0."""
 
@@ -1769,3 +2538,38 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
         )
         assert isinstance(result_power, list)
         assert len(result_power) == 2
+
+
+class TestEffOverrideZeroGuard:
+    """T3: discharge_eff_override=0.0 must not cause ZeroDivisionError (A3 fix)."""
+
+    def test_zero_discharge_eff_override_falls_back_to_sqrt_rte(self, battery_config):
+        """A discharge_eff_override of 0.0 is ignored; sqrt(RTE) is used instead."""
+        prices = [0.10, 0.30, 0.10, 0.30]
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=prices,
+            feed_in_forecast=prices,
+            pv_forecast=[0.0, 0.0, 0.0, 0.0],
+            consumption_forecast=[1.0, 1.0, 1.0, 1.0],
+            discharge_eff_override=0.0,
+        )
+        # Should complete without ZeroDivisionError and return a valid schedule.
+        assert result is not None
+        assert len(result.power_schedule_kw) == 4
+
+    def test_zero_charge_eff_override_falls_back_to_sqrt_rte(self, battery_config):
+        """A charge_eff_override of 0.0 is ignored; sqrt(RTE) is used instead."""
+        prices = [0.10, 0.30, 0.10, 0.30]
+        result = optimize_battery_schedule(
+            battery_config=battery_config,
+            current_soc_kwh=5.0,
+            price_forecast=prices,
+            feed_in_forecast=prices,
+            pv_forecast=[0.0, 0.0, 0.0, 0.0],
+            consumption_forecast=[1.0, 1.0, 1.0, 1.0],
+            charge_eff_override=0.0,
+        )
+        assert result is not None
+        assert len(result.power_schedule_kw) == 4

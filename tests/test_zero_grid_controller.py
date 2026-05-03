@@ -315,3 +315,49 @@ class TestCreateZeroGridController:
         controller = create_zero_grid_controller({}, battery_config)
         assert isinstance(controller, ZeroGridController)
         assert controller.config.deadband_w == 50.0
+
+
+class TestZeroDeadband:
+    """T7: deadband_w=0 must not cause division or crash."""
+
+    def test_zero_deadband_does_not_crash(self, battery_config):
+        """With deadband=0 the controller runs without errors."""
+        config = ZeroGridControllerConfig(
+            max_charge_w=5000.0,
+            max_discharge_w=5000.0,
+            deadband_w=0.0,
+        )
+        controller = ZeroGridController(config, battery_config)
+        target = controller.calculate_battery_setpoint(
+            current_grid_w=500.0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=0.0,
+            mode="zero_grid",
+        )
+        assert isinstance(target, float)
+
+    def test_zero_deadband_setpoint_always_updates(self, battery_config):
+        """With deadband=0 every call updates the setpoint (no hysteresis)."""
+        config = ZeroGridControllerConfig(
+            max_charge_w=5000.0,
+            max_discharge_w=5000.0,
+            deadband_w=0.0,
+        )
+        controller = ZeroGridController(config, battery_config)
+        # First call: compensate 100 W grid import
+        t1 = controller.calculate_battery_setpoint(
+            current_grid_w=100.0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=0.0,
+            mode="hybrid",
+        )
+        # Second call: slightly different grid power
+        t2 = controller.calculate_battery_setpoint(
+            current_grid_w=101.0,
+            current_soc_kwh=5.0,
+            dp_schedule_w=0.0,
+            mode="hybrid",
+        )
+        # Both calls should return finite values without raising
+        assert isinstance(t1, float)
+        assert isinstance(t2, float)

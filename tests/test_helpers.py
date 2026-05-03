@@ -820,6 +820,21 @@ class TestNormalizePriceValueEdgeCases:
         prices, interval = extract_price_forecast_with_interval(state)
         assert prices == [0.15, 0.20]
 
+    def test_nan_string_entry_in_forecast_prices_is_skipped(self):
+        """A 'nan' string converts to float nan — should be filtered out (T4)."""
+        state = self._make_state({"forecast_prices": ["nan", 0.20, "inf", 0.30]})
+        prices, interval = extract_price_forecast_with_interval(state)
+        assert prices == [0.20, 0.30]
+
+    def test_nan_float_entry_in_forecast_prices_is_skipped(self):
+        """A float NaN entry is filtered out (T4)."""
+
+        state = self._make_state(
+            {"forecast_prices": [float("nan"), 0.20, float("inf"), 0.30]}
+        )
+        prices, interval = extract_price_forecast_with_interval(state)
+        assert prices == [0.20, 0.30]
+
 
 class TestDetectIntervalWithDatetimeStart:
     """Cover _detect_interval_from_entries with datetime start objects (line 44)."""

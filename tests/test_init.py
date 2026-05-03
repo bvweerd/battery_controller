@@ -397,3 +397,29 @@ async def test_reset_charge_efficiency_service_targets_requested_entry():
 
     runtime_1.optimization_coordinator.async_reset_charge_eff_calibration.assert_not_called()
     runtime_2.optimization_coordinator.async_reset_charge_eff_calibration.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_unload_entry_coordinator_shutdown_exception():
+    """M2: if one coordinator raises during shutdown, the others still run."""
+    from custom_components.battery_controller import async_unload_entry
+
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data()
+    # Make forecast_coordinator.async_shutdown raise
+    entry.runtime_data.forecast_coordinator.async_shutdown = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+    mock_hass.config_entries.async_entries = MagicMock(return_value=[entry])
+    mock_hass.services.has_service = MagicMock(return_value=False)
+
+    # Should not raise despite forecast_coordinator blowing up
+    result = await async_unload_entry(mock_hass, entry)
+
+    assert result is True
+    # The remaining two coordinators must still have been shut down
+    entry.runtime_data.optimization_coordinator.async_shutdown.assert_called_once()
+    entry.runtime_data.weather_coordinator.async_shutdown.assert_called_once()

@@ -445,6 +445,12 @@ def optimize_battery_schedule(
     # Charging uses the (possibly corrected) efficiency; discharging uses its own
     # correction independently. Separating them prevents a speed correction on one
     # side from inflating the break-even price on the other.
+    # Guard against zero or negative efficiency overrides to prevent
+    # ZeroDivisionError in SoC transition calculations and _rebuild_schedule.
+    if charge_eff_override is not None and charge_eff_override <= 0.0:
+        charge_eff_override = None
+    if discharge_eff_override is not None and discharge_eff_override <= 0.0:
+        discharge_eff_override = None
     charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
     discharge_eff = (
         discharge_eff_override if discharge_eff_override is not None else sqrt_rte
