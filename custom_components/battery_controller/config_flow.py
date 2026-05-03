@@ -164,6 +164,23 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     validated = schema(user_input)
     if validated[CONF_MIN_SOC_PERCENT] >= validated[CONF_MAX_SOC_PERCENT]:
         raise vol.Invalid("min_soc_percent must be less than max_soc_percent")
+    if (
+        CONF_HIGH_SOC_MAX_CHARGE_KW in validated
+        and validated[CONF_HIGH_SOC_MAX_CHARGE_KW] > validated[CONF_MAX_CHARGE_POWER_KW]
+    ):
+        raise vol.Invalid(
+            "high_soc_max_charge_kw must not exceed max_charge_power_kw",
+            path=[CONF_HIGH_SOC_MAX_CHARGE_KW],
+        )
+    if (
+        CONF_LOW_SOC_MAX_DISCHARGE_KW in validated
+        and validated[CONF_LOW_SOC_MAX_DISCHARGE_KW]
+        > validated[CONF_MAX_DISCHARGE_POWER_KW]
+    ):
+        raise vol.Invalid(
+            "low_soc_max_discharge_kw must not exceed max_discharge_power_kw",
+            path=[CONF_LOW_SOC_MAX_DISCHARGE_KW],
+        )
     result: dict[str, Any] = {}
     if name := validated.get(CONF_NAME, "").strip():
         result[CONF_NAME] = name

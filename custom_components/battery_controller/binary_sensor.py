@@ -33,6 +33,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up Battery Controller binary sensors from a config entry."""
     data = entry.runtime_data
+    if data is None:
+        return
     optimization_coordinator = data.optimization_coordinator
     device = data.device
 
