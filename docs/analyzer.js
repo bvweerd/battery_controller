@@ -508,7 +508,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
       : null;
   const dischargeEffOverride =
     dischargeEffCorrection != null && dischargeEffCorrection < 0.995
-      ? nominalSqrtRte * dischargeEffCorrection
+      ? nominalSqrtRte / dischargeEffCorrection
       : null;
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,

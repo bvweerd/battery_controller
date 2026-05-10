@@ -64,10 +64,12 @@ def _rebuild_schedule(
     pv_dc_coupled: bool = False,
     pv_dc_efficiency: float = 0.97,
     discharge_eff: float | None = None,
+    charge_eff: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Rebuild schedule after post-processing so SoC stays physically consistent."""
     sqrt_rte = math.sqrt(rte)
     _discharge_eff = discharge_eff if discharge_eff is not None else sqrt_rte
+    _charge_eff = charge_eff if charge_eff is not None else sqrt_rte
     rebuilt_power = list(power_schedule_kw)
     rebuilt_mode: list[str] = []
     soc_schedule = [initial_soc_kwh]
@@ -86,11 +88,11 @@ def _rebuild_schedule(
 
         if commanded_power_kw > 0:
             current_soc_kwh = min(
-                current_soc_kwh + commanded_power_kw * step_h * sqrt_rte,
+                current_soc_kwh + commanded_power_kw * step_h * _charge_eff,
                 max_soc_kwh,
             )
             delta_soc = current_soc_kwh - prev_soc_kwh
-            actual_power_kw = delta_soc / (step_h * sqrt_rte) if step_h > 0 else 0.0
+            actual_power_kw = delta_soc / (step_h * _charge_eff) if step_h > 0 else 0.0
         elif commanded_power_kw < 0:
             current_soc_kwh = max(
                 current_soc_kwh - abs(commanded_power_kw) * step_h / _discharge_eff,
@@ -775,6 +777,7 @@ def optimize_battery_schedule(
         pv_dc_coupled=battery_config.pv_dc_coupled,
         pv_dc_efficiency=battery_config.pv_dc_efficiency,
         discharge_eff_override=discharge_eff_override,
+        charge_eff_override=charge_eff_override,
     )
 
     # Post-process: suppress micro-cycles (P5.1)
@@ -791,6 +794,7 @@ def optimize_battery_schedule(
         pv_dc_efficiency=battery_config.pv_dc_efficiency,
         min_cycle_kwh=MIN_CYCLE_KWH,
         discharge_eff_override=discharge_eff_override,
+        charge_eff_override=charge_eff_override,
     )
 
     # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
@@ -892,6 +896,7 @@ def _filter_oscillations(
     pv_dc_coupled: bool = False,
     pv_dc_efficiency: float = 0.97,
     discharge_eff_override: float | None = None,
+    charge_eff_override: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out unprofitable oscillations from the schedule.
 
@@ -1082,6 +1087,7 @@ def _filter_oscillations(
         pv_dc_coupled=pv_dc_coupled,
         pv_dc_efficiency=pv_dc_efficiency,
         discharge_eff=discharge_eff_override,
+        charge_eff=charge_eff_override,
     )
 
 
@@ -1098,6 +1104,7 @@ def _filter_micro_cycles(
     pv_dc_efficiency: float = 0.97,
     min_cycle_kwh: float = 0.2,
     discharge_eff_override: float | None = None,
+    charge_eff_override: float | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out micro-cycles whose total energy is below min_cycle_kwh.
 
@@ -1166,6 +1173,7 @@ def _filter_micro_cycles(
                 pv_dc_coupled=pv_dc_coupled,
                 pv_dc_efficiency=pv_dc_efficiency,
                 discharge_eff=discharge_eff_override,
+                charge_eff=charge_eff_override,
             )[2],
         )
 
@@ -1180,6 +1188,7 @@ def _filter_micro_cycles(
         pv_dc_coupled=pv_dc_coupled,
         pv_dc_efficiency=pv_dc_efficiency,
         discharge_eff=discharge_eff_override,
+        charge_eff=charge_eff_override,
     )
 
 

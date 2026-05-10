@@ -749,11 +749,19 @@ function renderDiagnostics(raw) {
     : '—';
   const chgEffCorrClass = chgEffCorr !== undefined && chgEffCorr < 0.95 ? 'badge badge-fail'
     : chgEffCorr !== undefined && chgEffCorr < 0.995 ? 'badge badge-idle' : '';
+  const disEffCorr = opt.discharge_eff_correction ?? lastRun?.discharge_eff_correction;
+  const disEffSamples = opt.discharge_eff_samples ?? lastRun?.discharge_eff_samples;
+  const disEffCorrStr = disEffCorr !== undefined
+    ? `${(disEffCorr * 100).toFixed(1)}%` + (disEffSamples !== undefined ? ` (n=${disEffSamples})` : '')
+    : '—';
+  const disEffCorrClass = disEffCorr !== undefined && disEffCorr < 0.95 ? 'badge badge-fail'
+    : disEffCorr !== undefined && disEffCorr < 0.995 ? 'badge badge-idle' : '';
   document.getElementById('cfg-eff').innerHTML =
     kv('Round-trip efficiency', `${((bc.round_trip_efficiency||0)*100).toFixed(1)}%`) +
     kv('Charge eff (√RTE)', `${((bc.charge_efficiency||0)*100).toFixed(2)}%`) +
     kv('Discharge eff (√RTE)', `${((bc.discharge_efficiency||0)*100).toFixed(2)}%`) +
     kv('Charge eff correction', chgEffCorrClass ? `<span class="${chgEffCorrClass}">${chgEffCorrStr}</span>` : chgEffCorrStr) +
+    kv('Discharge eff correction', disEffCorrClass ? `<span class="${disEffCorrClass}">${disEffCorrStr}</span>` : disEffCorrStr) +
     kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
     kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
@@ -1084,6 +1092,7 @@ function getSimParams() {
     stepH:         g('sp-step-h') || 0.25,
     terminalShadowPrice: g('sp-terminal') || null,
     charge_eff_correction: window._simChargeEffCorrection ?? null,
+    discharge_eff_correction: window._simDischargeEffCorrection ?? null,
   };
 }
 
@@ -1154,6 +1163,11 @@ function prefillSim(d) {
     ?? ((opt.optimizer_run_log && opt.optimizer_run_log.length)
       ? opt.optimizer_run_log[opt.optimizer_run_log.length - 1].charge_eff_correction
       : null);
+  window._simDischargeEffCorrection =
+    opt.discharge_eff_correction
+    ?? ((opt.optimizer_run_log && opt.optimizer_run_log.length)
+      ? opt.optimizer_run_log[opt.optimizer_run_log.length - 1].discharge_eff_correction
+      : null);
 }
 
 function runSimulator() {
@@ -1181,6 +1195,7 @@ function runSimulator() {
         degradCost: degradPerKwhSim, minPriceSpread: p.minPriceSpread,
         pvDcFc: null, terminalShadowPrice: termSP,
         chargeEffCorrection: p.charge_eff_correction,
+        dischargeEffCorrection: p.discharge_eff_correction,
       };
 
       const t0  = performance.now();
