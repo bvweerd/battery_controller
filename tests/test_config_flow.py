@@ -418,6 +418,68 @@ async def test_battery_subentry_invalid_rte_rejected(
     assert len(v4_config_entry.subentries) == 0
 
 
+async def test_battery_subentry_min_soc_equals_max_soc_rejected(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+    battery_subentry_data: dict,
+) -> None:
+    """min_soc_percent == max_soc_percent returns form with error (T2 — F1 check)."""
+    result = await _init_battery_subentry_flow(hass, v4_config_entry.entry_id)
+    # Both 50.0 values pass schema-level range checks individually, but
+    # _validate_battery_subentry raises vol.Invalid → handler shows form with errors.
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            **battery_subentry_data,
+            "min_soc_percent": 50.0,
+            "max_soc_percent": 50.0,
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert "base" in result["errors"]
+    assert len(v4_config_entry.subentries) == 0
+
+
+async def test_battery_subentry_high_soc_max_charge_exceeds_max_rejected(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+    battery_subentry_data: dict,
+) -> None:
+    """high_soc_max_charge_kw > max_charge_power_kw returns form with error (F2)."""
+    result = await _init_battery_subentry_flow(hass, v4_config_entry.entry_id)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            **battery_subentry_data,
+            "high_soc_charge_threshold_pct": 80.0,
+            "high_soc_max_charge_kw": 10.0,  # exceeds max_charge_power_kw=5.0
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert "base" in result["errors"]
+    assert len(v4_config_entry.subentries) == 0
+
+
+async def test_battery_subentry_low_soc_max_discharge_exceeds_max_rejected(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+    battery_subentry_data: dict,
+) -> None:
+    """low_soc_max_discharge_kw > max_discharge_power_kw returns form with error (F3)."""
+    result = await _init_battery_subentry_flow(hass, v4_config_entry.entry_id)
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={
+            **battery_subentry_data,
+            "low_soc_discharge_threshold_pct": 20.0,
+            "low_soc_max_discharge_kw": 8.0,  # exceeds max_discharge_power_kw=5.0
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert "base" in result["errors"]
+    assert len(v4_config_entry.subentries) == 0
+
+
 # ---------------------------------------------------------------------------
 # Battery subentry flow — reconfigure (edit)
 # ---------------------------------------------------------------------------

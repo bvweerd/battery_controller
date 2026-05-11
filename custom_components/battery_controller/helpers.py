@@ -19,9 +19,12 @@ def _normalize_price_value(value: Any) -> float | None:
         value = value.get("value") or value.get("price")
 
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _detect_interval_from_entries(entries: Any) -> int:

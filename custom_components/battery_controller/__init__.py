@@ -305,9 +305,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Unloading entry %s", entry.entry_id)
 
     if entry.runtime_data is not None:
-        await entry.runtime_data.forecast_coordinator.async_shutdown()
-        await entry.runtime_data.optimization_coordinator.async_shutdown()
-        await entry.runtime_data.weather_coordinator.async_shutdown()
+        for coord in (
+            entry.runtime_data.forecast_coordinator,
+            entry.runtime_data.optimization_coordinator,
+            entry.runtime_data.weather_coordinator,
+        ):
+            try:
+                await coord.async_shutdown()
+            except Exception:
+                _LOGGER.exception("Error shutting down coordinator %s", coord)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:

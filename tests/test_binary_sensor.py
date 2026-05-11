@@ -247,3 +247,53 @@ async def test_async_setup_entry_adds_entities():
 
     async_add_entities.assert_called_once()
     assert len(added) == 2
+
+
+class TestPVCurtailmentMissingControlAction:
+    """M4: target_power_w key absent from control_action dict."""
+
+    def _make_sensor(self, data=None):
+        coord = _make_coord(data)
+        entry = _make_entry()
+        device = _make_device()
+        return PVCurtailmentSensor(coord, device, entry)
+
+    def test_missing_target_power_w_does_not_raise(self):
+        """control_action dict with no target_power_w key falls back to 0.0."""
+        # Condition B requires setpoint > _MIN_SETPOINT_W (200W);
+        # default 0.0 means it never triggers — sensor should return False.
+        sensor = self._make_sensor(
+            data={
+                "current_feed_in_price": -0.05,
+                "battery_state": MagicMock(soc_kwh=5.0, power_kw=1.0, soc_percent=50.0),
+                "control_action": {},  # no target_power_w key
+            }
+        )
+        sensor.coordinator.battery_config.max_soc_kwh = 10.0
+        assert sensor.is_on is False
+
+    def test_none_control_action_does_not_raise(self):
+        """control_action absent from data dict entirely falls back to empty dict."""
+        sensor = self._make_sensor(
+            data={
+                "current_feed_in_price": -0.05,
+                "battery_state": MagicMock(soc_kwh=5.0, power_kw=1.0, soc_percent=50.0),
+                # no control_action key at all
+            }
+        )
+        sensor.coordinator.battery_config.max_soc_kwh = 10.0
+        assert sensor.is_on is False
+
+
+@pytest.mark.asyncio
+async def test_async_setup_entry_none_runtime_data():
+    """async_setup_entry returns early (no entities) when runtime_data is None."""
+    from custom_components.battery_controller.binary_sensor import async_setup_entry
+
+    entry = MagicMock()
+    entry.runtime_data = None
+
+    async_add_entities = MagicMock()
+    await async_setup_entry(MagicMock(), entry, async_add_entities)
+
+    async_add_entities.assert_not_called()
