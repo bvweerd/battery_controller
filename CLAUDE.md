@@ -15,7 +15,7 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
   - `forecast_models.py` — PV and consumption forecasting + historical price model
   - `battery_model.py` — battery physics (RTE split as √RTE per direction)
   - `config_flow.py` — setup + options flow with `section()` helpers
-  - `const.py` — SOC_RESOLUTION_WH=25, POWER_STEP_W=100 (boundary actions handle residual capacity), all config keys
+  - `const.py` — SOC_RESOLUTION_WH=10, POWER_STEP_W=100 (boundary actions handle residual capacity), all config keys
 - `tests/` — pytest with `pytest-homeassistant-custom-component` + syrupy snapshots
 
 ## HA Conventions
