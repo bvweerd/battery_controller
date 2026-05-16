@@ -83,7 +83,7 @@ n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
 soc_states[i] = min_soc_wh + i × soc_resolution_wh
 ```
 
-- **`SOC_RESOLUTION_WH`** (default: 25 Wh) is the only grid constant; the power step is derived from it.
+- **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the only grid constant; the power step is derived from it.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
@@ -91,8 +91,8 @@ soc_states[i] = min_soc_wh + i × soc_resolution_wh
 The power step uses `POWER_STEP_W` as a practical minimum to prevent unprofitable trickle actions at near-marginal prices. The aligned step ensures the smallest action crosses at least one SoC state:
 
 ```
-aligned_step_w   = soc_resolution_wh / full_step_hours   (e.g. 25 Wh / 1 h = 25 W)
-power_step_w     = max(POWER_STEP_W, aligned_step_w)      (e.g. max(100, 25) = 100 W)
+aligned_step_w   = soc_resolution_wh / full_step_hours   (e.g. 10 Wh / 1 h = 10 W)
+power_step_w     = max(POWER_STEP_W, aligned_step_w)      (e.g. max(100, 10) = 100 W)
 charge_actions   = [max_charge_w, ..., 2×step, step, 0]   (highest-first)
 discharge_actions = [-step, -2×step, ..., -max_discharge_w] (lowest-first)
 actions = discharge_actions + charge_actions
@@ -279,28 +279,24 @@ After the backward pass, `V[0][s]` gives the optimal total cost from now to the 
 
 ## 7. Forward Pass (Schedule Extraction)
 
-Starting from the current SoC (`current_soc_wh` → nearest discrete state), the forward pass traces the optimal trajectory:
+The forward pass re-evaluates the V-table at the actual continuous SoC instead of snapping to the nearest discrete state and following the policy table. At each step it enumerates the same action set as the backward pass (including boundary actions) and picks the minimum-cost action:
 
 ```python
-current_soc = nearest_soc_state(current_soc_kwh)
+current_soc = current_soc_kwh * 1000  # continuous, not snapped
 
 for t in range(N):
-    s_idx = nearest_soc_idx(current_soc)
-    a = policy[t][s_idx]
-    record a as power_schedule_kw[t]
+    soc_idx = nearest_soc_idx(current_soc)
+    best_action, best_new_soc = argmin over all actions a:
+        step_cost(t, current_soc, a) + V[t+1][nearest_soc_idx(new_soc_after(a))]
 
-    if a > 0:   # charging
-        current_soc += a × dt × sqrt(RTE)
-        mode = "charging"
-    elif a < 0: # discharging
-        current_soc -= |a| × dt / sqrt(RTE)
-        mode = "discharging"
-    else:       # idle (passive DC PV if applicable)
-        current_soc += passive_dc_pv_charge
-        mode = "idle"
-
+    record best_action as power_schedule_kw[t]
+    current_soc = best_new_soc
     soc_schedule_kwh[t+1] = current_soc / 1000
 ```
+
+The sub-resolution skip still applies: non-zero actions that do not cross a SoC state boundary are skipped. Boundary actions (exact drain-to-min / fill-to-max) are also evaluated as in the backward pass.
+
+This eliminates the SoC discretisation error that accumulates when the policy for a neighbouring discrete state differs from the optimal action at the true SoC.
 
 This gives:
 - `power_schedule_kw[t]` — battery power at each step (positive = charge)

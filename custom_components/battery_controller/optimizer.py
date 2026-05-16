@@ -711,37 +711,133 @@ def optimize_battery_schedule(
     mode_schedule = []
     soc_schedule_kwh = [current_soc_kwh]
 
-    current_soc = float(soc_states[current_soc_idx])
+    # Forward pass: V-table re-evaluation from actual continuous SoC.
+    # Instead of snapping to the nearest discrete state and following the policy
+    # table, we keep the real SoC and at each step enumerate the same action set
+    # as the backward pass (including boundary actions), evaluating
+    # step_cost + V[t+1][new_soc_idx] directly. This eliminates the SoC
+    # discretisation error that accumulates when the policy for a neighbouring
+    # discrete state differs from the optimal action at the true SoC.
+    current_soc = current_soc_kwh * 1000.0  # continuous, not snapped
 
     for t in range(n_steps):
         time_step_hours = step_durations_hours[t]
-        soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
-        action_w = policy[t][soc_idx]
+        grid_price = price_forecast[t]
+        feed_in_price = feed_in_forecast[t] if t < len(feed_in_forecast) else grid_price
+        pv_w = pv_forecast[t] * 1000 if t < len(pv_forecast) else 0
         pv_dc_w = pv_dc_forecast[t] * 1000 if t < len(pv_dc_forecast) else 0.0
+        consumption_w = (
+            consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
+        )
 
-        power_kw = action_w / 1000
-        power_schedule_kw.append(power_kw)
+        soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
+        max_chg_w = battery_config.max_charge_at_soc(current_soc / 1000) * 1000
+        max_dis_w = battery_config.max_discharge_at_soc(current_soc / 1000) * 1000
 
-        if action_w > 0:
+        best_cost = INF
+        best_action = 0.0
+        best_new_soc = current_soc
+
+        for action_w in actions:
+            if action_w > 0:
+                if action_w > max_chg_w:
+                    continue
+                new_soc_wh = current_soc + action_w * time_step_hours * charge_eff
+                if new_soc_wh > max_soc_wh:
+                    continue
+            elif action_w < 0:
+                if -action_w > max_dis_w:
+                    continue
+                new_soc_wh = (
+                    current_soc - abs(action_w) * time_step_hours / discharge_eff
+                )
+                if new_soc_wh < min_soc_wh:
+                    continue
+            else:
+                if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                    dc_eff = battery_config.pv_dc_efficiency
+                    headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
+                    passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
+                    new_soc_wh = current_soc + passive_wh
+                else:
+                    new_soc_wh = current_soc
+
+            new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
+            if action_w != 0 and new_soc_idx == soc_idx:
+                continue
+
+            step_cost = calculate_step_cost(
+                time_step_hours=time_step_hours,
+                soc_wh=current_soc,
+                action_w=action_w,
+                grid_price=grid_price,
+                feed_in_price=feed_in_price,
+                pv_production_w=pv_w,
+                consumption_w=consumption_w,
+                rte=battery_config.round_trip_efficiency,
+                degradation_cost_per_kwh=degradation_cost_per_kwh,
+                battery_config=battery_config,
+                pv_dc_production_w=pv_dc_w,
+            )
+            total_cost = step_cost + V[t + 1][new_soc_idx]
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best_action = action_w
+                best_new_soc = new_soc_wh
+
+        # Boundary actions: exact power to drain to min or fill to max SoC
+        if current_soc > min_soc_wh:
+            drain_w = (current_soc - min_soc_wh) * discharge_eff / time_step_hours
+            if 0 < drain_w <= max_dis_w:
+                step_cost = calculate_step_cost(
+                    time_step_hours=time_step_hours,
+                    soc_wh=current_soc,
+                    action_w=-drain_w,
+                    grid_price=grid_price,
+                    feed_in_price=feed_in_price,
+                    pv_production_w=pv_w,
+                    consumption_w=consumption_w,
+                    rte=battery_config.round_trip_efficiency,
+                    degradation_cost_per_kwh=degradation_cost_per_kwh,
+                    battery_config=battery_config,
+                    pv_dc_production_w=pv_dc_w,
+                )
+                total_cost = step_cost + V[t + 1][0]
+                if total_cost < best_cost:
+                    best_cost = total_cost
+                    best_action = -drain_w
+                    best_new_soc = float(min_soc_wh)
+
+        if current_soc < max_soc_wh:
+            fill_w = (max_soc_wh - current_soc) / (time_step_hours * charge_eff)
+            if 0 < fill_w <= max_chg_w:
+                step_cost = calculate_step_cost(
+                    time_step_hours=time_step_hours,
+                    soc_wh=current_soc,
+                    action_w=fill_w,
+                    grid_price=grid_price,
+                    feed_in_price=feed_in_price,
+                    pv_production_w=pv_w,
+                    consumption_w=consumption_w,
+                    rte=battery_config.round_trip_efficiency,
+                    degradation_cost_per_kwh=degradation_cost_per_kwh,
+                    battery_config=battery_config,
+                    pv_dc_production_w=pv_dc_w,
+                )
+                total_cost = step_cost + V[t + 1][n_soc_states - 1]
+                if total_cost < best_cost:
+                    best_cost = total_cost
+                    best_action = fill_w
+                    best_new_soc = float(max_soc_wh)
+
+        power_schedule_kw.append(best_action / 1000)
+        if best_action > 0:
             mode_schedule.append(ACTION_CHARGING)
-            current_soc = min(
-                current_soc + action_w * time_step_hours * charge_eff, float(max_soc_wh)
-            )
-        elif action_w < 0:
+        elif best_action < 0:
             mode_schedule.append(ACTION_DISCHARGING)
-            current_soc = max(
-                current_soc - abs(action_w) * time_step_hours / discharge_eff,
-                float(min_soc_wh),
-            )
         else:
-            # Idle: account for passive DC PV charging in forward pass
-            if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                dc_eff = battery_config.pv_dc_efficiency
-                headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
-                passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
-                current_soc = current_soc + passive_wh
             mode_schedule.append(ACTION_IDLE)
-
+        current_soc = best_new_soc
         soc_schedule_kwh.append(current_soc / 1000)
 
     # Oscillation filter window: at least 2 h, but scale with battery size so
