@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 import math
 from collections import deque
@@ -51,7 +50,6 @@ from .const import (
     MODE_MANUAL,
     MODE_ZERO_GRID,
     PRICE_CHANGE_REOPTIMIZE_THRESHOLD,
-    SOC_UNCERTAINTY_RESERVE_FRACTION,
     STALE_SENSOR_MULTIPLIER,
     BATTERY_MODE_THRESHOLD_W,
     SETPOINT_STABLE_THRESHOLD_KW,
@@ -1801,41 +1799,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Discharge efficiency calibration: same principle for discharging steps.
         self._update_discharge_eff_calibration(battery_state)
 
-        # Uncertainty-based SoC reserve (P2.3): when GHI forecast is highly variable
-        # (cloudy/intermittent conditions), keep extra buffer so the battery is not
-        # discharged based on optimistic solar estimates that don't materialise.
         battery_config = self.battery_config
-        weather_raw = self.weather_coordinator.data or {}
-        radiation_forecast_raw = weather_raw.get("radiation_forecast", [])
-        daylight_ghi = [v for v in radiation_forecast_raw[:24] if v > 50.0]
-        if len(daylight_ghi) > 2:
-            avg_ghi = sum(daylight_ghi) / len(daylight_ghi)
-            variance_ghi = sum((v - avg_ghi) ** 2 for v in daylight_ghi) / len(
-                daylight_ghi
-            )
-            cv_ghi = (variance_ghi**0.5 / avg_ghi) if avg_ghi > 0 else 0.0
-            # Scale reserve linearly with coefficient of variation, up to SOC_UNCERTAINTY_RESERVE_FRACTION of capacity
-            uncertainty_reserve_kwh = min(
-                SOC_UNCERTAINTY_RESERVE_FRACTION * battery_config.capacity_kwh,
-                cv_ghi * SOC_UNCERTAINTY_RESERVE_FRACTION * battery_config.capacity_kwh,
-            )
-            if uncertainty_reserve_kwh > 0.01:
-                extra_pct = (
-                    uncertainty_reserve_kwh / battery_config.capacity_kwh
-                ) * 100.0
-                new_min_pct = min(
-                    battery_config.min_soc_percent + extra_pct,
-                    battery_config.max_soc_percent - 5.0,
-                )
-                battery_config = dataclasses.replace(
-                    battery_config, min_soc_percent=new_min_pct
-                )
-                _LOGGER.debug(
-                    "Forecast uncertainty (CV=%.2f) → min_soc raised by %.1f%% to %.1f%%",
-                    cv_ghi,
-                    extra_pct,
-                    new_min_pct,
-                )
 
         # Apply charge efficiency correction only to the charge-side SoC
         # transition: when the battery charges slower than modelled, the DP
