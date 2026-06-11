@@ -546,7 +546,12 @@ def optimize_battery_schedule(
         median_price = sorted_prices[len(sorted_prices) // 2]
         clipped_tail = [min(p, median_price) for p in feed_in_forecast[-lookback:]]
         avg_tail = sum(clipped_tail) / len(clipped_tail)
-        terminal_price = min(feed_in_forecast[-1], avg_tail)
+        # Clamp at 0: a negative feed-in tail must not give stored energy a
+        # negative terminal value. The horizon end is artificial — the battery
+        # is never forced to sell at a loss, so holding energy is worth at
+        # least zero. Without the clamp the DP dumps energy before the horizon
+        # ends purely to escape the artificial penalty.
+        terminal_price = max(0.0, min(feed_in_forecast[-1], avg_tail))
     else:
         terminal_price = 0.0
     for s_idx, soc_wh in enumerate(soc_states):
