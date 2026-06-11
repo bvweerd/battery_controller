@@ -55,6 +55,16 @@ def _detect_interval_from_entries(entries: Any) -> int:
     return 60
 
 
+def _first_entry_has_timestamp(entries: Any) -> bool:
+    """Return True when the first entry is a dict carrying a start timestamp."""
+    if not isinstance(entries, (list, tuple)) or not entries:
+        return False
+    first = entries[0]
+    return isinstance(first, dict) and bool(
+        first.get("start") or first.get("from") or first.get("time")
+    )
+
+
 def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int]:
     """Extract price forecast and detected interval from a Home Assistant price state.
 
@@ -140,9 +150,16 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         if interval_forecast:
             return interval_forecast, detected_interval
 
-    # Priority 3: forecast_prices (no per-entry skip-past; interval from timestamps)
+    # Priority 3: forecast_prices (skip elapsed periods when entries carry
+    # timestamps; plain value lists are taken as-is)
     forecast_attr = state.attributes.get("forecast_prices")
     if isinstance(forecast_attr, (list, tuple)):
+        if _first_entry_has_timestamp(forecast_attr):
+            interval_forecast = []
+            detected_interval = 60
+            _extend_interval_forecast(forecast_attr, skip_past=True)
+            if interval_forecast:
+                return interval_forecast, detected_interval
         interval = _detect_interval_from_entries(forecast_attr)
         forecast: list[float] = []
         for entry in forecast_attr:
@@ -152,9 +169,15 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         if forecast:
             return forecast, interval
 
-    # Priority 4: generic forecast (no per-entry skip-past)
+    # Priority 4: generic forecast (same timestamp-aware skip)
     generic_forecast = state.attributes.get("forecast")
     if isinstance(generic_forecast, (list, tuple)):
+        if _first_entry_has_timestamp(generic_forecast):
+            interval_forecast = []
+            detected_interval = 60
+            _extend_interval_forecast(generic_forecast, skip_past=True)
+            if interval_forecast:
+                return interval_forecast, detected_interval
         interval = _detect_interval_from_entries(generic_forecast)
         forecast = []
         for entry in generic_forecast:
@@ -340,9 +363,20 @@ def extract_price_forecast_with_timestamps(
             )
             return interval_forecast, filled, detected_interval
 
-    # Priority 3: forecast_prices — detect interval from entries if timestamps present
+    # Priority 3: forecast_prices — skip elapsed periods and keep real
+    # timestamps when entries carry them; plain value lists are taken as-is
     forecast_attr = state.attributes.get("forecast_prices")
     if isinstance(forecast_attr, (list, tuple)):
+        if _first_entry_has_timestamp(forecast_attr):
+            interval_forecast = []
+            interval_timestamps = []
+            detected_interval = 60
+            _extend_with_timestamps(forecast_attr, skip_past=True)
+            if interval_forecast:
+                filled = _fill_missing_timestamps(
+                    interval_timestamps, detected_interval, now
+                )
+                return interval_forecast, filled, detected_interval
         interval = _detect_interval_from_entries(forecast_attr)
         forecast: list[float] = []
         for entry in forecast_attr:
@@ -356,9 +390,19 @@ def extract_price_forecast_with_timestamps(
                 interval,
             )
 
-    # Priority 4: Generic forecast — detect interval if entries carry timestamps
+    # Priority 4: Generic forecast — same timestamp-aware skip
     generic_forecast = state.attributes.get("forecast")
     if isinstance(generic_forecast, (list, tuple)):
+        if _first_entry_has_timestamp(generic_forecast):
+            interval_forecast = []
+            interval_timestamps = []
+            detected_interval = 60
+            _extend_with_timestamps(generic_forecast, skip_past=True)
+            if interval_forecast:
+                filled = _fill_missing_timestamps(
+                    interval_timestamps, detected_interval, now
+                )
+                return interval_forecast, filled, detected_interval
         interval = _detect_interval_from_entries(generic_forecast)
         forecast = []
         for entry in generic_forecast:
