@@ -117,7 +117,6 @@ def run_sweep(diag_path: str) -> list[dict]:
                 degradation_cost_per_kwh=degradation_cost,
                 min_price_spread=min_price_spread,
                 pv_dc_forecast=pv_dc_forecast,
-                terminal_shadow_price=terminal_shadow_price,
             )
 
             power_schedule, mode_schedule, soc_schedule = forward_pass(

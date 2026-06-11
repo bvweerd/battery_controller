@@ -380,7 +380,6 @@ def optimize_battery_schedule(
     degradation_cost_per_kwh: float = 0.03,
     min_price_spread: float = 0.05,
     pv_dc_forecast: list[float] | None = None,  # kW (DC-coupled PV)
-    terminal_shadow_price: float | None = None,  # EUR/kWh from previous run
     charge_eff_override: float | None = None,  # Override charge-side efficiency only
     discharge_eff_override: float
     | None = None,  # Override discharge-side efficiency only
@@ -403,12 +402,6 @@ def optimize_battery_schedule(
         degradation_cost_per_kwh: Degradation cost in EUR/kWh
         min_price_spread: Minimum price spread for arbitrage
         pv_dc_forecast: DC-coupled PV production forecast in kW (optional)
-        terminal_shadow_price: Shadow price (λ) from the previous optimization
-            run, used as the terminal condition value for stored energy.  When
-            provided this replaces the feed-in tail average, producing a more
-            stable rolling-horizon schedule because λ is derived from the full
-            price structure rather than a single end-of-horizon price point.
-            Must be ≥ 0; negative values are ignored (fallback to feed-in tail).
         charge_eff_override: Override for the charge-side SoC transition only.
             When provided, charging state transitions use this value instead of
             sqrt(RTE) so the DP plans less charge within the step when charging
@@ -512,9 +505,9 @@ def optimize_battery_schedule(
     # re-optimisation the "best" hours are often the current hours, so this
     # circular dependency suppresses discharge exactly at the peak.  The tail
     # average is naturally below peak prices and avoids this trap.
-    # terminal_shadow_price is still passed to the caller and used by hybrid
-    # mode as the charge/discharge switching threshold — it is just no longer
-    # used to initialise V[T].
+    # The shadow price is still returned to the caller and used by hybrid
+    # mode as the charge/discharge switching threshold — it is just not used
+    # to initialise V[T].
     # The lookback window is time-based (6 h) so behaviour is identical for
     # 15-min, 30-min and 60-min price intervals.
     #
