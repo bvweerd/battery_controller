@@ -41,8 +41,10 @@ class OptimizationResult:
 
     # Shadow price: marginal value of 1 kWh stored right now (EUR/kWh).
     # Represents how much future costs decrease per additional kWh in the battery.
-    # Use as a threshold: charge when buy_price < shadow_price / sqrt(RTE),
-    # and discharge/export when feed_in_price > shadow_price * sqrt(RTE).
+    # Use as a threshold: charging 1 kWh AC stores sqrt(RTE) kWh worth λ each, so
+    # charge when buy_price < shadow_price × sqrt(RTE). Discharging 1 stored kWh
+    # yields sqrt(RTE) kWh AC, so discharge/export when
+    # feed_in_price > shadow_price / sqrt(RTE).
     shadow_price_eur_kwh: float
 
     # Metadata
