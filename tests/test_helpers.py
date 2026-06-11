@@ -1143,3 +1143,67 @@ class TestSolarPositionZenith:
 
         assert elev == pytest.approx(90.0)
         assert azim == 180.0
+
+
+class TestForecastSkipPast:
+    """forecast_prices / forecast entries with timestamps skip elapsed periods."""
+
+    def _make_entries(self, now):
+        from datetime import timedelta
+
+        return [
+            {"time": (now - timedelta(hours=2)).isoformat(), "price": 0.10},
+            {"time": (now - timedelta(hours=1)).isoformat(), "price": 0.11},
+            {"time": now.isoformat(), "price": 0.12},
+            {"time": (now + timedelta(hours=1)).isoformat(), "price": 0.13},
+        ]
+
+    def test_forecast_prices_skips_elapsed_periods(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from custom_components.battery_controller import helpers as h
+
+        now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
+
+        state = MagicMock()
+        state.attributes = {"forecast_prices": self._make_entries(now)}
+        state.state = "0.12"
+
+        prices, interval = h.extract_price_forecast_with_interval(state)
+        assert prices == [0.12, 0.13]
+        assert interval == 60
+
+        prices, starts, interval = h.extract_price_forecast_with_timestamps(state)
+        assert prices == [0.12, 0.13]
+        assert starts[0] == now
+
+    def test_generic_forecast_skips_elapsed_periods(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from custom_components.battery_controller import helpers as h
+
+        now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
+
+        state = MagicMock()
+        state.attributes = {"forecast": self._make_entries(now)}
+        state.state = "0.12"
+
+        prices, interval = h.extract_price_forecast_with_interval(state)
+        assert prices == [0.12, 0.13]
+
+    def test_plain_value_lists_unchanged(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from custom_components.battery_controller import helpers as h
+
+        now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
+
+        state = MagicMock()
+        state.attributes = {"forecast_prices": [0.10, 0.11, 0.12]}
+        state.state = "0.10"
+
+        prices, interval = h.extract_price_forecast_with_interval(state)
+        assert prices == [0.10, 0.11, 0.12]
