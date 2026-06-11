@@ -75,7 +75,7 @@ function findNearestSocIdx(socWh, socStates) {
 }
 
 function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-               stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride, dischargeEffOverride) {
+               stepDurations, degradCost, minPriceSpread, pvDcFc, chargeEffOverride, dischargeEffOverride) {
 
   const rte      = cfg.rte;
   const sqrtRte  = Math.sqrt(rte);
@@ -576,7 +576,7 @@ function computeTotalCost(powerKw, socKwh, inputs, cfg) {
 
 function runOptimizer(cfg, currentSocKwh, inputs) {
   const { priceFc, feedInFc, pvFc, consumFc, stepDurations, degradCost,
-          minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffCorrection,
+          minPriceSpread, pvDcFc, chargeEffCorrection,
           dischargeEffCorrection } = inputs;
   const nominalSqrtRte = Math.sqrt(cfg.rte);
   const chargeEffOverride =
@@ -589,7 +589,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
       : null;
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
-                   stepDurations, degradCost, minPriceSpread, pvDcFc, terminalShadowPrice, chargeEffOverride, dischargeEffOverride);
+                   stepDurations, degradCost, minPriceSpread, pvDcFc, chargeEffOverride, dischargeEffOverride);
   let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc, inputs, chargeEffOverride, dischargeEffOverride);
 
   // Post-processing filters (matching optimizer.py)

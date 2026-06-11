@@ -102,7 +102,6 @@ def run_scenarios(
 
     degradation_cost = float(options.get("degradation_cost_per_kwh", 0.04))
     min_price_spread = float(options.get("min_price_spread", 0.0))
-    terminal_shadow_price = schedule.get("terminal_shadow_price")
 
     if soc_deltas is None:
         soc_deltas = [-0.20, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.20]
@@ -129,7 +128,6 @@ def run_scenarios(
                     step_durations_hours=sliced["step_durations_hours"],
                     degradation_cost_per_kwh=degradation_cost,
                     min_price_spread=min_price_spread,
-                    terminal_shadow_price=terminal_shadow_price,
                 )
                 first_step_h = float(sliced["step_durations_hours"][0])
                 full_step_h = (
