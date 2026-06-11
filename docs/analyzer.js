@@ -526,7 +526,12 @@ function computeBaselineCost(inputs, cfg) {
     // All DC PV → AC at DC_TO_AC_EFF (no battery to absorb it)
     const dcPvToAcW = pvDcW > 0 ? pvDcW * DC_TO_AC_EFF : 0;
     const totalPvW  = pvW + dcPvToAcW;
-    const netGridW  = consumW - totalPvW;
+    let netGridW    = consumW - totalPvW;
+    // Apply the grid capacity cap like calculateStepCost does.
+    if (cfg.maxGridPowerKw > 0) {
+      const capW = cfg.maxGridPowerKw * 1000;
+      netGridW   = Math.max(-capW, Math.min(capW, netGridW));
+    }
     const energyKwh = Math.abs(netGridW) * stepH / 1000;
     baseline += netGridW > 0 ? energyKwh * priceFc[t] : -energyKwh * feedIn;
   }
