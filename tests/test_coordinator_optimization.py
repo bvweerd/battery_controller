@@ -2674,3 +2674,99 @@ def test_split_setpoint_gap_resets_active_battery(hass):
     coord._split_setpoint(0.1, "follow_schedule")
     # Gap crossed threshold → proportional split → active battery reset to None
     assert coord._scheduled_active_battery is None
+
+
+# ---------------------------------------------------------------------------
+# Degradation cost conversion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_degradation_per_cycle_converted_to_per_kwh_throughput(hass, monkeypatch):
+    """Per-cycle degradation cost is divided by 2 x usable kWh (charge + discharge)."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0, 0.0],
+        "consumption_forecast_kw": [0.5, 0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.20, 0.22], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+
+    live_entry = MagicMock()
+    live_entry.options = {"degradation_cost_per_cycle": 0.04}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["degradation_cost_per_kwh"] = args[7]
+        return OptimizationResult(
+            power_schedule_kw=[0.0, 0.0],
+            mode_schedule=["idle", "idle"],
+            soc_schedule_kwh=[5.0, 5.0, 5.0],
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=list(args[2]),
+            pv_forecast=[0.0, 0.0],
+            consumption_forecast=[0.5, 0.5],
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    # Default battery: 10 kWh, 10-100% SoC -> usable 9 kWh.
+    # One full cycle = 18 kWh throughput (charge + discharge), so
+    # 0.04 EUR/cycle -> 0.04 / 18 EUR/kWh.
+    usable_kwh = coord.battery_config.max_soc_kwh - coord.battery_config.min_soc_kwh
+    assert usable_kwh == pytest.approx(9.0)
+    assert captured["degradation_cost_per_kwh"] == pytest.approx(0.04 / (2 * 9.0))

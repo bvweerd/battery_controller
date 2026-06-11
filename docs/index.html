@@ -579,7 +579,7 @@ function renderSpreadAnalysis(bc, opts, prices) {
   const sqrtRte= Math.sqrt(rte);
   const usableKwh966 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc966 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-  const degrad = degradCyc966 != null ? degradCyc966 / usableKwh966 : 0.04 / usableKwh966;
+  const degrad = degradCyc966 != null ? degradCyc966 / (2 * usableKwh966) : 0.04 / (2 * usableKwh966);
   if (!prices || prices.length === 0) return;
   const minP   = Math.min(...prices);
   const maxP   = Math.max(...prices);
@@ -638,7 +638,7 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const sqrtRte= Math.sqrt(rte);
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-  const degrad = degradCyc1024 != null ? degradCyc1024 / usableKwh1024 : 0.04 / usableKwh1024;
+  const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
   const breakeven = (terminalPrice + degrad) / sqrtRte;
   const breakevenChg = (terminalPrice - degrad) * sqrtRte;
 
@@ -895,7 +895,7 @@ function renderDiagnostics(raw) {
     const feedInForDp = feedInFc || prices;
     const usableKwhDp = (cfg2.maxSocKwh - cfg2.minSocKwh) || 1;
     const degradCycleOpts = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-    const degradPerKwhDp = degradCycleOpts != null ? degradCycleOpts / usableKwhDp : 0.04 / usableKwhDp;
+    const degradPerKwhDp = degradCycleOpts != null ? degradCycleOpts / (2 * usableKwhDp) : 0.04 / (2 * usableKwhDp);
     const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, feedInForDp,
       pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
@@ -1184,7 +1184,7 @@ function runSimulator() {
       const stepH   = p.stepH || 0.25;
       const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
       const simUsableKwh = (p.maxSocKwh - p.minSocKwh) || 1;
-      const degradPerKwhSim = p.degradation / simUsableKwh;
+      const degradPerKwhSim = p.degradation / (2 * simUsableKwh);
       const pvCurtailed = document.getElementById('sp-pv-curtailed').checked;
       const zeroes = new Array(price.length).fill(0);
       const inputs  = {

@@ -148,10 +148,13 @@ def extract_inputs(diag: dict) -> tuple:
         "degradation_cost_per_cycle",
         options.get("degradation_cost_per_kwh", 0.04),  # fallback for old diagnostics
     )
-    # Convert per-cycle to per-kWh for the DP (same as coordinator)
+    # Convert per-cycle to per-kWh for the DP (same as coordinator).
+    # A full cycle moves usable capacity through the battery twice (charge +
+    # discharge) and degradation is charged on throughput in both directions,
+    # hence the division by 2 × usable_kwh.
     usable_kwh = battery.max_soc_kwh - battery.min_soc_kwh
     degradation_cost = (
-        degradation_cost_per_cycle / usable_kwh
+        degradation_cost_per_cycle / (2 * usable_kwh)
         if usable_kwh > 0
         else degradation_cost_per_cycle
     )
