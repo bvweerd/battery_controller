@@ -383,8 +383,8 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 - For boundary SoC states, a one-sided difference is used.
 
 **Interpretation**:
-- If the current grid buy price is less than `λ / sqrt(RTE)`, it is profitable to charge — the stored energy is worth more than its purchase cost.
-- If the current feed-in price is greater than `λ × sqrt(RTE)`, it is profitable to discharge/export.
+- If the current grid buy price is less than `λ × sqrt(RTE)`, it is profitable to charge — 1 kWh bought from AC stores `sqrt(RTE)` kWh worth `λ` each, so the stored energy is worth more than its purchase cost.
+- If the current feed-in price is greater than `λ / sqrt(RTE)`, it is profitable to discharge/export — 1 stored kWh yields `sqrt(RTE)` kWh on the AC side, so the sale revenue exceeds the value of keeping the energy.
 
 Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces only the **charge-side SoC transition** for planning. The economic cost model and arbitrage thresholds continue to use the nominal `sqrt(RTE)` so a charging-speed limit is not double-counted as extra energy loss.
 
