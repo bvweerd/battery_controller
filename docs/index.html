@@ -309,8 +309,6 @@
         <input id="sp-spread" type="number" value="0.05" step="0.01" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Step duration (hours) — 0.25 = 15 min, 1.0 = 60 min</span>
         <input id="sp-step-h" type="number" value="0.25" step="0.0833" min="0.0833" max="1" class="sim-input mt-0.5"></label>
-      <label class="block"><span class="kv-label">Terminal shadow price (€/kWh, 0=auto)</span>
-        <input id="sp-terminal" type="number" value="0" step="0.01" class="sim-input mt-0.5"></label>
       <label class="flex items-center gap-2 mt-2 cursor-pointer">
         <input id="sp-pv-curtailed" type="checkbox" class="w-4 h-4 rounded">
         <span class="kv-label">PV Curtailed (zero out all PV forecasts)</span>
@@ -901,7 +899,7 @@ function renderDiagnostics(raw) {
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
       degradPerKwhDp, opts.min_price_spread || 0.05,
-      null, sched.terminal_shadow_price ?? null);
+      null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
       const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
@@ -1090,7 +1088,6 @@ function getSimParams() {
     degradation:   g('sp-degradation'),
     minPriceSpread:g('sp-spread'),
     stepH:         g('sp-step-h') || 0.25,
-    terminalShadowPrice: g('sp-terminal') || null,
     charge_eff_correction: window._simChargeEffCorrection ?? null,
     discharge_eff_correction: window._simDischargeEffCorrection ?? null,
   };
@@ -1156,8 +1153,7 @@ function prefillSim(d) {
   }
   // Pre-fill terminal shadow price from previous DP run (stored in schedule)
   if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
-    set('sp-terminal', sched.terminal_shadow_price);
-  }
+    }
   window._simChargeEffCorrection =
     opt.charge_eff_correction
     ?? ((opt.optimizer_run_log && opt.optimizer_run_log.length)
@@ -1182,7 +1178,6 @@ function runSimulator() {
       if (price.length < 2) { statusEl.textContent = '⚠ Add at least 2 rows'; return; }
 
       const stepH   = p.stepH || 0.25;
-      const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
       const simUsableKwh = (p.maxSocKwh - p.minSocKwh) || 1;
       const degradPerKwhSim = p.degradation / simUsableKwh;
       const pvCurtailed = document.getElementById('sp-pv-curtailed').checked;
@@ -1193,7 +1188,7 @@ function runSimulator() {
         consumFc: consump,
         stepDurations: new Array(price.length).fill(stepH),
         degradCost: degradPerKwhSim, minPriceSpread: p.minPriceSpread,
-        pvDcFc: null, terminalShadowPrice: termSP,
+        pvDcFc: null,
         chargeEffCorrection: p.charge_eff_correction,
         dischargeEffCorrection: p.discharge_eff_correction,
       };

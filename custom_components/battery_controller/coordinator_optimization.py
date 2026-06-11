@@ -161,7 +161,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Last optimization result and effective mode (persists between real-time updates)
         self._last_result: OptimizationResult | None = None
-        self._last_shadow_price: float | None = None
         self._effective_mode: str = ACTION_IDLE
         self._effective_power: float = 0.0
         # Schedule power currently sent to the controller after all mode resolution
@@ -1847,12 +1846,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             len(resampled_prices),
         )
 
-        _LOGGER.debug(
-            "Terminal shadow price: %s",
-            f"{self._last_shadow_price:.4f} €/kWh"
-            if self._last_shadow_price is not None
-            else "none (first run, using feed-in tail)",
-        )
         # Convert degradation cost from per-cycle to per-kWh throughput for the optimizer.
         # One cycle = max_soc_kwh - min_soc_kwh (usable capacity).
         usable_kwh = battery_config.max_soc_kwh - battery_config.min_soc_kwh
@@ -1872,12 +1865,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             degradation_cost_per_kwh,
             min_spread,
             pv_dc_forecast,
-            self._last_shadow_price,
             charge_eff_override,
             discharge_eff_override,
         )
 
-        self._last_shadow_price = result.shadow_price_eur_kwh
         self._last_result = result
 
         # Get current grid power: prefer real sensor, fall back to estimate

@@ -49,7 +49,6 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `step_durations_hours[t]` | h | Duration of each time step (typically 0.25 h = 15 min) |
 | `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ usable_kwh`) |
 | `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage |
-| `terminal_shadow_price` | EUR/kWh | Marginal value of stored energy from previous run (optional) |
 
 **Battery configuration:**
 
@@ -212,8 +211,7 @@ The negative sign is because `V` represents cost — more stored energy means lo
 
 **Choosing `terminal_price`:**
 
-1. **Preferred**: `terminal_shadow_price` from the previous optimizer run. This is the marginal value of stored energy derived from the full price structure (see [Section 9](#9-shadow-price-calculation)). It is more stable than a single end-of-horizon price.
-2. **Fallback**: `min(feed_in_forecast[-1], average of last 6 feed-in prices)` — blended tail to dampen transient price spikes at the forecast boundary.
+`min(feed_in_forecast[-1], clipped average of the last 6 h of feed-in prices)` — a blended tail that dampens transient price spikes at the forecast boundary. The shadow price from the previous run is deliberately **not** used as terminal value: λ ≈ sqrt(RTE) × P_best, so using it would make discharge at the best price hour break-even and suppress discharge exactly at the peak (a circular dependency in rolling-horizon re-optimization). The shadow price is only used by hybrid mode as the charge/discharge switching threshold.
 
 ---
 
@@ -390,7 +388,7 @@ Charge-speed correction: when runtime calibration detects that the battery gains
 
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
-**Use as terminal condition**: λ is passed to the next optimizer run as `terminal_shadow_price`, replacing the end-of-horizon feed-in price in the terminal condition. This makes consecutive 15-minute runs consistent with each other (rolling-horizon stability).
+**Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
 
 ---
 
@@ -399,7 +397,7 @@ The shadow price is always the raw DP value — there is no separate "post-proce
 The optimizer runs every 15 minutes. Each run:
 
 1. Reads the current SoC and latest forecasts.
-2. Calls `optimize_battery_schedule()` with the previous run's shadow price as `terminal_shadow_price`.
+2. Calls `optimize_battery_schedule()` with the latest forecasts and calibration overrides.
 3. Executes **only the first step** of the resulting schedule (`optimal_power_kw`).
 4. Saves the new shadow price for the next run.
 
