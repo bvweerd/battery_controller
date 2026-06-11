@@ -145,11 +145,11 @@ DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+
 DEFAULT_CONTROL_MODE = "hybrid"
 
 # DP resolution constants
-# SoC resolution must be large enough that arbitrage is decisively profitable:
-# with too-fine resolution (e.g. 8 Wh at 5-min), the V-function slope collapses
-# to near the feed-in price, making charging appear break-even and preventing
-# the optimizer from finding profitable charge/discharge cycles.
-# 25 Wh ensures ~6× margin between charging cost and discharge revenue per state.
+# 10 Wh SoC states: fine enough that the post-discharge SoC maps accurately
+# (coarse states systematically undervalue concentrating discharge at the
+# peak-price hour), while the per-action sub-resolution guard in the DP
+# (new_soc_idx == s_idx -> skip) prevents "free-looking" micro-actions that
+# would otherwise oscillate. See the resolution discussion in optimizer.py.
 SOC_RESOLUTION_WH = 10.0  # Minimum SoC state size in Wh
 POWER_STEP_W = 100  # Minimum practical power action granularity in W
 
