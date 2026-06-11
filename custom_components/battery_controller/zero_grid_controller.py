@@ -255,7 +255,11 @@ class ZeroGridController:
             "mode": mode,
             "action_mode": action_mode,
             "soc_kwh": current_soc_kwh,
-            "soc_percent": (current_soc_kwh / self.battery_config.capacity_kwh) * 100,
+            "soc_percent": (
+                (current_soc_kwh / self.battery_config.capacity_kwh) * 100
+                if self.battery_config.capacity_kwh > 0
+                else 0.0
+            ),
         }
 
 

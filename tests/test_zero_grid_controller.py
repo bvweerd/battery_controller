@@ -361,3 +361,25 @@ class TestZeroDeadband:
         # Both calls should return finite values without raising
         assert isinstance(t1, float)
         assert isinstance(t2, float)
+
+
+def test_get_control_action_zero_capacity_does_not_crash():
+    """A zero-capacity battery config must not raise ZeroDivisionError."""
+    from custom_components.battery_controller.battery_model import BatteryConfig
+    from custom_components.battery_controller.zero_grid_controller import (
+        ZeroGridController,
+        ZeroGridControllerConfig,
+    )
+
+    controller = ZeroGridController(
+        ZeroGridControllerConfig(),
+        BatteryConfig(capacity_kwh=0.0),
+    )
+    action = controller.get_control_action(
+        current_grid_w=500.0,
+        current_soc_kwh=0.0,
+        current_battery_w=0.0,
+        dp_schedule_w=0.0,
+        mode="zero_grid",
+    )
+    assert action["soc_percent"] == 0.0
