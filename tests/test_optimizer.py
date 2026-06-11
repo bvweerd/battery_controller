@@ -151,14 +151,16 @@ class TestCalculateStepCost:
         # Charging adds degradation: 2000 * 0.25 / 1000 * 0.03 = 0.015
         assert cost_charge > cost_idle
 
-    def test_dc_pv_charges_at_higher_efficiency(self, dc_battery_config):
-        """DC-coupled PV charging avoids grid draw when DC PV covers the full action.
+    def test_dc_pv_charging_continues_passively_during_active_charge(
+        self, dc_battery_config
+    ):
+        """Passive DC PV charging continues on top of an active AC charge.
 
-        With action_w = AC setpoint model:
-        - AC case: 2000W action with no PV → full 2000W drawn from grid
-        - DC case: 2000W action with 2200W DC PV (> action_w / dc_eff = 2062W) →
-          dc_charge_w covers the full action, ac_charge_w = 0 → no grid draw for charging
-        The DC case has lower grid cost because the full charge comes from DC PV.
+        The AC setpoint only controls AC-side exchange: both cases draw the
+        full 2000 W setpoint from the grid (same grid cost), but the DC case
+        additionally stores the DC PV passively, so it has higher throughput
+        and therefore slightly higher degradation cost. The stored DC energy
+        is rewarded through the SoC transition (V[t+1]), not the step cost.
         """
         cost_ac = calculate_step_cost(
             time_step_hours=0.25,
@@ -184,10 +186,42 @@ class TestCalculateStepCost:
             rte=0.90,
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
-            pv_dc_production_w=2200,  # > action_w / dc_eff: DC PV fully covers the charge
+            pv_dc_production_w=2200,  # absorbed passively on top of the AC charge
         )
-        # DC PV covers full charge → no grid draw for battery; AC case draws 2000W from grid
-        assert cost_dc <= cost_ac
+        # Grid cost identical (both draw the 2000 W setpoint + 1000 W load);
+        # the DC case only adds degradation for the passively stored PV:
+        # 2200 * 0.97 * 0.25 / 1000 * 0.03 = 0.016 EUR.
+        extra_degradation = 2200 * 0.97 * 0.25 / 1000 * 0.03
+        assert cost_dc == pytest.approx(cost_ac + extra_degradation)
+
+    def test_dc_pv_passive_charge_capped_by_headroom_during_charge(
+        self, dc_battery_config
+    ):
+        """Passive DC PV during an active charge only fills remaining headroom."""
+        # soc 8500 Wh, max 9000 Wh. AC charge stores 2000 * 0.25 * sqrt(0.9)
+        # = 474 Wh → headroom left = 26 Wh; passive DC absorbs only that.
+        cost = calculate_step_cost(
+            time_step_hours=0.25,
+            soc_wh=8500,
+            action_w=2000,
+            grid_price=0.30,
+            feed_in_price=0.07,
+            pv_production_w=0,
+            consumption_w=0,
+            rte=0.90,
+            degradation_cost_per_kwh=0.0,
+            battery_config=dc_battery_config,
+            pv_dc_production_w=3000,
+        )
+        # Remaining headroom after AC charge:
+        ac_stored_wh = 2000 * 0.25 * math.sqrt(0.90)
+        headroom_wh = 9000 - 8500 - ac_stored_wh
+        dc_consumed_w = (headroom_wh / 0.25) / 0.97
+        dc_excess_w = 3000 - dc_consumed_w
+        # Net grid = 2000 (setpoint) - excess * 0.96 (to AC)
+        net_grid_w = 2000 - dc_excess_w * 0.96
+        expected = abs(net_grid_w) * 0.25 / 1000 * (0.30 if net_grid_w > 0 else -0.07)
+        assert cost == pytest.approx(expected, abs=1e-6)
 
     def test_dc_pv_passive_charge_when_idle(self, dc_battery_config):
         """In idle mode, DC-coupled inverters passively charge the battery from DC PV.
@@ -1595,27 +1629,31 @@ class TestForwardPassDCIdlePassiveCharge:
             pv_dc_peak_power_kwp=3.0,
             pv_dc_efficiency=0.97,
         )
-        # Flat prices → no arbitrage, battery should be idle
-        # Strong DC PV → passive charging should raise SoC
-        prices = [0.20, 0.20, 0.20, 0.20]
-        pv_dc = [3.0, 3.0, 3.0, 3.0]  # 3 kW DC PV all steps
+        # PV in the morning, expensive consumption in the evening: storing the
+        # DC PV passively (idle) and discharging later is clearly optimal, so
+        # the forward pass must take the idle + passive-charge branch.
+        prices = [0.20, 0.20, 0.60, 0.60]
+        pv_dc = [3.0, 3.0, 0.0, 0.0]  # 3 kW DC PV in the first two steps
 
         result = optimize_battery_schedule(
             battery_config=cfg,
-            current_soc_kwh=5.0,
+            current_soc_kwh=2.0,
             price_forecast=prices,
-            feed_in_forecast=None,
+            feed_in_forecast=[0.07] * 4,
             pv_forecast=[0.0] * 4,
-            consumption_forecast=[0.5] * 4,
+            consumption_forecast=[0.0, 0.0, 3.0, 3.0],
             step_durations_hours=[1.0, 1.0, 1.0, 1.0],
             pv_dc_forecast=pv_dc,
-            degradation_cost_per_kwh=0.5,  # Very high: forces idle
-            min_price_spread=1.0,  # Very high: blocks all arbitrage
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
         )
-        # With DC PV passive charging and idle action, SoC should increase
         assert len(result.soc_schedule_kwh) == 5
-        # SoC at end should be >= initial (passive charging)
-        assert result.soc_schedule_kwh[-1] >= result.soc_schedule_kwh[0] - 0.01
+        # PV steps are idle (passive charging only) and raise the SoC by
+        # ~2.91 kWh per step (3 kW × 0.97).
+        assert result.mode_schedule[0] == "idle"
+        assert result.soc_schedule_kwh[1] == pytest.approx(2.0 + 3.0 * 0.97, abs=0.05)
+        # Stored PV is discharged during the expensive consumption steps.
+        assert "discharging" in result.mode_schedule[2:]
 
 
 class TestFilterOscillationsGetChargeCostZeroTotal:

@@ -27,13 +27,19 @@ function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
   let dcPvExcessW = pvDcW;
 
   if (actionW > 0) {
-    // Charging
-    const dcChargeW = Math.min(actionW, pvDcW * dcEff);
-    const acChargeW = actionW - dcChargeW;
-    const dcPvUsedW = dcEff > 0 ? dcChargeW / dcEff : 0;
-    dcPvExcessW     = Math.max(0, pvDcW - dcPvUsedW);
-    gridToBatteryW  = acChargeW;
-    throughputKwh   = actionW * stepH * chargeEff / 1000;
+    // Charging: grid draws the AC setpoint; passive DC MPPT charging
+    // continues on top, limited by the remaining headroom.
+    gridToBatteryW  = actionW;
+    const acStoredWh = actionW * stepH * chargeEff;
+    throughputKwh   = acStoredWh / 1000;
+    if (pvDcCoupled && pvDcW > 0 && maxSocWh !== undefined) {
+      const headroomWh      = Math.max(0, maxSocWh - socWh - acStoredWh);
+      const passiveChargeWh = Math.min(pvDcW * dcEff * stepH, headroomWh);
+      const passiveChargeW  = stepH > 0 ? passiveChargeWh / stepH : 0;
+      const dcPvConsumedW   = dcEff > 0 ? passiveChargeW / dcEff : 0;
+      dcPvExcessW    = Math.max(0, pvDcW - dcPvConsumedW);
+      throughputKwh += passiveChargeWh / 1000;
+    }
   } else if (actionW < 0) {
     // Discharging
     dcPvExcessW     = pvDcW;
@@ -174,12 +180,21 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           if (actionW > maxChgW) continue;
           newSocWh = socWh + actionW * stepH * chargeEff;
           if (newSocWh > maxSocWh) continue;
+          if (cfg.pvDcCoupled && pvDcW > 0) {
+            const headroomWh = Math.max(0, maxSocWh - newSocWh);
+            newSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+          }
         } else if (actionW < 0) {
           if (-actionW > maxDisW) continue;
           newSocWh = socWh - Math.abs(actionW) * stepH / dischargeEff;
           if (newSocWh < minSocWh) continue;
         } else {
-          newSocWh = socWh;
+          if (cfg.pvDcCoupled && pvDcW > 0) {
+            const headroomWh = Math.max(0, maxSocWh - socWh);
+            newSocWh = socWh + Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+          } else {
+            newSocWh = socWh;
+          }
         }
 
         const newSocIdx = findNearestSocIdx(newSocWh, socStates);
@@ -274,6 +289,10 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffOver
         if (actionW > maxChgW) continue;
         newSocWh = curSocWh + actionW * stepH * chargeEff;
         if (newSocWh > maxSocWh) continue;
+        if (cfg.pvDcCoupled && pvDcW > 0) {
+          const headroomWh = Math.max(0, maxSocWh - newSocWh);
+          newSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+        }
       } else if (actionW < 0) {
         if (-actionW > maxDisW) continue;
         newSocWh = curSocWh - Math.abs(actionW) * stepH / dischargeEff;
@@ -362,6 +381,10 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc) {
     if (modes[t] === 'charging' && p < -1e-9) {
       const actionW = -p * 1000;   // positive
       curSocWh = Math.min(curSocWh + actionW * stepH * chargeEff, maxSocWh);
+      if (cfg.pvDcCoupled && pvDcW > 0) {
+        const headroomWh = Math.max(0, maxSocWh - curSocWh);
+        curSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+      }
     } else if (modes[t] === 'discharging' && p > 1e-9) {
       const actionW = p * 1000;    // positive
       curSocWh = Math.max(curSocWh - actionW * stepH / dischargeEff, minSocWh);
@@ -401,19 +424,12 @@ function filterOscillations(powerKw, modes, cfg, priceFc, feedInFc, pvFc,
   const filtMode = [...modes];
 
   function getChargeCost(i, chargePowKw) {
+    // The commanded power is the AC setpoint only: passive DC PV charging
+    // happens regardless of the setpoint, so it needs no deduction here.
     if (chargePowKw <= 0 || !pvFc || !consumFc || !feedInFc) return priceFc[i];
-    let effectiveKw = chargePowKw;
-    if (pvDcCoupled && pvDcFc) {
-      const stepH     = stepDurations[i] || 0.25;
-      const passiveKw = (pvDcFc[i] || 0) * pvDcEfficiency;
-      const maxPassiveKwh = maxSocKwh - minSocKwh;
-      const cappedPassive = stepH > 0 ? Math.min(passiveKw, maxPassiveKwh / stepH) : 0;
-      effectiveKw = Math.max(0, chargePowKw - cappedPassive);
-      if (effectiveKw <= 0) return 0.0;
-    }
     const pvSurplusKw = Math.max(0, (pvFc[i] || 0) - (consumFc[i] || 0));
-    const fromPv  = Math.min(effectiveKw, pvSurplusKw);
-    const fromGrid = Math.max(0, effectiveKw - fromPv);
+    const fromPv  = Math.min(chargePowKw, pvSurplusKw);
+    const fromGrid = Math.max(0, chargePowKw - fromPv);
     const total   = fromPv + fromGrid;
     if (total <= 0) return priceFc[i];
     return (fromPv * feedInFc[i] + fromGrid * priceFc[i]) / total;

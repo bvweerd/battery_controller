@@ -95,6 +95,12 @@ def _rebuild_schedule(
             )
             delta_soc = current_soc_kwh - prev_soc_kwh
             actual_power_kw = delta_soc / (step_h * _charge_eff) if step_h > 0 else 0.0
+            if pv_dc_coupled and t < len(pv_dc_forecast) and pv_dc_forecast[t] > 0:
+                # Passive DC MPPT charging continues on top of the AC charge.
+                headroom_kwh = max(0.0, max_soc_kwh - current_soc_kwh)
+                current_soc_kwh += min(
+                    pv_dc_forecast[t] * pv_dc_efficiency * step_h, headroom_kwh
+                )
         elif commanded_power_kw < 0:
             current_soc_kwh = max(
                 current_soc_kwh - abs(commanded_power_kw) * step_h / _discharge_eff,
@@ -252,7 +258,9 @@ def calculate_step_cost(
        - PV panels connected directly to battery inverter DC bus
        - Charge efficiency ~97% (MPPT only, no AC conversion)
        - This PV power is "free" and doesn't pass through grid meter
-       - In idle mode: DC PV passively charges battery up to available headroom
+       - The AC setpoint only controls AC-side exchange: DC MPPT charging
+         continues both in idle mode AND on top of an active charge action,
+         up to the available SoC headroom
        - Excess DC PV (when battery full or discharging) goes through inverter to AC
 
     3. Degradation:
@@ -292,31 +300,35 @@ def calculate_step_cost(
     pv_dc_production_w = max(0.0, pv_dc_production_w)
 
     # Handle DC-coupled PV
-    # DC PV can charge battery directly at higher efficiency.
-    # In idle mode (action_w == 0) DC-coupled inverters still absorb DC PV into
-    # the battery up to available headroom — the AC setpoint of 0 only stops
-    # AC-side grid charging, not DC MPPT charging.
-    dc_charge_w = 0.0
-    ac_charge_w = 0.0
+    # DC PV charges the battery directly at higher efficiency. The AC setpoint
+    # only controls AC-side power exchange; DC MPPT charging continues
+    # regardless of the setpoint. So passive DC PV charging happens both in
+    # idle mode AND on top of an active AC charge action — an explicit charge
+    # command never reduces the amount of DC PV the battery absorbs.
     dc_pv_excess_w = pv_dc_production_w  # DC PV not used by battery -> goes to AC
     throughput_kwh = 0.0
 
     if action_w > 0:  # CHARGING
-        # Use DC PV first (free energy, higher efficiency)
-        dc_charge_w = min(action_w, pv_dc_production_w * dc_eff)
-        ac_charge_w = action_w - dc_charge_w
-
-        # DC PV not used by battery goes to AC side (through inverter)
-        dc_pv_used_w = dc_charge_w / dc_eff if dc_eff > 0 else 0.0
-        dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_used_w)
-
         # AC charging: grid draws the AC setpoint directly; losses are internal
-        # to the inverter, captured in the SoC transition
-        grid_to_battery_w = ac_charge_w  # grid draws AC setpoint power
+        # to the inverter, captured in the SoC transition.
+        grid_to_battery_w = action_w  # grid draws AC setpoint power
+        ac_stored_wh = action_w * time_step_hours * charge_eff
+        throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
 
-        throughput_kwh = (
-            action_w * time_step_hours * charge_eff / 1000
-        )  # actual stored Wh
+        if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
+            # DC MPPT charging continues on top of the AC charge, limited by
+            # the headroom that remains after the AC-charged energy.
+            max_soc_wh = battery_config.max_soc_kwh * 1000
+            headroom_wh = max(0.0, max_soc_wh - soc_wh - ac_stored_wh)
+            passive_charge_wh = min(
+                pv_dc_production_w * dc_eff * time_step_hours, headroom_wh
+            )
+            passive_charge_w = (
+                passive_charge_wh / time_step_hours if time_step_hours > 0 else 0.0
+            )
+            dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
+            dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
+            throughput_kwh += passive_charge_wh / 1000
 
     elif action_w < 0:  # DISCHARGING
         # All DC PV excess goes to AC side when discharging
@@ -588,10 +600,10 @@ def optimize_battery_schedule(
             max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
-                # SoC transition: action_w is battery-side power (explicit AC command).
-                # For DC-coupled systems in idle mode (action_w == 0), the MPPT
-                # charger passively charges the battery from DC PV up to available
-                # headroom — the AC setpoint of 0 only stops AC-side grid charging.
+                # SoC transition: action_w is the explicit AC setpoint. For
+                # DC-coupled systems the MPPT charger passively charges the
+                # battery from DC PV up to available headroom regardless of the
+                # AC setpoint — both in idle and on top of an active charge.
                 # Efficiency losses are on the grid/AC side and handled in
                 # calculate_step_cost.
                 if action_w > 0:
@@ -601,6 +613,12 @@ def optimize_battery_schedule(
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
+                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                        dc_eff = battery_config.pv_dc_efficiency
+                        headroom_wh = max(0.0, max_soc_wh - new_soc_wh)
+                        new_soc_wh += min(
+                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        )
                 elif action_w < 0:
                     if -action_w > max_dis_w:
                         continue
@@ -749,6 +767,10 @@ def optimize_battery_schedule(
                 new_soc_wh = current_soc + action_w * time_step_hours * charge_eff
                 if new_soc_wh > max_soc_wh:
                     continue
+                if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                    dc_eff = battery_config.pv_dc_efficiency
+                    headroom_wh = max(0.0, float(max_soc_wh) - new_soc_wh)
+                    new_soc_wh += min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
             elif action_w < 0:
                 if -action_w > max_dis_w:
                     continue
@@ -1039,8 +1061,9 @@ def _filter_oscillations(
     def get_charge_cost(timestep: int, charge_power_kw: float) -> float:
         """Get the marginal cost of charging for the actual commanded power.
 
-        For DC-coupled PV: passive charging happens even at idle (free). Only the
-        portion of active charging above the passive DC PV contribution costs money.
+        The commanded power is the AC setpoint only: passive DC PV charging
+        happens regardless of the setpoint (also at idle), so it is never part
+        of the commanded power and needs no deduction here.
         """
         if (
             charge_power_kw <= 0
@@ -1050,31 +1073,9 @@ def _filter_oscillations(
         ):
             return price_forecast[timestep]
 
-        # DC PV passive charge at idle is free — only charge above this costs money
-        effective_charge_kw = charge_power_kw
-        if pv_dc_coupled and pv_dc_forecast:
-            step_h = (
-                step_durations_hours[timestep]
-                if timestep < len(step_durations_hours)
-                else step_durations_hours[-1]
-            )
-            passive_charge_kw = (
-                pv_dc_forecast[timestep] * pv_dc_efficiency
-                if timestep < len(pv_dc_forecast)
-                else 0.0
-            )
-            # Cap passive charge by available headroom (approximate using max_soc)
-            max_passive_kwh = (max_soc_kwh - min_soc_kwh) if step_h > 0 else 0.0
-            passive_charge_kw = (
-                min(passive_charge_kw, max_passive_kwh / step_h) if step_h > 0 else 0.0
-            )
-            effective_charge_kw = max(0.0, charge_power_kw - passive_charge_kw)
-            if effective_charge_kw <= 0:
-                return 0.0  # All charging is passive DC PV, no cost
-
         pv_surplus_kw = max(0.0, pv_forecast[timestep] - consumption_forecast[timestep])
-        from_pv_kw = min(effective_charge_kw, pv_surplus_kw)
-        from_grid_kw = max(0.0, effective_charge_kw - from_pv_kw)
+        from_pv_kw = min(charge_power_kw, pv_surplus_kw)
+        from_grid_kw = max(0.0, charge_power_kw - from_pv_kw)
         total_kw = from_pv_kw + from_grid_kw
         if total_kw <= 0:
             return price_forecast[timestep]

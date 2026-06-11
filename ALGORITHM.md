@@ -133,22 +133,26 @@ DC-coupled PV uses its own path efficiency (`pv_dc_efficiency` ≈ 0.97, MPPT on
 
 ### 4.2 Charging (`action_w > 0`)
 
-When charging at power `P` (W):
+When charging at AC setpoint `P` (W):
 
-1. **Use DC PV first** (free energy, higher efficiency):
+1. **AC grid draw**: the grid supplies the setpoint directly; conversion losses
+   are internal to the inverter and captured in the SoC transition:
    ```
-   dc_charge_w = min(P, pv_dc_production_w × dc_eff)
-   ac_charge_w = P - dc_charge_w
-   ```
-
-2. **AC grid draw** for the remainder:
-   ```
-   grid_to_battery_w = ac_charge_w / charge_eff
+   grid_to_battery_w = P
+   ac_stored_wh      = P × dt × charge_eff
    ```
 
-3. **Remaining DC PV** not absorbed by battery flows to AC through the inverter at 96% efficiency.
+2. **Passive DC PV continues on top**: the AC setpoint only controls AC-side
+   exchange — DC MPPT charging is independent of it and fills the headroom
+   that remains after the AC-charged energy:
+   ```
+   headroom_wh       = max(0, max_soc_wh - soc_wh - ac_stored_wh)
+   passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh)
+   ```
 
-4. **Throughput**: `P × dt / 1000` kWh (for degradation).
+3. **Remaining DC PV** not absorbed by the battery flows to AC through the inverter at 96% efficiency.
+
+4. **Throughput**: `(ac_stored_wh + passive_charge_wh) / 1000` kWh (for degradation).
 
 ### 4.3 Discharging (`action_w < 0`)
 
@@ -228,7 +232,7 @@ V[t][s] = min over all actions a of:
 
 where `s'` is the SoC state after applying action `a`:
 
-- **Charging**: `s' = s + a × dt × sqrt(RTE)` (energy stored in battery)
+- **Charging**: `s' = s + a × dt × sqrt(RTE)` plus passive DC PV charging up to the remaining headroom (if DC-coupled)
 - **Discharging**: `s' = s - |a| × dt / sqrt(RTE)` (energy drawn from battery, with losses)
 - **Idle**: `s' = s` (or passive DC PV charging if DC-coupled)
 
@@ -340,7 +344,7 @@ for each step i:
 
 When there is a **PV surplus** at a charging step (PV production > consumption), the charge cost is the feed-in opportunity cost (what could have been earned by exporting that PV) rather than the grid buy price.
 
-**DC-coupled PV**: For systems with DC-coupled PV, passive charging from the DC PV array occurs even when the battery is idle. The oscillation filter accounts for this by subtracting the passive DC PV contribution from the active charge power when calculating charge cost. If all charging would come from passive DC PV anyway, the effective cost is zero and the charge step is never suppressed.
+**DC-coupled PV**: Passive DC PV charging happens regardless of the AC setpoint (idle and active charging alike), so the commanded charge power is AC-only and the filter prices it directly against the PV-surplus/grid blend — no passive-DC deduction is needed.
 
 The window size is `max(2 h, battery_capacity / max_discharge_power)` — larger batteries need a wider window because a full charge/discharge cycle takes longer.
 
