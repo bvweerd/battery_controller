@@ -2006,7 +2006,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         commitment_reason = ""
         if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
             sqrt_rte = battery_config.round_trip_efficiency**0.5
-            commit_spread = degradation_cost_per_kwh * 2.0 / sqrt_rte + min_spread
+            # Same economics as the post-DP oscillation filter in optimizer.py:
+            # min_arbitrage_spread = (2 x degradation + min_spread) / sqrt(RTE).
+            commit_spread = (2.0 * degradation_cost_per_kwh + min_spread) / sqrt_rte
             current_price = resampled_prices[0] if resampled_prices else 0.0
             soc_at_limit = (
                 battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
