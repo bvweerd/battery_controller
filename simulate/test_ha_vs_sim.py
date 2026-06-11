@@ -124,7 +124,6 @@ def main():
         step_durations_hours=step_durations_hours,
         degradation_cost_per_kwh=degradation_cost,
         min_price_spread=min_price_spread,
-        terminal_shadow_price=terminal_shadow_price,
     )
 
     print("=" * 120)

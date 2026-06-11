@@ -311,7 +311,6 @@ def run_dp(
     degradation_cost_per_kwh,
     min_price_spread,
     pv_dc_forecast=None,
-    terminal_shadow_price=None,
     charge_eff_override=None,
     discharge_eff_override=None,
 ):
@@ -1122,9 +1121,8 @@ def main():
         f"min_spread={min_price_spread:.3f} €/kWh"
     )
     if terminal_shadow_price is not None:
-        print(
-            f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
-        )
+        # Informational only: the DP terminal condition uses the feed-in tail.
+        print(f"  shadow price (from diagnostics): {terminal_shadow_price:.4f} €/kWh")
 
     # Show charge/discharge efficiency calibration state if present in diagnostics
     opt_top = diag.get("data", diag).get("optimization", {})
@@ -1183,7 +1181,6 @@ def main():
         degradation_cost_per_kwh=degradation_cost,
         min_price_spread=min_price_spread,
         pv_dc_forecast=pv_dc_forecast,
-        terminal_shadow_price=terminal_shadow_price,
         charge_eff_override=charge_eff_override,
         discharge_eff_override=discharge_eff_override,
     )
