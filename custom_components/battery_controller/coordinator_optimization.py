@@ -1649,12 +1649,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Get feed-in price forecast
         feed_in_is_dynamic = False  # True when feed-in came from a live sensor forecast
+        # Native interval of the feed-in forecast; may differ from the grid
+        # price sensor (e.g. hourly feed-in vs 15-min grid prices).
+        feed_in_interval = price_interval
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
         if feed_in_sensor:
             feed_in_state = self.hass.states.get(feed_in_sensor)
             if feed_in_state and feed_in_state.state not in ("unknown", "unavailable"):
-                feed_in_forecast, _ = extract_price_forecast_with_interval(
-                    feed_in_state
+                feed_in_forecast, feed_in_interval = (
+                    extract_price_forecast_with_interval(feed_in_state)
                 )
                 feed_in_is_dynamic = True
             else:
@@ -1772,8 +1775,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         resampled_feed_in = None
         if feed_in_forecast:
+            # Resample from the feed-in sensor's own interval to the grid price
+            # interval. Using price_interval for both would silently misalign
+            # the feed-in series whenever the two sensors publish at different
+            # resolutions (e.g. hourly feed-in with 15-min grid prices).
             resampled_feed_in = resample_forecast(
-                feed_in_forecast, price_interval, price_interval
+                feed_in_forecast, feed_in_interval, price_interval
             )
 
         # Resample hourly PV / consumption forecasts to the price sensor's native interval
