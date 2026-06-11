@@ -2573,3 +2573,66 @@ class TestEffOverrideZeroGuard:
         )
         assert result is not None
         assert len(result.power_schedule_kw) == 4
+
+
+class TestBaselineGridCap:
+    """Baseline cost must respect the grid capacity cap like the step cost does."""
+
+    def test_baseline_export_capped(self):
+        from custom_components.battery_controller.optimizer import (
+            _calculate_baseline_cost,
+        )
+
+        # 10 kW PV surplus, 3 kW export cap, 1 hour, feed-in 0.10:
+        # uncapped revenue would be 1.00 EUR; capped it is 0.30 EUR.
+        cost = _calculate_baseline_cost(
+            price_forecast=[0.20],
+            feed_in_forecast=[0.10],
+            pv_forecast=[10.0],
+            consumption_forecast=[0.0],
+            step_durations_hours=[1.0],
+            pv_dc_forecast=[0.0],
+            max_grid_power_kw=3.0,
+        )
+        assert cost == pytest.approx(-0.30)
+
+    def test_baseline_unlimited_when_cap_zero(self):
+        from custom_components.battery_controller.optimizer import (
+            _calculate_baseline_cost,
+        )
+
+        cost = _calculate_baseline_cost(
+            price_forecast=[0.20],
+            feed_in_forecast=[0.10],
+            pv_forecast=[10.0],
+            consumption_forecast=[0.0],
+            step_durations_hours=[1.0],
+            pv_dc_forecast=[0.0],
+            max_grid_power_kw=0.0,
+        )
+        assert cost == pytest.approx(-1.00)
+
+    def test_savings_consistent_with_capped_baseline(self):
+        """optimize_battery_schedule passes the configured cap to the baseline."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=3.0,
+        )
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=5.0,
+            price_forecast=[0.20] * 4,
+            feed_in_forecast=[0.10] * 4,
+            pv_forecast=[10.0] * 4,
+            consumption_forecast=[0.0] * 4,
+            step_durations_hours=[1.0] * 4,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+        # Capped baseline: 4 h x 3 kW x 0.10 = 1.20 EUR revenue.
+        assert result.baseline_cost == pytest.approx(-1.20)
