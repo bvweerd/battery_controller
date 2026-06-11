@@ -2808,3 +2808,25 @@ def test_soc_sensor_in_wh_converted(hass):
     state = coord._read_battery_state(subentry, cfg)
     assert state.soc_kwh == pytest.approx(5.0)
     assert state.soc_percent == pytest.approx(50.0)
+
+
+def test_concentrate_redistributes_when_winner_full(hass):
+    """A full concentration winner must not drop the charge setpoint."""
+    # bat1 full (9.0 = max SoC), bat2 nearly full; gap below split threshold.
+    coord = _make_two_battery_coord(hass, soc1_kwh=9.0, soc2_kwh=8.7)
+    # Selection hysteresis keeps the previously active (now full) battery.
+    coord._zero_grid_active_battery = "bat1"
+    result = coord._split_setpoint(1.0, MODE_ZERO_GRID)
+    # bat1 has no headroom; the setpoint must go to bat2 instead of vanishing.
+    assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
+    assert result["bat2"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_concentrate_redistributes_when_winner_empty(hass):
+    """An empty concentration winner must not drop the discharge setpoint."""
+    # bat1 empty (1.0 = min SoC), bat2 slightly above; gap below split threshold.
+    coord = _make_two_battery_coord(hass, soc1_kwh=1.0, soc2_kwh=1.3)
+    coord._zero_grid_active_battery = "bat1"
+    result = coord._split_setpoint(-1.0, MODE_ZERO_GRID)
+    assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
+    assert result["bat2"] == pytest.approx(-1.0, abs=1e-6)
