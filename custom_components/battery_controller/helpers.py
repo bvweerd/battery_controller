@@ -65,6 +65,22 @@ def _first_entry_has_timestamp(entries: Any) -> bool:
     )
 
 
+def _skip_index_since_local_midnight(now_local: datetime, interval_minutes: int) -> int:
+    """Return the number of fully elapsed price periods since local midnight.
+
+    Uses true elapsed time (now - midnight) rather than wall-clock
+    hour*60+minute: daily price arrays (raw_today/today) contain one entry per
+    period since midnight, so on DST transition days (23- or 25-hour days)
+    wall-clock arithmetic points at the wrong entry.
+    """
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Subtract via POSIX timestamps: naive subtraction of two datetimes that
+    # share the same tzinfo ignores UTC-offset changes, which is exactly the
+    # DST case this helper needs to handle.
+    elapsed_min = (now_local.timestamp() - midnight.timestamp()) / 60
+    return int(elapsed_min // interval_minutes)
+
+
 def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int]:
     """Extract price forecast and detected interval from a Home Assistant price state.
 
@@ -191,7 +207,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
     if _raw_ref and not _raw_first_has_ts:
         now_local = dt_util.now()
         raw_interval = _detect_interval_from_entries(_raw_ref)
-        skip_index = (now_local.hour * 60 + now_local.minute) // raw_interval
+        skip_index = _skip_index_since_local_midnight(now_local, raw_interval)
         forecast = []
         for entry in raw_today_list[skip_index:]:
             price = _normalize_price_value(entry)
@@ -211,7 +227,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
     interval = _detect_interval_from_entries(today_attr)
     if interval == 60:
         interval = _detect_interval_from_entries(tomorrow_attr)
-    skip_index = (now_local.hour * 60 + now_local.minute) // interval
+    skip_index = _skip_index_since_local_midnight(now_local, interval)
     combined: list[Any] = []
     if isinstance(today_attr, list):
         combined.extend(today_attr[skip_index:])
@@ -420,7 +436,7 @@ def extract_price_forecast_with_timestamps(
     if _raw_ref and not _raw_first_has_ts:
         now_local = dt_util.now()
         raw_interval = _detect_interval_from_entries(_raw_ref)
-        skip_index = (now_local.hour * 60 + now_local.minute) // raw_interval
+        skip_index = _skip_index_since_local_midnight(now_local, raw_interval)
         forecast = []
         for entry in raw_today_list[skip_index:]:
             price = _normalize_price_value(entry)
@@ -444,7 +460,7 @@ def extract_price_forecast_with_timestamps(
     interval = _detect_interval_from_entries(today_attr)
     if interval == 60:
         interval = _detect_interval_from_entries(tomorrow_attr)
-    skip_index = (now_local.hour * 60 + now_local.minute) // interval
+    skip_index = _skip_index_since_local_midnight(now_local, interval)
     combined: list[Any] = []
     if isinstance(today_attr, list):
         combined.extend(today_attr[skip_index:])
