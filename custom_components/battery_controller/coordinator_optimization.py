@@ -49,6 +49,7 @@ from .const import (
     MODE_HYBRID,
     MODE_MANUAL,
     MODE_ZERO_GRID,
+    PRICE_CHANGE_REOPTIMIZE_ABS_EUR,
     PRICE_CHANGE_REOPTIMIZE_THRESHOLD,
     STALE_SENSOR_MULTIPLIER,
     BATTERY_MODE_THRESHOLD_W,
@@ -432,13 +433,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._last_period_start = period_start
             self._schedule_mid_period_run(period_start, interval_minutes)
             self.hass.async_create_task(self.async_request_refresh())
-        elif self._last_price is not None and self._last_price != 0:
+        elif self._last_price is not None:
             # Same period or no timestamp info — fallback threshold check.
-            change_pct = abs(new_price - self._last_price) / abs(self._last_price)
-            if change_pct >= PRICE_CHANGE_REOPTIMIZE_THRESHOLD:
+            if abs(self._last_price) > 1e-9:
+                change_pct = abs(new_price - self._last_price) / abs(self._last_price)
+                significant = change_pct >= PRICE_CHANGE_REOPTIMIZE_THRESHOLD
+            else:
+                # Relative change is undefined at a zero price (free hour):
+                # fall back to an absolute threshold so the trigger does not
+                # go dead — previously the price also never updated from 0,
+                # permanently disabling this fallback path.
+                significant = (
+                    abs(new_price - self._last_price) >= PRICE_CHANGE_REOPTIMIZE_ABS_EUR
+                )
+            if significant:
                 _LOGGER.debug(
-                    "Significant price change: %.2f%%, triggering optimization",
-                    change_pct * 100,
+                    "Significant price change: %.4f -> %.4f, triggering optimization",
+                    self._last_price,
+                    new_price,
                 )
                 self.hass.async_create_task(self.async_request_refresh())
             self._last_price = new_price
