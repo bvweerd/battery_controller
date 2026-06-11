@@ -129,12 +129,18 @@ def _calculate_baseline_cost(
     consumption_forecast: list[float],
     step_durations_hours: list[float],
     pv_dc_forecast: list[float],
+    max_grid_power_kw: float = 0.0,
 ) -> float:
     """Calculate horizon cost without battery action.
 
     Baseline scenario: no battery exists. DC-coupled PV panels would still
     produce power, but without a battery to absorb it, all DC PV goes through
     the inverter to AC (at DC_TO_AC_INVERTER_EFFICIENCY).
+
+    The grid capacity cap (max_grid_power_kw, 0 = unlimited) is applied the
+    same way as in calculate_step_cost: without it, the baseline could "sell"
+    PV beyond the physical grid connection, inflating baseline revenue and
+    distorting the reported savings.
     """
     baseline_cost = 0.0
     n_steps = min(len(price_forecast), len(pv_forecast), len(consumption_forecast))
@@ -150,6 +156,9 @@ def _calculate_baseline_cost(
         dc_pv_to_ac_w = pv_dc_w * DC_TO_AC_INVERTER_EFFICIENCY if pv_dc_w > 0 else 0
         total_pv_w = pv_w + dc_pv_to_ac_w
         net_grid_w = consumption_w - total_pv_w
+        if max_grid_power_kw > 0:
+            cap_w = max_grid_power_kw * 1000
+            net_grid_w = max(-cap_w, min(cap_w, net_grid_w))
         energy_kwh = abs(net_grid_w) * time_step_hours / 1000
         if net_grid_w > 0:
             baseline_cost += energy_kwh * grid_price
@@ -925,6 +934,7 @@ def optimize_battery_schedule(
         consumption_forecast=consumption_forecast[:n_steps],
         step_durations_hours=step_durations_hours[:n_steps],
         pv_dc_forecast=pv_dc_forecast[:n_steps],
+        max_grid_power_kw=battery_config.max_grid_power_kw,
     )
 
     # Savings = value added by battery ACTIONS only.
