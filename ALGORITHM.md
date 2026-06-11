@@ -47,7 +47,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `pv_dc_forecast[t]` | kW | DC-coupled PV production for each step (optional) |
 | `consumption_forecast[t]` | kW | Expected household consumption for each step |
 | `step_durations_hours[t]` | h | Duration of each time step (typically 0.25 h = 15 min) |
-| `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ usable_kwh`) |
+| `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ (2 × usable_kwh)` — one cycle is charge + discharge throughput) |
 | `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage |
 | `terminal_shadow_price` | EUR/kWh | Marginal value of stored energy from previous run (optional) |
 
@@ -188,7 +188,7 @@ energy_kwh = |net_grid_w| × dt / 1000
 grid_cost = energy_kwh × grid_price      (if net_grid_w > 0: buying)
           = -energy_kwh × feed_in_price  (if net_grid_w < 0: selling)
 
-degradation_cost_per_kwh = degradation_cost_per_cycle / usable_kwh  (conversion in coordinator)
+degradation_cost_per_kwh = degradation_cost_per_cycle / (2 × usable_kwh)  (conversion in coordinator; a full cycle = 2 × usable_kwh throughput)
 degradation_cost = throughput_kwh × degradation_cost_per_kwh
 
 step_cost = grid_cost + degradation_cost

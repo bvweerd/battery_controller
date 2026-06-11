@@ -1854,10 +1854,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             else "none (first run, using feed-in tail)",
         )
         # Convert degradation cost from per-cycle to per-kWh throughput for the optimizer.
-        # One cycle = max_soc_kwh - min_soc_kwh (usable capacity).
+        # One full cycle moves the usable capacity (max_soc_kwh - min_soc_kwh) through
+        # the battery TWICE: once charging and once discharging. The optimizer applies
+        # degradation to throughput in both directions, so divide by 2 × usable_kwh —
+        # dividing by usable_kwh alone would make a full cycle cost double the
+        # configured per-cycle value.
         usable_kwh = battery_config.max_soc_kwh - battery_config.min_soc_kwh
         degradation_cost_per_kwh = (
-            degradation_cost / usable_kwh if usable_kwh > 0 else degradation_cost
+            degradation_cost / (2 * usable_kwh) if usable_kwh > 0 else degradation_cost
         )
 
         result = await self.hass.async_add_executor_job(
