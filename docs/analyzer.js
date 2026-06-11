@@ -640,7 +640,9 @@ function generateTips(d) {
   const sqrtRte = Math.sqrt(rte);
   const usableKwh780 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCycle780 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-  const degrad  = degradCycle780 != null ? degradCycle780 / usableKwh780 : 0.04 / usableKwh780;
+  // Per-cycle → per-kWh: a full cycle is 2 × usable kWh of throughput
+  // (charge + discharge), matching the coordinator's conversion.
+  const degrad  = degradCycle780 != null ? degradCycle780 / (2 * usableKwh780) : 0.04 / (2 * usableKwh780);
   const spread  = opts.min_price_spread         || 0.05;
   const savings = opt.savings   || 0;
   const baseline= opt.baseline_cost || 0;
