@@ -151,6 +151,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._power_consumption_sensors = config.get(CONF_POWER_CONSUMPTION_SENSORS, [])
         self._power_production_sensors = config.get(CONF_POWER_PRODUCTION_SENSORS, [])
         self._unsub_realtime: Any | None = None
+        # Sensors already warned about for unexpected units (avoid log spam)
+        self._warned_sensor_units: set[str] = set()
 
         # First SoC sensor from any battery subentry (used for availability tracking)
         self._battery_soc_sensor: str | None = (
@@ -735,33 +737,48 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Sum all consumption sensors
         for sensor_id in self._power_consumption_sensors:
-            state = self.hass.states.get(sensor_id)
-            if state and state.state not in ("unknown", "unavailable"):
-                try:
-                    value = float(state.state)
-                    # Check unit: if in kW, convert to W
-                    unit = state.attributes.get("unit_of_measurement", "W")
-                    if unit == "kW":
-                        value *= 1000
-                    total_consumption += value
-                except (ValueError, TypeError):
-                    pass
+            value = self._read_power_sensor_w(sensor_id)
+            if value is not None:
+                total_consumption += value
 
         # Sum all production sensors
         for sensor_id in self._power_production_sensors:
-            state = self.hass.states.get(sensor_id)
-            if state and state.state not in ("unknown", "unavailable"):
-                try:
-                    value = float(state.state)
-                    # Check unit: if in kW, convert to W
-                    unit = state.attributes.get("unit_of_measurement", "W")
-                    if unit == "kW":
-                        value *= 1000
-                    total_production += value
-                except (ValueError, TypeError):
-                    pass
+            value = self._read_power_sensor_w(sensor_id)
+            if value is not None:
+                total_production += value
 
         return total_consumption - total_production
+
+    def _read_power_sensor_w(self, sensor_id: str) -> float | None:
+        """Read one power sensor and convert its value to W.
+
+        Sensors without a unit attribute are assumed to report W. Sensors with
+        an unrecognized power unit are skipped (with a one-time warning):
+        silently assuming W would be off by orders of magnitude for e.g. MW.
+        """
+        state = self.hass.states.get(sensor_id)
+        if not state or state.state in ("unknown", "unavailable"):
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        unit = state.attributes.get("unit_of_measurement", "W")
+        if unit in ("W", ""):
+            return value
+        if unit == "kW":
+            return value * 1000
+        self._warn_unit_once(sensor_id, unit, "ignoring sensor")
+        return None
+
+    def _warn_unit_once(self, sensor_id: str, unit: str, action: str) -> None:
+        """Warn about an unexpected sensor unit, once per sensor."""
+        if sensor_id in self._warned_sensor_units:
+            return
+        self._warned_sensor_units.add(sensor_id)
+        _LOGGER.warning(
+            "Sensor '%s' has unexpected unit '%s'; %s", sensor_id, unit, action
+        )
 
     async def async_shutdown(self) -> None:
         """Clean up event tracking."""
@@ -801,10 +818,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             state = self.hass.states.get(soc_sensor)
             if state and state.state not in ("unknown", "unavailable"):
                 unit = state.attributes.get("unit_of_measurement", "")
-                if unit == "kWh":
-                    soc_kwh = soc_value
-                    soc_percent = (soc_kwh / battery_config.capacity_kwh) * 100
+                if unit in ("kWh", "Wh"):
+                    soc_kwh = soc_value / 1000 if unit == "Wh" else soc_value
+                    soc_percent = (
+                        (soc_kwh / battery_config.capacity_kwh) * 100
+                        if battery_config.capacity_kwh > 0
+                        else 0.0
+                    )
                 else:
+                    if unit not in ("%", ""):
+                        self._warn_unit_once(
+                            soc_sensor, unit, "treating value as percent"
+                        )
                     soc_percent = soc_value
                     soc_kwh = (soc_percent / 100) * battery_config.capacity_kwh
             else:
@@ -824,12 +849,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 elif unit == "kW":
                     power_kw = power_value  # Already kW
                 else:
-                    _LOGGER.warning(
-                        "Battery power sensor '%s' has unexpected unit '%s'; "
-                        "treating value as kW",
-                        power_sensor,
-                        unit,
-                    )
+                    self._warn_unit_once(power_sensor, unit, "treating value as kW")
 
         power_w = power_kw * 1000
         if power_w > BATTERY_MODE_THRESHOLD_W:
