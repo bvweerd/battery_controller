@@ -2770,3 +2770,41 @@ async def test_degradation_per_cycle_converted_to_per_kwh_throughput(hass, monke
     usable_kwh = coord.battery_config.max_soc_kwh - coord.battery_config.min_soc_kwh
     assert usable_kwh == pytest.approx(9.0)
     assert captured["degradation_cost_per_kwh"] == pytest.approx(0.04 / (2 * 9.0))
+
+
+# ---------------------------------------------------------------------------
+# Sensor unit handling
+# ---------------------------------------------------------------------------
+
+
+def test_grid_power_kw_sensor_converted(hass):
+    """kW grid sensors are converted to W."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.grid_kw"]
+    hass.states.async_set("sensor.grid_kw", "1.5", {"unit_of_measurement": "kW"})
+    assert coord._get_realtime_grid_w() == pytest.approx(1500.0)
+
+
+def test_grid_power_unknown_unit_skipped(hass, caplog):
+    """A grid sensor with an unrecognized unit is skipped, not misread as W."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.grid_mw", "sensor.grid_w"]
+    hass.states.async_set("sensor.grid_mw", "2.0", {"unit_of_measurement": "MW"})
+    hass.states.async_set("sensor.grid_w", "300", {"unit_of_measurement": "W"})
+    assert coord._get_realtime_grid_w() == pytest.approx(300.0)
+    assert "unexpected unit 'MW'" in caplog.text
+    # Warning is emitted only once per sensor
+    caplog.clear()
+    coord._get_realtime_grid_w()
+    assert "unexpected unit" not in caplog.text
+
+
+def test_soc_sensor_in_wh_converted(hass):
+    """A Wh SoC sensor is converted to kWh."""
+    coord = _make_coordinator(hass)
+    hass.states.async_set("sensor.test_soc", "5000", {"unit_of_measurement": "Wh"})
+    sid, subentry = coord._battery_subentries[0]
+    cfg = dict(coord._individual_battery_configs)[sid]
+    state = coord._read_battery_state(subentry, cfg)
+    assert state.soc_kwh == pytest.approx(5.0)
+    assert state.soc_percent == pytest.approx(50.0)
