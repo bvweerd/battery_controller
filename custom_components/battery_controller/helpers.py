@@ -266,7 +266,8 @@ def _fill_missing_timestamps(
     if anchor_idx is None:
         return synthesize_timestamps(now, interval_minutes, len(timestamps))
     anchor = timestamps[anchor_idx]
-    assert anchor is not None
+    if anchor is None:  # unreachable; explicit so it also holds under python -O
+        return synthesize_timestamps(now, interval_minutes, len(timestamps))
     return [
         ts
         if ts is not None
