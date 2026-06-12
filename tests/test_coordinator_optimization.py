@@ -2830,3 +2830,83 @@ def test_concentrate_redistributes_when_winner_empty(hass):
     result = coord._split_setpoint(-1.0, MODE_ZERO_GRID)
     assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
     assert result["bat2"] == pytest.approx(-1.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_price_change_from_zero_uses_absolute_threshold(hass, monkeypatch):
+    """A price moving away from exactly 0 must still trigger re-optimization."""
+    coordinator = _make_coordinator(hass)
+
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coordinator._last_price = 0.0  # free hour
+    coordinator._last_period_start = period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period + timedelta(minutes=5),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.0"
+    new_mock = MagicMock()
+    new_mock.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called, "absolute threshold should trigger from a zero price"
+    assert coordinator._last_price == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_price_change_from_zero_small_change_updates_price(hass, monkeypatch):
+    """Tiny changes from 0 do not trigger, but _last_price must still update."""
+    coordinator = _make_coordinator(hass)
+
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coordinator._last_price = 0.0
+    coordinator._last_period_start = period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.001], [period], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period + timedelta(minutes=5),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.0"
+    new_mock = MagicMock()
+    new_mock.state = "0.001"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert not refresh_called
+    # Previously _last_price stayed stuck at 0 because the whole branch was
+    # skipped for a zero price.
+    assert coordinator._last_price == pytest.approx(0.001)
