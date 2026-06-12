@@ -1015,25 +1015,33 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             else (winner_cfg.min_soc_kwh + winner_cfg.max_soc_kwh) / 2
         )
 
+        others = [
+            (sid, cfg) for sid, cfg in self._individual_battery_configs if sid != winner
+        ]
         if total_kw > 0:
             headroom = max(0.0, winner_cfg.max_soc_kwh - winner_soc_kwh)
             if headroom <= 0:
+                # Winner is full (can happen via selection hysteresis): hand
+                # the whole setpoint to the remaining batteries instead of
+                # dropping it.
+                if others:
+                    for sid, val in self._proportional_split(total_kw, others).items():
+                        result[sid] = val
                 return result
             clamped = min(total_kw, winner_cfg.max_charge_at_soc(winner_soc_kwh))
         else:
             available = max(0.0, winner_soc_kwh - winner_cfg.min_soc_kwh)
             if available <= 0:
+                # Winner is empty: redistribute the discharge to the others.
+                if others:
+                    for sid, val in self._proportional_split(total_kw, others).items():
+                        result[sid] = val
                 return result
             clamped = max(total_kw, -winner_cfg.max_discharge_at_soc(winner_soc_kwh))
 
         result[winner] = clamped
         overflow = total_kw - clamped
         if abs(overflow) > 1e-6:
-            others = [
-                (sid, cfg)
-                for sid, cfg in self._individual_battery_configs
-                if sid != winner
-            ]
             if others:
                 for sid, val in self._proportional_split(overflow, others).items():
                     result[sid] = val
