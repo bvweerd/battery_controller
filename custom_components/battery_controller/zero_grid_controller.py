@@ -15,10 +15,13 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class ZeroGridControllerConfig:
-    """Configuration for the zero-grid controller."""
+    """Configuration for the zero-grid controller.
 
-    max_charge_w: float = 5000.0
-    max_discharge_w: float = 5000.0
+    Power limits are not stored here: the controller clamps setpoints with the
+    SoC-dependent limits from BatteryConfig (max_charge_at_soc /
+    max_discharge_at_soc), which are the authoritative source.
+    """
+
     deadband_w: float = 50.0  # Hysteresis to prevent oscillation
     response_time_s: float = 5.0  # Update interval
     priority: str = "schedule"  # 'zero_grid' or 'schedule' when in conflict
@@ -286,8 +289,6 @@ def create_zero_grid_controller(
     )
 
     controller_config = ZeroGridControllerConfig(
-        max_charge_w=battery_config.max_charge_power_kw * 1000,
-        max_discharge_w=battery_config.max_discharge_power_kw * 1000,
         deadband_w=float(
             config.get(CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W)
         ),
