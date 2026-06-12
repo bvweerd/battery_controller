@@ -24,8 +24,6 @@ def battery_config():
 @pytest.fixture
 def controller_config():
     return ZeroGridControllerConfig(
-        max_charge_w=5000.0,
-        max_discharge_w=5000.0,
         deadband_w=50.0,
     )
 
@@ -323,8 +321,6 @@ class TestZeroDeadband:
     def test_zero_deadband_does_not_crash(self, battery_config):
         """With deadband=0 the controller runs without errors."""
         config = ZeroGridControllerConfig(
-            max_charge_w=5000.0,
-            max_discharge_w=5000.0,
             deadband_w=0.0,
         )
         controller = ZeroGridController(config, battery_config)
@@ -339,8 +335,6 @@ class TestZeroDeadband:
     def test_zero_deadband_setpoint_always_updates(self, battery_config):
         """With deadband=0 every call updates the setpoint (no hysteresis)."""
         config = ZeroGridControllerConfig(
-            max_charge_w=5000.0,
-            max_discharge_w=5000.0,
             deadband_w=0.0,
         )
         controller = ZeroGridController(config, battery_config)
