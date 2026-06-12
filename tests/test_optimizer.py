@@ -2600,3 +2600,36 @@ class TestBaselineGridCap:
         )
         # Capped baseline: 4 h x 3 kW x 0.10 = 1.20 EUR revenue.
         assert result.baseline_cost == pytest.approx(-1.20)
+
+
+class TestTerminalPriceClamp:
+    """Negative feed-in tail must not give stored energy a negative terminal value."""
+
+    def test_negative_feed_in_tail_does_not_force_discharge(self):
+        """With all-negative feed-in and no load, the battery should stay idle.
+
+        Without the clamp, V[T] penalizes stored energy (negative terminal
+        price), so the DP dumps energy before the horizon ends even though
+        exporting at a negative price costs money.
+        """
+        cfg = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=5.0,
+            price_forecast=[0.20] * 6,
+            feed_in_forecast=[-0.05] * 6,
+            pv_forecast=[0.0] * 6,
+            consumption_forecast=[0.0] * 6,
+            step_durations_hours=[1.0] * 6,
+            degradation_cost_per_kwh=0.01,
+            min_price_spread=0.05,
+        )
+        assert all(m == "idle" for m in result.mode_schedule)
+        assert result.soc_schedule_kwh[-1] == pytest.approx(5.0)

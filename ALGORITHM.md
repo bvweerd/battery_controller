@@ -215,7 +215,7 @@ The negative sign is because `V` represents cost — more stored energy means lo
 
 **Choosing `terminal_price`:**
 
-`min(feed_in_forecast[-1], clipped average of the last 6 h of feed-in prices)` — a blended tail that dampens transient price spikes at the forecast boundary. The shadow price from the previous run is deliberately **not** used as terminal value: λ ≈ sqrt(RTE) × P_best, so using it would make discharge at the best price hour break-even and suppress discharge exactly at the peak (a circular dependency in rolling-horizon re-optimization). The shadow price is only used by hybrid mode as the charge/discharge switching threshold.
+`max(0, min(feed_in_forecast[-1], clipped average of the last 6 h of feed-in prices))` — a blended tail that dampens transient price spikes at the forecast boundary, clamped at 0 so a negative feed-in tail never penalizes stored energy (the horizon end is artificial; the battery is never forced to sell at a loss). The shadow price from the previous run is deliberately **not** used as terminal value: λ ≈ sqrt(RTE) × P_best, so using it would make discharge at the best price hour break-even and suppress discharge exactly at the peak (a circular dependency in rolling-horizon re-optimization). The shadow price is only used by hybrid mode as the charge/discharge switching threshold.
 
 ---
 

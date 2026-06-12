@@ -116,7 +116,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
     const medianPrice = sortedPrices[Math.floor(sortedPrices.length / 2)];
     const clippedTail = feedInFc.slice(-lookback).map(p => Math.min(p, medianPrice));
     const avgTail = clippedTail.reduce((s, p) => s + p, 0) / clippedTail.length;
-    terminalPrice = Math.min(feedInFc[feedInFc.length - 1], avgTail);
+    // Clamp at 0: negative feed-in tail must not penalize stored energy.
+    terminalPrice = Math.max(0, Math.min(feedInFc[feedInFc.length - 1], avgTail));
   } else {
     terminalPrice = 0;
   }
