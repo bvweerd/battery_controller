@@ -84,6 +84,12 @@ _SOC_SPLIT_THRESHOLD = 0.10
 # to a clearly better battery happens before proportional splitting kicks in.
 _SOC_HYSTERESIS = 0.05
 
+# Hybrid mode: when the DP plans charging while the grid is exporting, switch
+# to zero_grid (surplus-following) only if the export surplus covers at least
+# this fraction of the planned charge power. Below it, the DP evidently wants
+# grid charging beyond the surplus and the schedule is followed instead.
+_SURPLUS_COVERS_PLAN_FRACTION = 0.8
+
 
 class OptimizationCoordinator(DataUpdateCoordinator):
     """Coordinator for battery optimization."""
@@ -2067,12 +2073,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     # deadlock that stops charging.
                     effective_mode = result.optimal_mode
                     effective_power = result.optimal_power_kw
-                else:
-                    # PV surplus available (grid exporting): use zero_grid to
-                    # dynamically match the actual surplus instead of fixed-rate
-                    # charging. Fixed charging may import from grid when clouds pass.
+                elif (
+                    -current_grid
+                    >= result.optimal_power_kw * 1000 * _SURPLUS_COVERS_PLAN_FRACTION
+                ):
+                    # PV surplus covers (most of) the planned charge: use
+                    # zero_grid to dynamically match the actual surplus instead
+                    # of fixed-rate charging. Fixed charging may import from
+                    # grid when clouds pass.
                     effective_mode = "zero_grid"
                     effective_power = 0.0
+                else:
+                    # The DP planned substantially more charging than the
+                    # current export surplus — it wants grid charging (e.g. a
+                    # cheap price hour that happens to coincide with a small PV
+                    # surplus). Zero_grid would only charge the surplus and
+                    # forfeit the planned arbitrage, so follow the schedule.
+                    effective_mode = result.optimal_mode
+                    effective_power = result.optimal_power_kw
             else:
                 effective_mode = result.optimal_mode
                 effective_power = result.optimal_power_kw
