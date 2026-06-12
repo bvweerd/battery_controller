@@ -3008,3 +3008,101 @@ def test_discharge_calibration_samples_when_plan_executed(hass):
     assert len(coord._discharge_eff_samples) == 1
     assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
     assert coord._discharge_eff_correction == pytest.approx(0.8)
+
+
+# Feed-in interval handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_feed_in_forecast_resampled_from_native_interval(hass, monkeypatch):
+    """Hourly feed-in prices are expanded to the 15-min grid price interval."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.config[CONF_FEED_IN_PRICE_SENSOR] = "sensor.feed_in"
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0],
+        "consumption_forecast_kw": [0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    # Feed-in sensor publishes two HOURLY values via the generic forecast attr
+    # (no timestamps -> detected interval = 60 min).
+    hass.states.async_set("sensor.feed_in", "0.10", {"forecast": [0.10, 0.20]})
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    # Grid price sensor publishes 15-min prices: 4 steps = 1 hour
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: (
+            [0.20, 0.21, 0.22, 0.23],
+            [fixed_now + timedelta(minutes=15 * i) for i in range(4)],
+            15,
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [0.25] * 4,
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["feed_in"] = args[3]
+        return OptimizationResult(
+            power_schedule_kw=[0.0] * 4,
+            mode_schedule=["idle"] * 4,
+            soc_schedule_kwh=[5.0] * 5,
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=list(args[2]),
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5] * 4,
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    # The first hourly feed-in value (0.10) must cover the first four 15-min
+    # steps. Without interval-aware resampling the second hourly value (0.20)
+    # would incorrectly appear at step 1.
+    assert captured["feed_in"][:4] == pytest.approx([0.10, 0.10, 0.10, 0.10])
