@@ -362,7 +362,8 @@ def run_dp(
         median_price = sorted_prices[len(sorted_prices) // 2]
         clipped_tail = [min(p, median_price) for p in feed_in_forecast[-lookback:]]
         avg_tail = sum(clipped_tail) / len(clipped_tail)
-        terminal_price = min(feed_in_forecast[-1], avg_tail)
+        # Clamp at 0: negative feed-in tail must not penalize stored energy.
+        terminal_price = max(0.0, min(feed_in_forecast[-1], avg_tail))
     else:
         terminal_price = 0.0
     for s_idx, soc_wh in enumerate(soc_states):
