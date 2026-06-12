@@ -1207,3 +1207,44 @@ class TestForecastSkipPast:
 
         prices, interval = h.extract_price_forecast_with_interval(state)
         assert prices == [0.10, 0.11, 0.12]
+
+
+class TestDstSafeSkipIndex:
+    """Index-based skip must use elapsed time, not wall-clock arithmetic."""
+
+    def test_25_hour_day_skips_correct_entries(self, monkeypatch):
+        """On the DST fall-back day, raw_today has 25 entries; wall-clock 04:30
+        is 5.5 elapsed hours, so 5 entries must be skipped (not 4)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from custom_components.battery_controller import helpers as h
+
+        tz = ZoneInfo("Europe/Amsterdam")
+        # 2026-10-25: EU DST ends, 03:00 -> 02:00 (25-hour day).
+        # fold=1 selects the post-transition 04:30 = 5.5 h after midnight.
+        now_local = datetime(2026, 10, 25, 4, 30, tzinfo=tz)
+        monkeypatch.setattr(h.dt_util, "now", lambda: now_local)
+
+        prices = [float(i) for i in range(25)]  # one entry per hour-period
+        state = MagicMock()
+        state.attributes = {"raw_today": prices, "raw_tomorrow": []}
+        state.state = "0.0"
+
+        forecast, interval = h.extract_price_forecast_with_interval(state)
+        assert interval == 60
+        # Elapsed = 5.5 h -> skip 5 entries; first remaining entry is index 5.
+        assert forecast[0] == 5.0
+
+    def test_skip_index_helper_normal_day(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from custom_components.battery_controller.helpers import (
+            _skip_index_since_local_midnight,
+        )
+
+        tz = ZoneInfo("Europe/Amsterdam")
+        now_local = datetime(2026, 6, 10, 15, 47, tzinfo=tz)
+        assert _skip_index_since_local_midnight(now_local, 60) == 15
+        assert _skip_index_since_local_midnight(now_local, 15) == 63
