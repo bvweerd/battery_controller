@@ -174,6 +174,9 @@ POWER_IDLE_THRESHOLD_KW = (
 PRICE_CHANGE_REOPTIMIZE_THRESHOLD = (
     0.10  # fractional — re-run optimizer on >=10% price change
 )
+PRICE_CHANGE_REOPTIMIZE_ABS_EUR = (
+    0.01  # EUR/kWh — absolute change threshold when the previous price is 0
+)
 STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
