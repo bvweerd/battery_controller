@@ -3106,3 +3106,102 @@ async def test_feed_in_forecast_resampled_from_native_interval(hass, monkeypatch
     # steps. Without interval-aware resampling the second hourly value (0.20)
     # would incorrectly appear at step 1.
     assert captured["feed_in"][:4] == pytest.approx([0.10, 0.10, 0.10, 0.10])
+
+
+# ---------------------------------------------------------------------------
+
+# Hybrid mode: planned charging vs PV export surplus
+# ---------------------------------------------------------------------------
+
+
+async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
+    """Run one hybrid optimization with a 3 kW planned charge and given grid power."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    coord.control_mode = MODE_HYBRID
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.5, 0.5],
+        "consumption_forecast_kw": [0.3, 0.3],
+        "current_pv_kw": 0.5,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.3,
+    }
+    hass.states.async_set("sensor.test_price", "0.10")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.10, 0.12], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    fake_result = OptimizationResult(
+        power_schedule_kw=[3.0, 0.0],
+        mode_schedule=["charging", "idle"],
+        soc_schedule_kwh=[5.0, 7.8, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=3.0,
+        optimal_mode="charging",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        return_value=fake_result,
+    ):
+        data = await coord._run_optimization()
+    return data
+
+
+@pytest.mark.asyncio
+async def test_hybrid_small_surplus_follows_charge_schedule(hass, monkeypatch):
+    """A 0.2 kW export surplus must not downgrade a 3 kW planned grid charge."""
+    data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-200.0)
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
+    """When the surplus covers the planned charge, zero_grid follows the surplus."""
+    data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-3500.0)
+    assert data["optimal_mode"] == "zero_grid"
