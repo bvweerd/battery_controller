@@ -2249,6 +2249,12 @@ def _make_fake_result(
     )
 
 
+def _mark_plan_executed(coord) -> None:
+    """Simulate that the previous DP plan was commanded to the controller unchanged."""
+    coord._effective_mode = coord._last_result.mode_schedule[0]
+    coord._controller_schedule_w = coord._last_result.power_schedule_kw[0] * 1000
+
+
 def test_calibration_no_sample_without_previous_result(hass):
     """No calibration sample when _last_result is None."""
     coord = _make_coordinator(hass)
@@ -2303,6 +2309,7 @@ def test_calibration_perfect_efficiency_no_correction(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual SoC reached exactly the planned value
     battery_state = BatteryState(
@@ -2331,6 +2338,7 @@ def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 10, 15, tzinfo=timezone.utc),
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=5.25, soc_percent=52.5, power_kw=1.0, mode="charging"
@@ -2357,6 +2365,7 @@ def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
@@ -2375,6 +2384,7 @@ def test_calibration_low_efficiency_updates_correction(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[4.0, 6.0],  # planned delta = 2.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 1.6 kWh → ratio = 0.8
     battery_state = BatteryState(
@@ -2396,6 +2406,7 @@ def test_calibration_rolling_average_converges(hass):
             mode_schedule=["charging"],
             soc_schedule_kwh=[0.0, 1.0],
         )
+        _mark_plan_executed(coord)
         # actual delta = 0.85 kWh → ratio = 0.85
         battery_state = BatteryState(
             soc_kwh=0.85, soc_percent=8.5, power_kw=1.0, mode="charging"
@@ -2417,6 +2428,7 @@ def test_calibration_floor_clips_extreme_low_ratio(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 7.0],  # planned delta = 2.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 0.5 kWh → uncipped ratio = 0.25, clipped to 0.5
     battery_state = BatteryState(
@@ -2434,6 +2446,7 @@ def test_calibration_ceiling_clips_extra_charge(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 1.5 kWh → unclipped ratio = 1.5, clipped to 1.05
     battery_state = BatteryState(
@@ -2489,6 +2502,7 @@ def test_calibration_not_applied_for_dc_coupled(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[4.0, 6.0],
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
@@ -2910,3 +2924,87 @@ async def test_price_change_from_zero_small_change_updates_price(hass, monkeypat
     # Previously _last_price stayed stuck at 0 because the whole branch was
     # skipped for a zero price.
     assert coordinator._last_price == pytest.approx(0.001)
+
+
+# ---------------------------------------------------------------------------
+# Calibration gating: only sample when the DP plan was actually executed
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_no_sample_when_plan_overridden_by_zero_grid(hass):
+    """No sample when hybrid/zero_grid resolved the planned charge to zero_grid."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],
+    )
+    # Hybrid resolved the planned charge to zero_grid: schedule not executed.
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    battery_state = BatteryState(
+        soc_kwh=4.1, soc_percent=41.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_calibration_no_sample_when_commitment_locked_other_power(hass):
+    """No sample when the commitment filter locked a different power."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],
+    )
+    # Same direction but commitment filter locked 0.4 kW instead of planned 1.0 kW.
+    coord._effective_mode = "charging"
+    coord._controller_schedule_w = 400.0
+
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=0.4, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_discharge_calibration_no_sample_when_plan_overridden(hass):
+    """Discharge calibration is gated on the executed plan as well."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    battery_state = BatteryState(
+        soc_kwh=5.9, soc_percent=59.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 0
+    assert coord._discharge_eff_correction == 1.0
+
+
+def test_discharge_calibration_samples_when_plan_executed(hass):
+    """Discharge calibration samples normally when the plan was executed."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],  # planned delta = 2.0 kWh down
+    )
+    _mark_plan_executed(coord)
+
+    # Actual delta = 1.6 kWh down → ratio = 0.8
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 1
+    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+    assert coord._discharge_eff_correction == pytest.approx(0.8)

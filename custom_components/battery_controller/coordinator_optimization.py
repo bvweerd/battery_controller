@@ -1278,11 +1278,32 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         step_end_utc = dt_util.as_utc(step_start) + timedelta(hours=step_duration_hours)
         return bool(dt_util.utcnow() >= step_end_utc)
 
+    def _planned_first_step_was_executed(self, planned_action: str) -> bool:
+        """Return whether the previous run's planned first step was commanded as-is.
+
+        The DP plan is not always what gets executed: hybrid mode can resolve a
+        planned charge/discharge to zero_grid, the commitment filter can lock a
+        different power, and zero_grid/manual control modes ignore the schedule
+        entirely. Efficiency calibration must only sample steps where the plan
+        was sent to the controller unchanged — otherwise the actual SoC delta
+        reflects the mode resolution, not battery efficiency.
+        """
+        if self._effective_mode != planned_action:
+            return False
+        if self._last_result is None or not self._last_result.power_schedule_kw:
+            return False
+        planned_kw = self._last_result.power_schedule_kw[0]
+        executed_kw = self._controller_schedule_w / 1000
+        tolerance_kw = max(0.05, 0.1 * abs(planned_kw))
+        return abs(executed_kw - planned_kw) <= tolerance_kw
+
     def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
         """Compare previous planned SoC to actual SoC and update charge efficiency correction.
 
         Samples are only collected when:
         - The previous optimizer step planned active charging (mode == 'charging')
+        - The planned step was actually commanded unchanged (no hybrid/zero_grid
+          override, no commitment-filter power lock)
         - The full planned step has elapsed
         - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
         - DC-coupled PV is not active (passive PV charging would inflate actual delta)
@@ -1306,6 +1327,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return
 
         if self._last_result.mode_schedule[0] != ACTION_CHARGING:
+            return
+
+        # Only sample when the plan was actually commanded; mode resolution
+        # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
+        # would otherwise drag the correction towards the 0.5 clip floor.
+        if not self._planned_first_step_was_executed(ACTION_CHARGING):
             return
 
         if not self._previous_charge_step_complete():
@@ -1414,6 +1441,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         Samples are only collected when:
         - The previous optimizer step planned active discharging (mode == 'discharging')
+        - The planned step was actually commanded unchanged (no hybrid/zero_grid
+          override, no commitment-filter power lock)
         - The full planned step has elapsed
         - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
         - DC-coupled PV is not active (passive PV charging during a discharge step
@@ -1435,6 +1464,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return
 
         if self._last_result.mode_schedule[0] != ACTION_DISCHARGING:
+            return
+
+        # Only sample when the plan was actually commanded; mode resolution
+        # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
+        # would otherwise drag the correction towards the 0.5 clip floor.
+        if not self._planned_first_step_was_executed(ACTION_DISCHARGING):
             return
 
         if not self._previous_charge_step_complete():
