@@ -30,7 +30,7 @@ jobs:
       - name: Prepare static site
         run: rsync -a --exclude='__tests__' docs/ _site/
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v5
         with:
