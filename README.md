@@ -227,7 +227,9 @@ The main configuration covers global sensors and advanced settings, organised in
 
 ## Entities Created
 
-**Convention**: All power sensors use **positive for discharge** and **negative for charge**.
+**Convention**: All power sensors *created by the integration* (e.g. Total Battery Power, Battery Setpoint) use **positive for discharge** and **negative for charge**.
+
+The **Battery power sensor** you configure as input (`battery_power_sensor`) is the opposite: **positive for charging** and **negative for discharging**, matching how the integration reports charge/discharge mode. If your own battery sensor follows the output convention above, invert its sign before pointing this field at it.
 
 ### Sensors
 
