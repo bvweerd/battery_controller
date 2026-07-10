@@ -932,8 +932,12 @@ function renderDiagnostics(raw) {
         ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`
         : '<span class="text-gray-300">—</span>';
 
-      // Highlight rows where setpoint deviates from effective power (SoC/power limit)
-      const socLimited = Math.abs((entry.setpoint_kw ?? 0) - (entry.effective_power_kw ?? 0)) > 0.05;
+      // Highlight rows where setpoint deviates from effective power (SoC/power limit).
+      // effective_power_kw is always 0 in zero_grid mode by design (see column
+      // tooltip above), so skip the comparison there to avoid flagging normal
+      // zero_grid charging/discharging as "SoC/power limited".
+      const socLimited = entry.effective_mode !== 'zero_grid'
+        && Math.abs((entry.setpoint_kw ?? 0) - (entry.effective_power_kw ?? 0)) > 0.05;
       // Highlight rows where effective differs from DP (mode override, not commitment)
       const modeOverride = !entry.commitment_locked
         && Math.abs((entry.effective_power_kw ?? 0) - (entry.dp_power_kw ?? 0)) > 0.05;
