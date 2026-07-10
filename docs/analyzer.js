@@ -826,8 +826,13 @@ function generateTips(d) {
   const setpLog2 = opt.setpoint_log || [];
 
   if (runLog2.length > 0) {
+    // effective_power_kw is always 0 in zero_grid mode by design (the real-time
+    // controller determines power dynamically, not the DP schedule), so comparing
+    // it to setpoint_kw there would always look "limited" even under normal
+    // zero_grid charging/discharging. Only compare when effective_mode isn't zero_grid.
     const socLimitedRuns = runLog2.filter(e =>
-      Math.abs((e.setpoint_kw ?? 0) - (e.effective_power_kw ?? 0)) > 0.05
+      e.effective_mode !== 'zero_grid'
+      && Math.abs((e.setpoint_kw ?? 0) - (e.effective_power_kw ?? 0)) > 0.05
     );
     const commitLocked = runLog2.filter(e => e.commitment_locked);
 

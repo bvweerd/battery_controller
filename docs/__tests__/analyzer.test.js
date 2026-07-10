@@ -426,6 +426,20 @@ describe('generateTips', () => {
     expect(tips.some(t => t.t === 'warn' && t.title.toLowerCase().includes('soc/power limited'))).toBe(true);
   });
 
+  test('does not warn for zero_grid runs where effective_power_kw is 0 by design', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { effective_power_kw: 0.0, setpoint_kw: 1.8, commitment_locked: false,
+        effective_mode: 'zero_grid', timestamp: '2026-03-23T10:00:00', soc_kwh: 5.0 },
+      { effective_power_kw: 0.0, setpoint_kw: 2.1, commitment_locked: false,
+        effective_mode: 'zero_grid', timestamp: '2026-03-23T10:15:00', soc_kwh: 5.5 },
+      { effective_power_kw: 0.5, setpoint_kw: 0.5, commitment_locked: false,
+        effective_mode: 'charging', timestamp: '2026-03-23T10:30:00', soc_kwh: 6.0 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.t === 'warn' && t.title.toLowerCase().includes('soc/power limited'))).toBe(false);
+  });
+
   test('info tip when commitment filter is active', () => {
     const d = makeDiag();
     d.optimization.optimizer_run_log = [
