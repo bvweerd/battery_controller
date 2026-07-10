@@ -3205,3 +3205,140 @@ async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
     """When the surplus covers the planned charge, zero_grid follows the surplus."""
     data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-3500.0)
     assert data["optimal_mode"] == "zero_grid"
+
+
+async def _run_hybrid_mode_sequence(
+    hass, monkeypatch, fake_result: OptimizationResult, grid_sequence: list[float]
+) -> list[str]:
+    """Run hybrid optimization repeatedly on one coordinator, varying grid power.
+
+    Used to verify hysteresis: unlike `_run_hybrid_charge_case`, which builds a
+    fresh coordinator per call (so it can't observe state carried between
+    realtime-update ticks), this reuses the same coordinator so the
+    `_last_hybrid_idle_decision` / `_last_hybrid_charge_decision` hysteresis
+    state persists across the calls in grid_sequence.
+    """
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    coord.control_mode = MODE_HYBRID
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.5, 0.5],
+        "consumption_forecast_kw": [0.3, 0.3],
+        "current_pv_kw": 0.5,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.3,
+    }
+    hass.states.async_set("sensor.test_price", "0.10")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.10, 0.12], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    modes: list[str] = []
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        return_value=fake_result,
+    ):
+        for grid_w in grid_sequence:
+            monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda gw=grid_w: gw)
+            data = await coord._run_optimization()
+            modes.append(data["optimal_mode"])
+    return modes
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_surplus_hysteresis_prevents_flicker(hass, monkeypatch):
+    """PV surplus hovering around the 80% coverage threshold must not flip the
+    effective mode every realtime tick.
+
+    Planned charge is 3 kW, so the coverage threshold is 2400 W. The first
+    tick has a solid 2600 W surplus (enters zero_grid). The second tick drops
+    to 2350 W: below the raw 2400 W threshold, but within the ±5% hysteresis
+    band, so it must stay in zero_grid rather than flicker back to charging.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[3.0, 0.0],
+        mode_schedule=["charging", "idle"],
+        soc_schedule_kwh=[5.0, 7.8, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=3.0,
+        optimal_mode="charging",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass, monkeypatch, fake_result, grid_sequence=[-2600.0, -2350.0]
+    )
+    assert modes == ["zero_grid", "zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_idle_zero_grid_hysteresis_prevents_flicker(hass, monkeypatch):
+    """Grid power hovering near 0 W must not flip idle/zero_grid every tick.
+
+    The optimizer wants idle (preserve capacity for an upcoming discharge).
+    The first tick has a solid PV surplus (-100 W, below -BATTERY_MODE_THRESHOLD_W)
+    so it enters zero_grid. The second tick is a small positive import (20 W) —
+    within the ±BATTERY_MODE_THRESHOLD_W band — so it must stay in zero_grid
+    rather than flicker back to idle.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[0.0, 2.0],
+        mode_schedule=["idle", "discharging"],
+        soc_schedule_kwh=[5.0, 5.0, 3.0],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass, monkeypatch, fake_result, grid_sequence=[-100.0, 20.0]
+    )
+    assert modes == ["zero_grid", "zero_grid"]
