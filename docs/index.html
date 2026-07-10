@@ -197,7 +197,7 @@
   <!-- Optimizer run history -->
   <div id="run-log-section" class="hidden bg-white rounded-xl border border-gray-200 p-5">
     <h3 class="font-semibold text-gray-700 mb-1 text-sm">🕒 Optimizer Run History <span id="run-log-count" class="text-xs text-gray-400 font-normal"></span></h3>
-    <p class="text-xs text-gray-400 mb-3">One row per 15-min optimizer run. Highlights deviations between DP output, effective mode (after hybrid/commitment logic), and the published setpoint.</p>
+    <p class="text-xs text-gray-400 mb-3">One row per 15-min optimizer run. Highlights deviations between DP output, effective mode (after hybrid/commitment logic), and the published setpoint. Note: "Eff. kW" is always 0 whenever "Eff. mode" is <code>zero_grid</code> &mdash; in zero_grid mode there is no fixed schedule power, it's continuously recalculated by the real-time (~5&ndash;10s) zero-grid controller instead. Look at "Setpoint kW" (or the Real-time Setpoint Log below) for the actual battery power during zero_grid periods.</p>
     <div class="scrolltable sticky-header">
       <table class="w-full text-xs border-collapse">
         <thead>
@@ -207,7 +207,7 @@
             <th class="border border-gray-200 px-2 py-1">DP mode</th>
             <th class="border border-gray-200 px-2 py-1">DP kW</th>
             <th class="border border-gray-200 px-2 py-1">Eff. mode</th>
-            <th class="border border-gray-200 px-2 py-1">Eff. kW</th>
+            <th class="border border-gray-200 px-2 py-1" title="Effective power from the DP schedule after hybrid/commitment resolution. Always 0 in zero_grid mode by design &mdash; see actual power in Setpoint kW.">Eff. kW</th>
             <th class="border border-gray-200 px-2 py-1">Setpoint kW</th>
             <th class="border border-gray-200 px-2 py-1">SoC kWh</th>
             <th class="border border-gray-200 px-2 py-1">Price</th>
