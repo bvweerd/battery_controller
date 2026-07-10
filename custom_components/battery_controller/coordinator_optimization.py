@@ -230,6 +230,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # so small oscillations around the shadow-price threshold are damped.
         self._last_hybrid_decision: str = "zero_grid"
 
+        # Hysteresis state for the hybrid idle branch: tracks whether we were in
+        # "idle" or "zero_grid" so grid power hovering near 0 W doesn't flip the
+        # mode every realtime-update tick.
+        self._last_hybrid_idle_decision: str = ACTION_IDLE
+
+        # Hysteresis state for the hybrid charging branch: tracks whether we were
+        # following the DP schedule ("charging") or capturing PV surplus only
+        # ("zero_grid") so surplus hovering near the coverage threshold doesn't
+        # flip the mode every realtime-update tick.
+        self._last_hybrid_charge_decision: str = ACTION_CHARGING
+
         # Diagnostic history ring buffers (not persisted across restarts).
         # optimizer_run_log: one entry per 15-min optimizer run (24 h @ 15 min = 96).
         # setpoint_log: one entry every time the real-time setpoint changes.
@@ -2014,12 +2025,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 has_upcoming_discharge = any(
                     m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
                 )
-                if has_upcoming_discharge and current_grid >= 0:
+                # Hysteresis: use a ±BATTERY_MODE_THRESHOLD_W band around the 0 W
+                # crossing so grid power hovering near zero (e.g. consumption ≈ PV
+                # production) doesn't flip idle/zero_grid every realtime tick.
+                if self._last_hybrid_idle_decision == "zero_grid":
+                    # Was capturing surplus; keep doing so until grid climbs
+                    # solidly positive (surplus has genuinely disappeared).
+                    has_pv_surplus = current_grid < BATTERY_MODE_THRESHOLD_W
+                else:
+                    # Was idle; only start capturing once surplus is solid.
+                    has_pv_surplus = current_grid < -BATTERY_MODE_THRESHOLD_W
+                if has_upcoming_discharge and not has_pv_surplus:
                     # Preserve capacity (discharge planned, no PV surplus)
                     effective_mode = ACTION_IDLE
                 else:
                     # Either no discharge planned, or PV surplus to capture
                     effective_mode = "zero_grid"
+                self._last_hybrid_idle_decision = effective_mode
                 effective_power = 0.0
             elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
@@ -2073,24 +2095,38 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     # deadlock that stops charging.
                     effective_mode = result.optimal_mode
                     effective_power = result.optimal_power_kw
-                elif (
-                    -current_grid
-                    >= result.optimal_power_kw * 1000 * _SURPLUS_COVERS_PLAN_FRACTION
-                ):
-                    # PV surplus covers (most of) the planned charge: use
-                    # zero_grid to dynamically match the actual surplus instead
-                    # of fixed-rate charging. Fixed charging may import from
-                    # grid when clouds pass.
-                    effective_mode = "zero_grid"
-                    effective_power = 0.0
+                    self._last_hybrid_charge_decision = ACTION_CHARGING
                 else:
-                    # The DP planned substantially more charging than the
-                    # current export surplus — it wants grid charging (e.g. a
-                    # cheap price hour that happens to coincide with a small PV
-                    # surplus). Zero_grid would only charge the surplus and
-                    # forfeit the planned arbitrage, so follow the schedule.
-                    effective_mode = result.optimal_mode
-                    effective_power = result.optimal_power_kw
+                    # Hysteresis: apply a ±5% band around the coverage threshold
+                    # (same pattern as the discharge decision above) so PV surplus
+                    # hovering near _SURPLUS_COVERS_PLAN_FRACTION of the planned
+                    # charge power doesn't flip zero_grid/charging every tick.
+                    # • Was zero_grid → stay unless surplus drops below 95% of threshold
+                    # • Was charging → switch only once surplus reaches 105% of threshold
+                    if self._last_hybrid_charge_decision == "zero_grid":
+                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
+                    else:
+                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
+                    if (
+                        -current_grid
+                        >= result.optimal_power_kw * 1000 * coverage_threshold
+                    ):
+                        # PV surplus covers (most of) the planned charge: use
+                        # zero_grid to dynamically match the actual surplus instead
+                        # of fixed-rate charging. Fixed charging may import from
+                        # grid when clouds pass.
+                        effective_mode = "zero_grid"
+                        effective_power = 0.0
+                        self._last_hybrid_charge_decision = "zero_grid"
+                    else:
+                        # The DP planned substantially more charging than the
+                        # current export surplus — it wants grid charging (e.g. a
+                        # cheap price hour that happens to coincide with a small PV
+                        # surplus). Zero_grid would only charge the surplus and
+                        # forfeit the planned arbitrage, so follow the schedule.
+                        effective_mode = result.optimal_mode
+                        effective_power = result.optimal_power_kw
+                        self._last_hybrid_charge_decision = ACTION_CHARGING
             else:
                 effective_mode = result.optimal_mode
                 effective_power = result.optimal_power_kw
