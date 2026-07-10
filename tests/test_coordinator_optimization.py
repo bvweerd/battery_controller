@@ -22,6 +22,7 @@ from custom_components.battery_controller.const import (
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
     CONF_ROUND_TRIP_EFFICIENCY,
+    CONF_ZERO_GRID_DEADBAND_W,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_ZERO_GRID,
@@ -3208,7 +3209,11 @@ async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
 
 
 async def _run_hybrid_mode_sequence(
-    hass, monkeypatch, fake_result: OptimizationResult, grid_sequence: list[float]
+    hass,
+    monkeypatch,
+    fake_result: OptimizationResult,
+    grid_sequence: list[float],
+    deadband_w: float | None = None,
 ) -> list[str]:
     """Run hybrid optimization repeatedly on one coordinator, varying grid power.
 
@@ -3257,7 +3262,9 @@ async def _run_hybrid_mode_sequence(
         lambda: fixed_now,
     )
     live_entry = MagicMock()
-    live_entry.options = {}
+    live_entry.options = (
+        {} if deadband_w is None else {CONF_ZERO_GRID_DEADBAND_W: deadband_w}
+    )
     monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
 
     coord.zero_grid_controller = MagicMock()
@@ -3319,10 +3326,10 @@ async def test_hybrid_idle_zero_grid_hysteresis_prevents_flicker(hass, monkeypat
     """Grid power hovering near 0 W must not flip idle/zero_grid every tick.
 
     The optimizer wants idle (preserve capacity for an upcoming discharge).
-    The first tick has a solid PV surplus (-100 W, below -BATTERY_MODE_THRESHOLD_W)
-    so it enters zero_grid. The second tick is a small positive import (20 W) —
-    within the ±BATTERY_MODE_THRESHOLD_W band — so it must stay in zero_grid
-    rather than flicker back to idle.
+    The first tick has a solid PV surplus (-100 W, below the default -50 W
+    zero-grid-deadband band) so it enters zero_grid. The second tick is a
+    small positive import (20 W) — within the ±50 W deadband — so it must
+    stay in zero_grid rather than flicker back to idle.
     """
     fake_result = OptimizationResult(
         power_schedule_kw=[0.0, 2.0],
@@ -3342,3 +3349,36 @@ async def test_hybrid_idle_zero_grid_hysteresis_prevents_flicker(hass, monkeypat
         hass, monkeypatch, fake_result, grid_sequence=[-100.0, 20.0]
     )
     assert modes == ["zero_grid", "zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_idle_zero_grid_deadband_is_configurable(hass, monkeypatch):
+    """The hysteresis band width follows the user's zero_grid_deadband_w setting.
+
+    Same grid sequence as the default-band test above, but with the deadband
+    turned down to 10 W. The 20 W import on the second tick now exceeds the
+    (smaller) band, so the mode must flip back to idle — proving the band
+    width actually comes from the live config value, not a fixed constant.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[0.0, 2.0],
+        mode_schedule=["idle", "discharging"],
+        soc_schedule_kwh=[5.0, 5.0, 3.0],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        fake_result,
+        grid_sequence=[-100.0, 20.0],
+        deadband_w=10.0,
+    )
+    assert modes == ["zero_grid", "idle"]

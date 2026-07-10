@@ -43,7 +43,9 @@ from .const import (
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
     CONF_PV_DC_COUPLED,
+    CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
+    DEFAULT_ZERO_GRID_DEADBAND_W,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
@@ -1710,6 +1712,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self.config.get(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD),
             )
         )
+        # Reuse the user-tunable zero-grid deadband as the hysteresis band for
+        # the hybrid-mode idle/zero_grid and charging/zero_grid transitions
+        # below: both address the same real-time sensor-noise problem the
+        # deadband already exists to solve.
+        hybrid_deadband_w = float(
+            live_options.get(
+                CONF_ZERO_GRID_DEADBAND_W,
+                self.config.get(
+                    CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
+                ),
+            )
+        )
 
         # Synthesise start_times for fallback paths that have no real timestamps
         now_utc = dt_util.utcnow()
@@ -2025,16 +2039,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 has_upcoming_discharge = any(
                     m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
                 )
-                # Hysteresis: use a ±BATTERY_MODE_THRESHOLD_W band around the 0 W
-                # crossing so grid power hovering near zero (e.g. consumption ≈ PV
-                # production) doesn't flip idle/zero_grid every realtime tick.
+                # Hysteresis: use a ±hybrid_deadband_w band (the user-tunable
+                # zero-grid deadband) around the 0 W crossing so grid power
+                # hovering near zero (e.g. consumption ≈ PV production) doesn't
+                # flip idle/zero_grid every realtime tick.
                 if self._last_hybrid_idle_decision == "zero_grid":
                     # Was capturing surplus; keep doing so until grid climbs
                     # solidly positive (surplus has genuinely disappeared).
-                    has_pv_surplus = current_grid < BATTERY_MODE_THRESHOLD_W
+                    has_pv_surplus = current_grid < hybrid_deadband_w
                 else:
                     # Was idle; only start capturing once surplus is solid.
-                    has_pv_surplus = current_grid < -BATTERY_MODE_THRESHOLD_W
+                    has_pv_surplus = current_grid < -hybrid_deadband_w
                 if has_upcoming_discharge and not has_pv_surplus:
                     # Preserve capacity (discharge planned, no PV surplus)
                     effective_mode = ACTION_IDLE
