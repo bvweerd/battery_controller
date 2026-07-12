@@ -68,6 +68,12 @@ class TestParseEfficiencyCurve:
         with pytest.raises(ValueError, match="Efficiency value"):
             parse_efficiency_curve("0:1.1, 5:0.95", max_power_kw=10.0)
 
+    def test_error_bare_number_list(self):
+        # A bare list of efficiencies pairs up the first two numbers and
+        # would silently drop the rest — must be rejected instead.
+        with pytest.raises(ValueError, match="unpaired"):
+            parse_efficiency_curve("0.92 0.95 0.97", max_power_kw=5.0)
+
     def test_error_malformed_string(self):
         with pytest.raises(ValueError, match="Cannot parse"):
             parse_efficiency_curve("not_a_number", max_power_kw=5.0)
@@ -102,6 +108,11 @@ class TestInterpolateEfficiency:
     def test_above_max_returns_last(self):
         curve = [(0.0, 0.90), (5.0, 0.95)]
         assert interpolate_efficiency(curve, 10.0) == pytest.approx(0.95)
+
+    def test_empty_curve_returns_one(self):
+        # Must match docs/analyzer.js and simulate/simulate_diagnostics.py,
+        # which both return 1.0 (no losses) for an empty curve.
+        assert interpolate_efficiency([], 2.0) == 1.0
 
     def test_single_point_curve(self):
         curve = [(0.0, 0.92)]

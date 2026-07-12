@@ -17,10 +17,11 @@ class TestBatteryConfig:
         config = BatteryConfig()
         assert config.capacity_kwh == 10.0
         assert config.max_charge_power_kw == 5.0
-        # Default curve is "0.90" per direction → RTE = 0.90 * 0.90 = 0.81
-        assert config.charge_efficiency == pytest.approx(0.90)
-        assert config.discharge_efficiency == pytest.approx(0.90)
-        assert config.round_trip_efficiency == pytest.approx(0.81)
+        # Default curve is "0.9487" (= sqrt 0.90) per direction → RTE ≈ 0.90,
+        # matching the pre-curve scalar default.
+        assert config.charge_efficiency == pytest.approx(0.9487)
+        assert config.discharge_efficiency == pytest.approx(0.9487)
+        assert config.round_trip_efficiency == pytest.approx(0.90, abs=1e-3)
 
     def test_derived_values(self):
         config = BatteryConfig(
@@ -28,9 +29,9 @@ class TestBatteryConfig:
         )
         assert config.min_soc_kwh == pytest.approx(1.0)
         assert config.max_soc_kwh == pytest.approx(9.0)
-        # Default curve "0.90" → scalar at zero power = 0.90
-        assert config.charge_efficiency == pytest.approx(0.90)
-        assert config.discharge_efficiency == pytest.approx(0.90)
+        # Default curve "0.9487" → scalar at zero power = 0.9487
+        assert config.charge_efficiency == pytest.approx(0.9487)
+        assert config.discharge_efficiency == pytest.approx(0.9487)
 
     def test_usable_capacity_auto(self):
         config = BatteryConfig(

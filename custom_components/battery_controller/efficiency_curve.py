@@ -43,6 +43,17 @@ def parse_efficiency_curve(value: str | float, max_power_kw: float) -> Efficienc
             "Use a plain float like '0.95' or power:efficiency pairs like '0:0.92, 5:0.95'."
         )
 
+    # Reject inputs where numbers are left over after pairing (e.g. a bare
+    # list of efficiencies like "0.92 0.95 0.97"): silently dropping the
+    # remainder would accept nonsense power values without the user noticing.
+    leftover = _PAIR_RE.sub("", raw)
+    if re.search(r"\d", leftover):
+        raise ValueError(
+            f"Cannot parse efficiency curve from {value!r}: "
+            f"unpaired number(s) {leftover.strip(' ,;')!r} left over. "
+            "Use power:efficiency pairs like '0:0.92, 5:0.95'."
+        )
+
     curve: dict[float, float] = {}
     for power_str, eff_str in pairs:
         power = float(power_str)
@@ -63,7 +74,11 @@ def interpolate_efficiency(curve: EfficiencyCurve, power_kw: float) -> float:
     """Return interpolated efficiency for a given power level.
 
     Linear interpolation between curve points. Flat clamping outside range.
+    An empty curve yields 1.0 (no losses) — this matches the mirrored
+    implementations in docs/analyzer.js and simulate/simulate_diagnostics.py.
     """
+    if not curve:
+        return 1.0
     if len(curve) == 1:
         return curve[0][1]
 

@@ -584,15 +584,60 @@ async def _test_api_connection(hass: HomeAssistant) -> str | None:
     return None
 
 
+# Battery-specific keys that lived in the main entry data before v4 moved
+# batteries into subentries.  Used by the v<4 migration step below.
+_LEGACY_MAIN_BATTERY_KEYS = (
+    CONF_CAPACITY_KWH,
+    CONF_MAX_CHARGE_POWER_KW,
+    CONF_MAX_DISCHARGE_POWER_KW,
+    CONF_ROUND_TRIP_EFFICIENCY,
+    CONF_MIN_SOC_PERCENT,
+    CONF_MAX_SOC_PERCENT,
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_BATTERY_POWER_SENSOR,
+    CONF_PV_DC_EFFICIENCY,
+)
+
+
 async def async_migrate_entry(
     hass: HomeAssistant, config_entry: config_entries.ConfigEntry
 ) -> bool:
     """Migrate old entry versions to current schema."""
     import math as _math
+    from types import MappingProxyType
+
+    from homeassistant.config_entries import ConfigSubentry
+
+    if config_entry.version > 5:
+        # Downgrade from a future version is not supported.
+        return False
+
+    if config_entry.version < 4:
+        # v1-v3 → v4: battery specs lived in the main entry data; move them
+        # into a battery subentry so the v4 subentry layout applies.
+        data = dict(config_entry.data)
+        battery_data = {
+            key: data.pop(key) for key in _LEGACY_MAIN_BATTERY_KEYS if key in data
+        }
+        has_battery_subentry = any(
+            sub.subentry_type == BATTERY_SUBENTRY_TYPE
+            for sub in config_entry.subentries.values()
+        )
+        if battery_data and not has_battery_subentry:
+            hass.config_entries.async_add_subentry(
+                config_entry,
+                ConfigSubentry(
+                    subentry_type=BATTERY_SUBENTRY_TYPE,
+                    title=_battery_subentry_title(battery_data),
+                    data=MappingProxyType(battery_data),
+                    unique_id=None,
+                ),
+            )
+        hass.config_entries.async_update_entry(config_entry, data=data, version=4)
 
     if config_entry.version == 4:
         # v4 → v5: replace round_trip_efficiency scalar with per-direction curve strings
-        for subentry_id, subentry in config_entry.subentries.items():
+        for subentry in config_entry.subentries.values():
             data = dict(subentry.data)
             if (
                 CONF_ROUND_TRIP_EFFICIENCY in data
@@ -612,9 +657,8 @@ async def async_migrate_entry(
             config_entry,
             version=5,
         )
-        return True
 
-    return False
+    return True
 
 
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
