@@ -181,7 +181,7 @@
       </table>
     </div>
     <div id="profitability-legend" class="mt-2 text-xs text-gray-400">
-      Terminal price λ = <span id="terminal-price-label">—</span> €/kWh (re-computed; integration may use rolling shadow price) ·
+      Terminal price λ = <span id="terminal-price-label">—</span> €/kWh (re-computed from the feed-in forecast tail, same as the integration) ·
       Break-even discharge: <span id="breakeven-discharge-label">—</span> €/kWh ·
       Break-even charge: <span id="breakeven-charge-label">—</span> €/kWh
     </div>
@@ -1155,9 +1155,6 @@ function prefillSim(d) {
       addFcRow(prices[i]||0.15, feedInVal, pvFc[i]||0, consumFc[i]||1.5);
     }
   }
-  // Pre-fill terminal shadow price from previous DP run (stored in schedule)
-  if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
-    }
   window._simChargeEffCorrection =
     opt.charge_eff_correction
     ?? ((opt.optimizer_run_log && opt.optimizer_run_log.length)
