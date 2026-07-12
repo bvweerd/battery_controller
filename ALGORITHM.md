@@ -396,6 +396,8 @@ The shadow price is always the raw DP value — there is no separate "post-proce
 
 **Use by hybrid+ mode**: hybrid+ additionally uses λ to gate PV-surplus capture. Plain hybrid stores any surplus as soon as it appears; hybrid+ only stores it when `λ × sqrt(RTE)` exceeds the current feed-in price. Because λ already prices in upcoming cheap-surplus hours (e.g. a midday PV peak coinciding with low prices), a low λ means the battery can be filled more cheaply later — so the current surplus is exported at the (higher) feed-in price instead, with a ±5% hysteresis band around the threshold to prevent oscillation.
 
+Conversely, when little future surplus is forecast, λ stays high: every kWh not captured now would have to be bought from the grid later, or is missing during expensive evening hours. The threshold `λ × sqrt(RTE) ≥ feed-in` is then met and hybrid+ captures the surplus immediately — identical to plain hybrid. No separate rule is needed; the shadow price encodes "how cheaply can the battery still be filled later" by construction. Exporting only wins when the battery would fill up anyway (little headroom relative to the forecast surplus) or when stored energy has little future value (flat prices, no discharge opportunity).
+
 ---
 
 ## 10. Rolling-Horizon Execution
