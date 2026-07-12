@@ -235,6 +235,18 @@ async def test_mode_switch_resets_commitment(hass):
     assert coordinator._committed_action == "idle"
     assert coordinator._committed_power == 0.0
 
+    # Mode switch must also reset cached setpoint so the real-time loop does
+    # not apply stale setpoints from the previous mode while re-optimizing.
+    coordinator._effective_mode = "zero_grid"
+    coordinator._controller_schedule_w = 1200.0
+    coordinator.control_mode = MODE_HYBRID
+
+    assert coordinator._effective_mode == "idle"
+    assert coordinator._controller_schedule_w == 0.0
+
+    # Mode switch must mark the next optimization run as triggered by a mode change.
+    assert coordinator._optimization_trigger_source == "mode_change"
+
 
 def _make_coordinator(hass):
     """Build a minimal OptimizationCoordinator for scheduling tests."""
