@@ -68,6 +68,14 @@ The integration runs three cascading coordinators:
 2. **Forecast Coordinator** (every 15 min): Calculates PV production and consumption forecasts
 3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller (see [ALGORITHM.md](ALGORITHM.md) for full algorithmic details)
 
+> **Note:** The Optimization Coordinator doesn't only run on the fixed 15-minute clock.
+> It also re-runs immediately when a new price period starts, on a significant price
+> change, when a stale price/SoC sensor becomes available again, and once at the
+> midpoint of the current price period (a scheduled "mid-period correction" run). Each
+> run re-solves the entire rolling horizon from scratch, so two schedule snapshots
+> taken a few minutes apart can look meaningfully different — see [Learning
+> period](#learning-period--give-the-optimizer-time-to-calibrate) for why.
+
 #### Subentry Structure
 Battery Controller uses **subentries** to manage hardware flexibly:
 - **Battery subentries**: Each contains its own capacity, power limits, SoC sensor, and optional power sensor.
@@ -85,17 +93,28 @@ The model also **extends the planning horizon** when live prices cover less than
 
 > **Allow at least 2–4 weeks of operation before judging the optimizer's performance.**
 
-The optimizer uses a technique called *rolling-horizon dynamic programming*. On each run it calculates not only the optimal schedule, but also a **shadow price** (λ) — the marginal value of one extra kWh stored in the battery, given the current price forecast.
+The optimizer uses *rolling-horizon dynamic programming*: on **every** run it re-solves the entire planning horizon (24–36 hours) from scratch, starting from the current SoC. The value of stored energy at the end of the horizon (the terminal condition) is set from the price forecast itself — a clipped tail-average of the feed-in price — not carried over from the previous run.
 
-That shadow price is fed back as the **terminal condition** of the next run: it tells the optimizer what stored energy will be worth *after* the planning horizon ends. A well-calibrated shadow price makes consecutive schedules consistent with each other and prevents the optimizer from over-charging or over-discharging near the horizon boundary.
+Because battery capacity is limited, this is a **global allocation problem**: the DP weighs using the current cheap/negative-price window now against reserving capacity for a *better* opportunity later in the horizon. On a rerun, small input changes can shift that trade-off enough to visibly change today's plan:
 
-On the **first run** there is no shadow price yet, so the optimizer falls back to the average sell price at the end of the forecast. As runs accumulate (every 15 minutes), the shadow price converges toward the true marginal value of storage for your household's typical price and consumption pattern. During this convergence period you may notice:
+- A price forecast update (day-ahead prices publishing, a revised historical-model estimate, or simply a new period starting).
+- An updated PV or consumption forecast.
+- The actual SoC drifting from what the previous plan assumed — e.g. because **Hybrid** mode diverged to zero-grid instead of following the DP schedule exactly (see [Control Modes](#control-modes)).
 
-- The schedule changing more noticeably between runs.
+Because the whole horizon is re-optimized rather than patched incrementally, even a modest change in one of these inputs can shift how much capacity is allocated to the current window versus a later one — so two runs a few minutes apart (see the re-optimization triggers above) can show different schedules for what looks like the same situation. This is expected DP behavior, not a bug.
+
+This effect is most visible in the first weeks, while two data-driven models are still building up from HA recorder history:
+
+- The **household consumption pattern** and **historical price model**, which need time to learn typical usage and price patterns.
+- The **shadow price** (λ) — the marginal value of storage, used by Hybrid mode as its charge/discharge threshold — is noisier while the forecasts feeding into it are still inaccurate.
+
+During this convergence period you may notice:
+
+- The schedule changing more noticeably between runs, including between two runs within the same 15-minute slot.
 - The optimizer occasionally charging or discharging more aggressively than expected.
 - Estimated savings that appear lower than the long-run optimum.
 
-Both the **historical price model** and the **shadow price** build up from HA recorder data, so the longer the integration runs, the better the forecasts and the more stable the resulting schedule.
+The longer the integration runs, the more accurate the underlying forecasts become and the more stable the resulting schedule.
 
 ---
 
@@ -315,6 +334,14 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
   lock applies to the published controller setpoint too, not just the diagnostic
   `optimal_power` value.
 - **Hybrid** (recommended): DP schedule for arbitrage, zero-grid for self-consumption.
+  When the DP schedule says `idle` and no discharge is planned soon, Hybrid still
+  opportunistically captures PV surplus into the battery via zero-grid — even if the
+  feed-in price is currently positive and exporting that surplus would be more
+  profitable. This trades a small amount of arbitrage profit for resilience (keeping
+  headroom available for real-time consumption spikes, e.g. a cloud passing over the
+  panels while a large appliance switches on). If you want the strictly cost-optimal
+  schedule with no opportunistic charging, use **Follow Schedule** instead — Hybrid is
+  recommended for robustness, not maximum arbitrage profit.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
 Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
