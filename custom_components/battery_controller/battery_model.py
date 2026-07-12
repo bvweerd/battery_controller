@@ -24,8 +24,10 @@ class BatteryConfig:
     max_discharge_power_kw: float = 5.0
 
     # Efficiency curves: plain float string ("0.92") or power:eff pairs ("0:0.90, 5:0.95")
-    charge_efficiency_curve: str = "0.90"
-    discharge_efficiency_curve: str = "0.90"
+    # Default 0.9487 per direction = sqrt(0.90) → round-trip efficiency 0.90,
+    # matching the pre-curve scalar default.
+    charge_efficiency_curve: str = "0.9487"
+    discharge_efficiency_curve: str = "0.9487"
 
     min_soc_percent: float = 10.0
     max_soc_percent: float = 90.0

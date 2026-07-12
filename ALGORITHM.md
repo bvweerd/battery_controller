@@ -153,6 +153,11 @@ discharging: new_soc = soc − |action_w| × dt / dis_eff
 charge override:    [(p, min(1.0, eff × correction)) for p, eff in charge_curve]
 discharge override: [(p, max(1e-6, eff / correction)) for p, eff in discharge_curve]
 ```
+The corrected curves are used for **SoC transitions only**. The economic cost
+model (grid cost + degradation) always uses the nominal curves, so a
+charging/discharging-speed problem is not double-counted as extra energy cost
+or degradation. Discharge override points may exceed 1.0 after scaling; this
+is safe precisely because they never enter the cost model.
 
 DC-coupled PV uses its own path efficiency (`pv_dc_efficiency` ≈ 0.97, MPPT only, no AC conversion).
 
@@ -415,7 +420,7 @@ Let `chg0 = chg_eff(0)` and `dis0 = dis_eff(0)` (zero-power scalars):
 - If the current grid buy price is less than `λ × chg0`, it is profitable to charge — 1 kWh bought from AC stores `chg0` kWh worth `λ` each.
 - If the current feed-in price is greater than `λ / dis0`, it is profitable to discharge/export — 1 stored kWh yields `dis0` kWh on the AC side.
 
-Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces the charge-side efficiency curve for planning. The arbitrage thresholds continue to use the zero-power scalar from the corrected curve.
+Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces the charge-side efficiency curve for the planned SoC transitions. Economic quantities (step costs, the oscillation-filter threshold) keep using the nominal curves.
 
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
