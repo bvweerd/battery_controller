@@ -53,7 +53,7 @@ Battery Controller works with any battery inverter and electricity meter — it 
 - **DC-coupled PV support**: Higher efficiency for panels directly on the battery inverter's DC bus (hybrid inverters)
 - **Zero-grid control**: Real-time battery control to minimize grid exchange
 - **Degradation-aware**: Accounts for battery wear in optimization decisions
-- **Multiple control modes**: Zero-grid, follow schedule, hybrid, or manual
+- **Multiple control modes**: Zero-grid, follow schedule, hybrid, hybrid+, or manual
 - **Negative price handling**: Suggests PV curtailment or maximum power consumption during negative prices
 
 ---
@@ -294,7 +294,7 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
 
 | Entity | Options | Description |
 |--------|---------|-------------|
-| Control Mode | `zero_grid`, `follow_schedule`, `hybrid`, `manual` | Active battery control strategy |
+| Control Mode | `zero_grid`, `follow_schedule`, `hybrid`, `hybrid_plus`, `manual` | Active battery control strategy |
 
 ### Number Entities
 
@@ -315,6 +315,10 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
   lock applies to the published controller setpoint too, not just the diagnostic
   `optimal_power` value.
 - **Hybrid** (recommended): DP schedule for arbitrage, zero-grid for self-consumption.
+- **Hybrid+**: Like Hybrid, but consults the price forecast before storing PV surplus.
+  When the shadow price says the battery can be filled more cheaply later (e.g. a
+  midday PV peak at low prices), the surplus is exported at the current feed-in price
+  instead of charged, and the battery charges later from the cheaper surplus.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
 Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
@@ -332,7 +336,7 @@ same price period, the lock is reflected in `battery_setpoint` as well.
 | Control Mode | Optimal Mode | Power Sensor to Use |
 |-------------|-------------|---------------------|
 | `follow_schedule` | `charging` / `discharging` | `sensor.battery_controller_battery_setpoint` (W) |
-| `hybrid` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
+| `hybrid` / `hybrid_plus` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
 
 ### Example Automation
 
