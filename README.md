@@ -68,6 +68,13 @@ The integration runs three cascading coordinators:
 2. **Forecast Coordinator** (every 15 min): Calculates PV production and consumption forecasts
 3. **Optimization Coordinator** (every 15 min): Runs the DP optimizer and zero-grid controller (see [ALGORITHM.md](ALGORITHM.md) for full algorithmic details)
 
+> **Note:** The Optimization Coordinator doesn't only run on the fixed 15-minute clock.
+> It also re-runs immediately when a new price period starts, on a significant price
+> change, when a stale price/SoC sensor becomes available again, and once at the
+> midpoint of the current price period (a scheduled "mid-period correction" run). Two
+> schedule snapshots taken a few minutes apart within the same nominal interval can
+> therefore legitimately differ — this is expected behavior, not a bug.
+
 #### Subentry Structure
 Battery Controller uses **subentries** to manage hardware flexibly:
 - **Battery subentries**: Each contains its own capacity, power limits, SoC sensor, and optional power sensor.
@@ -315,6 +322,14 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
   lock applies to the published controller setpoint too, not just the diagnostic
   `optimal_power` value.
 - **Hybrid** (recommended): DP schedule for arbitrage, zero-grid for self-consumption.
+  When the DP schedule says `idle` and no discharge is planned soon, Hybrid still
+  opportunistically captures PV surplus into the battery via zero-grid — even if the
+  feed-in price is currently positive and exporting that surplus would be more
+  profitable. This trades a small amount of arbitrage profit for resilience (keeping
+  headroom available for real-time consumption spikes, e.g. a cloud passing over the
+  panels while a large appliance switches on). If you want the strictly cost-optimal
+  schedule with no opportunistic charging, use **Follow Schedule** instead — Hybrid is
+  recommended for robustness, not maximum arbitrage profit.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
 Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
