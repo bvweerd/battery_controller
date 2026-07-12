@@ -319,6 +319,10 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
   When the shadow price says the battery can be filled more cheaply later (e.g. a
   midday PV peak at low prices), the surplus is exported at the current feed-in price
   instead of charged, and the battery charges later from the cheaper surplus.
+  When little future surplus is forecast, stored energy stays valuable (it displaces
+  grid import or serves expensive evening hours), so the surplus is captured
+  immediately — identical to Hybrid. Exporting only wins when the battery would fill
+  up anyway or the stored energy has little future value.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
 Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
