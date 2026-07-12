@@ -235,6 +235,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # re-run rather than dropping the request entirely (P3.2).
         self._pending_optimization: bool = False
 
+        # Human-readable label for what triggered the current/pending optimization
+        # run. Set before each async_request_refresh() call; recorded in the run log.
+        self._optimization_trigger_source: str = "unknown"
+
         # Last hybrid mode decision for hysteresis (P3.1).
         # Tracks whether we were in "discharging" (schedule) or "zero_grid" state
         # so small oscillations around the shadow-price threshold are damped.
@@ -313,6 +317,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._committed_step_start = None
         self._last_hybrid_plus_capture_decision = "zero_grid"
         self._hybrid_plus_capture_blocked = False
+        # Reset cached setpoint so the real-time loop uses idle immediately
+        # instead of applying stale setpoints from the previous mode while the
+        # re-optimization triggered by the mode change is still running.
+        self._effective_mode = ACTION_IDLE
+        self._controller_schedule_w = 0.0
+        self._optimization_trigger_source = "mode_change"
 
     @property
     def last_failure_reason(self) -> str | None:
@@ -402,6 +412,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         def _on_forecast_update() -> None:
             """Trigger optimization when forecast data first becomes available."""
             if self.forecast_coordinator.data is not None and self.data is None:
+                self._optimization_trigger_source = "forecast_available"
                 self.hass.async_create_task(self.async_request_refresh())
 
         self._unsub_forecast = self.forecast_coordinator.async_add_listener(
@@ -477,6 +488,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._last_price = new_price
             self._last_period_start = period_start
             self._schedule_mid_period_run(period_start, interval_minutes)
+            self._optimization_trigger_source = "price_available"
             self.hass.async_create_task(self.async_request_refresh())
         elif period_start is not None and period_start != self._last_period_start:
             # New price period — primary optimization trigger.
@@ -486,6 +498,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._last_price = new_price
             self._last_period_start = period_start
             self._schedule_mid_period_run(period_start, interval_minutes)
+            self._optimization_trigger_source = "price_boundary"
             self.hass.async_create_task(self.async_request_refresh())
         elif self._last_price is not None:
             # Same period or no timestamp info — fallback threshold check.
@@ -506,6 +519,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     self._last_price,
                     new_price,
                 )
+                self._optimization_trigger_source = "price_spike"
                 self.hass.async_create_task(self.async_request_refresh())
             self._last_price = new_price
 
@@ -550,6 +564,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 period_start,
             )
             self._last_feed_in_period_start = period_start
+            self._optimization_trigger_source = "feed_in_price_change"
             self.hass.async_create_task(self.async_request_refresh())
 
     @callback
@@ -580,6 +595,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         def _fire(_now: datetime) -> None:
             self._unsub_mid_period_timer = None
             _LOGGER.debug("Mid-period correction run triggered at %s", _now)
+            self._optimization_trigger_source = "mid_period"
             self.hass.async_create_task(self.async_request_refresh())
 
         self._unsub_mid_period_timer = async_track_point_in_time(
@@ -609,6 +625,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "SoC sensor '%s' became available, triggering optimization",
                 self._battery_soc_sensor,
             )
+            self._optimization_trigger_source = "soc_available"
             self.hass.async_create_task(self.async_request_refresh())
 
     async def _handle_realtime_update(self, now: datetime) -> None:
@@ -1341,6 +1358,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug(
                     "OptimizationCoordinator: pending trigger detected, scheduling re-run."
                 )
+                self._optimization_trigger_source = "pending_rerun"
                 self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_load_charge_eff_calibration(self) -> None:
@@ -2423,6 +2441,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._optimizer_run_log.append(
             {
                 "timestamp": dt_util.now().isoformat(),
+                "trigger_source": self._optimization_trigger_source,
                 "control_mode": self._control_mode,
                 "dp_mode": result.optimal_mode,
                 "dp_power_kw": round(result.optimal_power_kw, 3),
@@ -2448,6 +2467,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "discharge_eff_samples": len(self._discharge_eff_samples),
             }
         )
+        self._optimization_trigger_source = "unknown"
 
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
