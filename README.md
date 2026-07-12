@@ -300,7 +300,7 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
 
 | Entity | Description |
 |--------|-------------|
-| PV Curtailment Suggested | ON when feed-in price is negative and the battery can no longer absorb excess PV production (SoC at maximum, or actual charge power significantly below setpoint) |
+| PV Curtailment Suggested | ON when the feed-in price is negative — purely price-based: exporting costs money, so curtailing PV is worth considering |
 | Use Maximum Power Suggested | ON when the grid buy price is negative — signals that consuming as much as possible (battery charge, flexible loads) is beneficial |
 
 ### Switch
