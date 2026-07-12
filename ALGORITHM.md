@@ -398,24 +398,24 @@ The shadow price is always the raw DP value — there is no separate "post-proce
 
 ## 10. Rolling-Horizon Execution
 
-The optimizer runs every 15 minutes. Each run:
+The optimizer runs every 15 minutes, plus on a handful of event-driven triggers (new price period, a significant price change, a stale price/SoC sensor recovering, and a scheduled mid-period correction run at the midpoint of the current price period — see `coordinator_optimization.py`). Each run:
 
 1. Reads the current SoC and latest forecasts.
-2. Calls `optimize_battery_schedule()` with the latest forecasts and calibration overrides.
+2. Calls `optimize_battery_schedule()` with the latest forecasts and calibration overrides, re-solving the **entire** horizon from scratch (the terminal condition is derived fresh from the feed-in forecast each time — see [Section 5](#5-terminal-condition) — not carried over from the previous run's shadow price).
 3. Executes **only the first step** of the resulting schedule (`optimal_power_kw`).
-4. Saves the new shadow price for the next run.
+4. Exposes the new shadow price for hybrid-mode thresholding and diagnostics.
 
-This is called a **rolling horizon** or **receding horizon** approach. Re-optimizing every 15 minutes allows the schedule to adapt as prices are updated, PV production deviates from forecast, or household consumption changes.
+This is called a **rolling horizon** or **receding horizon** approach. Re-optimizing every 15 minutes (or sooner, on the triggers above) allows the schedule to adapt as prices are updated, PV production deviates from forecast, or household consumption changes.
 
-The shadow price acts as a **bridge between runs**: it encodes how much future value will be lost or gained by entering the next horizon with more or less stored energy. Without it, each run is blind to what happens after the forecast ends, potentially draining the battery just before prices spike.
+Because capacity is limited, each full re-solve is a **global allocation** across every cheap/negative-price opportunity in the horizon — how much of the current window to use now versus reserve for a better one later. A small change in inputs between two runs (price forecast update, revised PV/consumption forecast, or actual SoC drifting from the previous plan) can shift that allocation enough that two runs a few minutes apart show a visibly different schedule for what looks like an unchanged situation. This is expected, not a bug.
 
 ### Convergence
 
-On the first run there is no prior shadow price, so the terminal condition falls back to the tail average of the feed-in forecast. As runs accumulate over days and weeks:
-- The shadow price converges to a value that reflects typical overnight vs. daytime price patterns and seasonal PV output.
-- The historical price model (which provides forecasts before day-ahead prices are published) also improves with more recorder data.
+The DP itself is stateless between runs — there is no shadow-price carry-over — but two things it depends on *do* build up from HA recorder history over time:
+- The **historical price model** (used before day-ahead prices are published, and to extend a short horizon) improves as more price/weather data accumulates.
+- The **household consumption pattern** needs several weeks of kWh sensor history to build accurate forecasts.
 
-During the convergence period (first 2–4 weeks), the schedule may change more noticeably between runs and may appear more aggressive than the long-run optimum.
+While these are still calibrating (first 2–4 weeks), forecasts are noisier, so the schedule may change more noticeably between runs — including between two runs within the same 15-minute slot — and may appear more aggressive than the long-run optimum.
 
 ---
 
