@@ -25,6 +25,13 @@ PARALLEL_UPDATES = 0
 # Minimum charging setpoint (W) below which the absorption check is skipped (noise floor).
 _MIN_SETPOINT_W = 200.0
 
+# Hysteresis exit threshold for condition B (fraction of setpoint). Entry uses
+# ABSORPTION_THRESHOLD (0.70); recovery requires climbing back to this higher
+# fraction so real-time sensor noise near the entry threshold — the actual
+# power is republished every zero_grid_response_time_s (default 10s) — doesn't
+# flap the sensor on/off between DP re-optimizations.
+_ABSORPTION_RECOVER_THRESHOLD = 0.85
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -90,6 +97,7 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, device, entry, "pv_curtailment")
+        self._condition_b_active = False
 
     @property
     def is_on(self) -> bool | None:
@@ -114,17 +122,24 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
 
         # Condition B: battery is being asked to charge but actual power is
         # significantly less than the setpoint → battery/inverter is limiting.
+        # Hysteresis (entry at ABSORPTION_THRESHOLD, recovery at the higher
+        # _ABSORPTION_RECOVER_THRESHOLD) avoids flapping on/off between DP
+        # re-optimizations: actual_w is republished every
+        # zero_grid_response_time_s from a live sensor and can hover around a
+        # single threshold on its own.
         # control_action["target_power_w"]: positive = charge (controller convention)
         setpoint_w = control_action.get("target_power_w", 0.0)
         actual_w = battery_state.power_kw * 1000  # positive = charging
 
-        if (
-            setpoint_w > _MIN_SETPOINT_W
-            and actual_w < setpoint_w * ABSORPTION_THRESHOLD
-        ):
-            return True
+        if setpoint_w <= _MIN_SETPOINT_W:
+            self._condition_b_active = False
+        elif actual_w < setpoint_w * ABSORPTION_THRESHOLD:
+            self._condition_b_active = True
+        elif actual_w >= setpoint_w * _ABSORPTION_RECOVER_THRESHOLD:
+            self._condition_b_active = False
+        # else: within the hysteresis band — keep the previous state.
 
-        return False
+        return self._condition_b_active
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
