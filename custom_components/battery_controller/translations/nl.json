@@ -312,6 +312,7 @@
           "zero_grid": "Nul op de meter",
           "follow_schedule": "Volg schema",
           "hybrid": "Hybride",
+          "hybrid_plus": "Hybride+",
           "manual": "Handmatig"
         }
       }

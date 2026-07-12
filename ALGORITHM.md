@@ -394,6 +394,8 @@ The shadow price is always the raw DP value — there is no separate "post-proce
 
 **Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
 
+**Use by hybrid+ mode**: hybrid+ additionally uses λ to gate PV-surplus capture. Plain hybrid stores any surplus as soon as it appears; hybrid+ only stores it when `λ × sqrt(RTE)` exceeds the current feed-in price. Because λ already prices in upcoming cheap-surplus hours (e.g. a midday PV peak coinciding with low prices), a low λ means the battery can be filled more cheaply later — so the current surplus is exported at the (higher) feed-in price instead, with a ±5% hysteresis band around the threshold to prevent oscillation.
+
 ---
 
 ## 10. Rolling-Horizon Execution
@@ -566,7 +568,7 @@ When concentrating, which battery is chosen depends on the control mode:
 
 | Mode | Selection criterion |
 |------|---------------------|
-| `zero_grid` / `hybrid` | Closest to 50% rel\_soc — can handle charge and discharge direction changes longest without hitting a SoC limit |
+| `zero_grid` / `hybrid` / `hybrid_plus` | Closest to 50% rel\_soc — can handle charge and discharge direction changes longest without hitting a SoC limit |
 | Scheduled charge | Lowest rel\_soc (most headroom) |
 | Scheduled discharge | Highest rel\_soc (most energy available) |
 

@@ -20,9 +20,20 @@ PLATFORMS: list[Platform] = [
 MODE_ZERO_GRID = "zero_grid"
 MODE_FOLLOW_SCHEDULE = "follow_schedule"
 MODE_HYBRID = "hybrid"
+# Hybrid+ behaves like hybrid, but consults the price forecast (via the DP
+# shadow price) before storing PV surplus: when the battery can be filled more
+# cheaply later (e.g. a midday PV peak at low prices), the surplus is exported
+# at the current feed-in price instead of charged.
+MODE_HYBRID_PLUS = "hybrid_plus"
 MODE_MANUAL = "manual"
 
-CONTROL_MODES = [MODE_ZERO_GRID, MODE_FOLLOW_SCHEDULE, MODE_HYBRID, MODE_MANUAL]
+CONTROL_MODES = [
+    MODE_ZERO_GRID,
+    MODE_FOLLOW_SCHEDULE,
+    MODE_HYBRID,
+    MODE_HYBRID_PLUS,
+    MODE_MANUAL,
+]
 
 # Battery action modes
 ACTION_IDLE = "idle"

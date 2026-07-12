@@ -25,6 +25,7 @@ from custom_components.battery_controller.const import (
     CONF_ZERO_GRID_DEADBAND_W,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
+    MODE_HYBRID_PLUS,
     MODE_ZERO_GRID,
 )
 from custom_components.battery_controller.coordinator_optimization import (
@@ -3214,6 +3215,7 @@ async def _run_hybrid_mode_sequence(
     fake_result: OptimizationResult,
     grid_sequence: list[float],
     deadband_w: float | None = None,
+    control_mode: str = MODE_HYBRID,
 ) -> list[str]:
     """Run hybrid optimization repeatedly on one coordinator, varying grid power.
 
@@ -3226,7 +3228,7 @@ async def _run_hybrid_mode_sequence(
     from unittest.mock import patch as upatch
 
     coord = _make_coordinator(hass)
-    coord.control_mode = MODE_HYBRID
+    coord.control_mode = control_mode
     fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
     coord.forecast_coordinator.data = {
         "pv_forecast_kw": [0.5, 0.5],
@@ -3382,3 +3384,138 @@ async def test_hybrid_idle_zero_grid_deadband_is_configurable(hass, monkeypatch)
         deadband_w=10.0,
     )
     assert modes == ["zero_grid", "idle"]
+
+
+# ---------------------------------------------------------------------------
+# Hybrid+ mode: PV-surplus capture gated on the price forecast (shadow price)
+# ---------------------------------------------------------------------------
+
+
+def _idle_plan_result(shadow_price: float) -> OptimizationResult:
+    """Optimizer result planning idle now and charging later (cheap surplus)."""
+    return OptimizationResult(
+        power_schedule_kw=[0.0, 3.0],
+        mode_schedule=["idle", "charging"],
+        soc_schedule_kwh=[5.0, 5.0, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=shadow_price,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_low_shadow_price_exports_surplus(hass, monkeypatch):
+    """Hybrid+ exports PV surplus when the battery can be filled cheaper later.
+
+    The optimizer plans idle now and charging later; its shadow price of
+    0.02 EUR/kWh (× sqrt(0.92) ≈ 0.019) is well below the 0.07 EUR/kWh fixed
+    feed-in price, so exporting the current surplus beats storing it and the
+    mode must stay idle instead of upgrading to zero_grid.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["idle"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_high_shadow_price_captures_surplus(hass, monkeypatch):
+    """Hybrid+ still captures surplus when stored energy is worth more than feed-in.
+
+    Shadow price 0.15 EUR/kWh (× sqrt(0.92) ≈ 0.144) exceeds the 0.07 EUR/kWh
+    feed-in price, so storing the surplus beats exporting it — same behaviour
+    as plain hybrid.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.15),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_captures_surplus_regardless_of_shadow_price(hass, monkeypatch):
+    """Plain hybrid is unchanged: surplus is captured even at a low shadow price."""
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID,
+    )
+    assert modes == ["zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_self_consumption_not_gated(hass, monkeypatch):
+    """The hybrid+ gate only affects surplus capture, not self-consumption.
+
+    With the grid importing (no PV surplus) and no upcoming discharge, hybrid+
+    must still resolve idle to zero_grid for self-consumption, even though the
+    low shadow price blocks surplus capture.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[500.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["zero_grid"]
+
+
+def test_hybrid_plus_capture_decision_hysteresis(hass):
+    """The capture decision applies a ±5% band around the feed-in threshold.
+
+    Test coordinator: RTE 0.92 → sqrt(RTE) ≈ 0.9592; feed-in 0.07 EUR/kWh.
+    Capture threshold while capturing: 0.07 × 0.95 = 0.0665; while exporting:
+    0.07 × 1.05 = 0.0735 (both on the stored value λ × sqrt(RTE)).
+    """
+    coord = _make_coordinator(hass)
+    # Initial state is capturing: keeps capturing down to the ×0.95 band edge
+    assert coord._hybrid_plus_should_capture_surplus(0.10, 0.07) is True
+    # Stored value 0.0652 < 0.0665 → flips to exporting
+    assert coord._hybrid_plus_should_capture_surplus(0.068, 0.07) is False
+    # Stored value 0.0691 is above the raw threshold but below ×1.05 → stays
+    # exporting (this is the hysteresis: without it the decision would flip)
+    assert coord._hybrid_plus_should_capture_surplus(0.072, 0.07) is False
+    # Stored value 0.0748 ≥ 0.0735 → flips back to capturing
+    assert coord._hybrid_plus_should_capture_surplus(0.078, 0.07) is True
+
+
+def test_hybrid_plus_negative_feed_in_always_captures(hass):
+    """With zero/negative feed-in, exporting earns nothing: always capture."""
+    coord = _make_coordinator(hass)
+    assert coord._hybrid_plus_should_capture_surplus(0.0, -0.05) is True
+    assert coord._hybrid_plus_should_capture_surplus(0.0, 0.0) is True
+
+
+def test_resolve_controller_mode_hybrid_plus_blocks_surplus_upgrade(hass):
+    """The realtime idle→zero_grid upgrade respects the hybrid+ capture block."""
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID_PLUS
+    coord._power_consumption_sensors = ["sensor.power"]
+
+    coord._hybrid_plus_capture_blocked = True
+    assert coord._resolve_controller_mode("idle", -500.0) == "idle"
+
+    coord._hybrid_plus_capture_blocked = False
+    assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
+
+    # Plain hybrid ignores the flag entirely
+    coord._control_mode = MODE_HYBRID
+    coord._hybrid_plus_capture_blocked = True
+    assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
