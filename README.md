@@ -53,7 +53,7 @@ Battery Controller works with any battery inverter and electricity meter — it 
 - **DC-coupled PV support**: Higher efficiency for panels directly on the battery inverter's DC bus (hybrid inverters)
 - **Zero-grid control**: Real-time battery control to minimize grid exchange
 - **Degradation-aware**: Accounts for battery wear in optimization decisions
-- **Multiple control modes**: Zero-grid, follow schedule, hybrid, or manual
+- **Multiple control modes**: Zero-grid, follow schedule, hybrid, hybrid+, or manual
 - **Negative price handling**: Suggests PV curtailment or maximum power consumption during negative prices
 
 ---
@@ -313,7 +313,7 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
 
 | Entity | Options | Description |
 |--------|---------|-------------|
-| Control Mode | `zero_grid`, `follow_schedule`, `hybrid`, `manual` | Active battery control strategy |
+| Control Mode | `zero_grid`, `follow_schedule`, `hybrid`, `hybrid_plus`, `manual` | Active battery control strategy |
 
 ### Number Entities
 
@@ -339,9 +339,18 @@ The **Battery power sensor** you configure as input (`battery_power_sensor`) is 
   feed-in price is currently positive and exporting that surplus would be more
   profitable. This trades a small amount of arbitrage profit for resilience (keeping
   headroom available for real-time consumption spikes, e.g. a cloud passing over the
-  panels while a large appliance switches on). If you want the strictly cost-optimal
-  schedule with no opportunistic charging, use **Follow Schedule** instead — Hybrid is
+  panels while a large appliance switches on). If you want surplus capture to follow
+  the price forecast instead, use **Hybrid+**; for the strictly cost-optimal schedule
+  with no opportunistic charging at all, use **Follow Schedule** — Hybrid is
   recommended for robustness, not maximum arbitrage profit.
+- **Hybrid+**: Like Hybrid, but consults the price forecast before storing PV surplus.
+  When the shadow price says the battery can be filled more cheaply later (e.g. a
+  midday PV peak at low prices), the surplus is exported at the current feed-in price
+  instead of charged, and the battery charges later from the cheaper surplus.
+  When little future surplus is forecast, stored energy stays valuable (it displaces
+  grid import or serves expensive evening hours), so the surplus is captured
+  immediately — identical to Hybrid. Exporting only wins when the battery would fill
+  up anyway or the stored energy has little future value.
 - **Manual**: Target power set via `number.battery_controller_manual_power_setpoint`.
 
 Change the active mode with the **Control Mode** select entity, or use a service call in an automation.
@@ -359,7 +368,7 @@ same price period, the lock is reflected in `battery_setpoint` as well.
 | Control Mode | Optimal Mode | Power Sensor to Use |
 |-------------|-------------|---------------------|
 | `follow_schedule` | `charging` / `discharging` | `sensor.battery_controller_battery_setpoint` (W) |
-| `hybrid` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
+| `hybrid` / `hybrid_plus` / `zero_grid` | `charging` / `discharging` / `zero_grid` | `sensor.battery_controller_battery_setpoint` (W) |
 
 ### Example Automation
 
