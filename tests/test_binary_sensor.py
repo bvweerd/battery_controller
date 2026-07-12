@@ -137,6 +137,52 @@ class TestPVCurtailmentSensor:
         # 800W >= 0.70 * 1000W = 700W → should not trigger condition B
         assert sensor.is_on is False
 
+    def test_condition_b_hysteresis_holds_on_through_noise_band(self):
+        """Once triggered, condition B must stay on while actual power hovers
+        between ABSORPTION_THRESHOLD and _ABSORPTION_RECOVER_THRESHOLD instead
+        of flapping with every real-time (~5-10s) sensor update."""
+        battery_state = MagicMock()
+        battery_state.soc_kwh = 5.0
+        battery_state.power_kw = 0.1  # 100W: well below 70% of 1000W setpoint
+        sensor = self._make_sensor(
+            data={
+                "current_feed_in_price": -0.05,
+                "battery_state": battery_state,
+                "control_action": {"target_power_w": 1000.0},
+            }
+        )
+        assert sensor.is_on is True  # entry: 100W < 700W
+
+        # Noisy reading recovers to 750W — within the hysteresis band
+        # (700W-850W) — must NOT clear the suggestion yet.
+        battery_state.power_kw = 0.75
+        assert sensor.is_on is True
+
+        # Recovers above the exit threshold (850W) — now it clears.
+        battery_state.power_kw = 0.9
+        assert sensor.is_on is False
+
+        # Dips back into the band — stays off (no re-trigger inside the band).
+        battery_state.power_kw = 0.75
+        assert sensor.is_on is False
+
+    def test_condition_b_hysteresis_resets_when_setpoint_drops(self):
+        """A setpoint falling below the noise floor clears a latched condition B."""
+        battery_state = MagicMock()
+        battery_state.soc_kwh = 5.0
+        battery_state.power_kw = 0.1
+        sensor = self._make_sensor(
+            data={
+                "current_feed_in_price": -0.05,
+                "battery_state": battery_state,
+                "control_action": {"target_power_w": 1000.0},
+            }
+        )
+        assert sensor.is_on is True
+
+        sensor.coordinator.data["control_action"] = {"target_power_w": 100.0}
+        assert sensor.is_on is False
+
     def test_extra_state_attributes_empty_when_no_data(self):
         sensor = self._make_sensor(data=None)
         assert sensor.extra_state_attributes == {}

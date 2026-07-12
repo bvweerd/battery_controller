@@ -349,6 +349,223 @@ async def test_same_period_no_trigger_below_threshold(hass, monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_async_setup_tracks_distinct_feed_in_price_sensor(hass):
+    """A feed-in price sensor different from the buy price sensor gets its own tracker."""
+    from unittest.mock import AsyncMock
+
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_feed_in_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [],
+    }
+
+    coord = OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+    coord._price_model = MagicMock()
+    coord._price_model.async_update_pattern = AsyncMock()
+    coord._feed_in_price_model = MagicMock()
+    coord._feed_in_price_model.async_update_pattern = AsyncMock()
+
+    tracked_entities = []
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_time_interval",
+            return_value=lambda: None,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_state_change_event",
+            side_effect=lambda h, ids, cb: (
+                tracked_entities.extend(ids) or (lambda: None)
+            ),
+        ),
+    ):
+        await coord.async_setup()
+
+    assert "sensor.test_price" in tracked_entities
+    assert "sensor.test_feed_in_price" in tracked_entities
+
+
+@pytest.mark.asyncio
+async def test_async_setup_skips_feed_in_tracker_when_same_as_price_sensor(hass):
+    """No duplicate tracker is registered when feed-in price reuses the buy price sensor."""
+    from unittest.mock import AsyncMock
+
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [],
+    }
+
+    coord = OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+    coord._price_model = MagicMock()
+    coord._price_model.async_update_pattern = AsyncMock()
+    coord._feed_in_price_model = MagicMock()
+    coord._feed_in_price_model.async_update_pattern = AsyncMock()
+
+    tracked_calls = []
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_time_interval",
+            return_value=lambda: None,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_state_change_event",
+            side_effect=lambda h, ids, cb: tracked_calls.append(ids) or (lambda: None),
+        ),
+    ):
+        await coord.async_setup()
+
+    # Only the buy price sensor is tracked — no duplicate for feed-in.
+    assert tracked_calls == [["sensor.test_price"]]
+
+
+def test_handle_feed_in_price_change_no_new_state(hass):
+    """_handle_feed_in_price_change returns early when new_state is None."""
+    coord = _make_coordinator(hass)
+    event = MagicMock()
+    event.data = {"new_state": None, "old_state": None}
+    coord._handle_feed_in_price_change(event)  # Should not raise
+
+
+def test_handle_feed_in_price_change_unavailable_state(hass):
+    """_handle_feed_in_price_change ignores unavailable/unknown states."""
+    coord = _make_coordinator(hass)
+    new_state = MagicMock()
+    new_state.state = "unavailable"
+    event = MagicMock()
+    event.data = {"new_state": new_state, "old_state": None}
+    coord._handle_feed_in_price_change(event)  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_period_boundary_triggers(hass, monkeypatch):
+    """A new feed-in price period must trigger optimization even when the buy
+    price sensor is a separate, unchanged entity."""
+    coordinator = _make_coordinator(hass)
+
+    period_a = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    period_b = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period_b], 60),
+    )
+
+    coordinator._last_feed_in_period_start = period_a
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "0.10"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called, (
+        "optimization should be triggered at feed-in price period boundary"
+    )
+    assert coordinator._last_feed_in_period_start == period_b
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_same_period_no_trigger(hass, monkeypatch):
+    """No refresh is triggered when the feed-in price period hasn't changed."""
+    coordinator = _make_coordinator(hass)
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+
+    coordinator._last_feed_in_period_start = period
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "0.05"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert not refresh_called
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_was_unavailable_triggers(hass, monkeypatch):
+    """Sensor becoming available for the first time triggers a refresh."""
+    coordinator = _make_coordinator(hass)
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "unavailable"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called
+
+
 def test_schedule_mid_period_run_future(hass, monkeypatch):
     """Mid-period timer is registered when mid-point is in the future."""
     coordinator = _make_coordinator(hass)
@@ -599,6 +816,7 @@ async def test_async_shutdown_unsubscribes_all(hass):
     unsub_calls = {}
     for attr in (
         "_unsub_price",
+        "_unsub_feed_in_price",
         "_unsub_soc",
         "_unsub_forecast",
         "_unsub_mid_period_timer",

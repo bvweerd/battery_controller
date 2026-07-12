@@ -156,6 +156,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._unsub_price: Any | None = None
         self._last_price: float | None = None
 
+        # Feed-in price sensor tracking (separate entity from the buy price
+        # sensor, so it needs its own period-boundary tracking to keep
+        # current_feed_in_price — and PVCurtailmentSensor — in sync).
+        self._feed_in_price_sensor = config.get(CONF_FEED_IN_PRICE_SENSOR)
+        self._unsub_feed_in_price: Any | None = None
+        self._last_feed_in_period_start: datetime | None = None
+
         # Real-time sensors for zero_grid control (grid power only; battery sensors in subentries)
         self._power_consumption_sensors = config.get(CONF_POWER_CONSUMPTION_SENSORS, [])
         self._power_production_sensors = config.get(CONF_POWER_PRODUCTION_SENSORS, [])
@@ -355,6 +362,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             _LOGGER.debug("Tracking price sensor: %s", self._price_sensor)
 
+        if (
+            self._feed_in_price_sensor
+            and self._feed_in_price_sensor != self._price_sensor
+        ):
+            self._unsub_feed_in_price = async_track_state_change_event(
+                self.hass,
+                [self._feed_in_price_sensor],
+                self._handle_feed_in_price_change,
+            )
+            _LOGGER.debug(
+                "Tracking feed-in price sensor: %s", self._feed_in_price_sensor
+            )
+
         if self._battery_soc_sensor:
             self._unsub_soc = async_track_state_change_event(
                 self.hass,
@@ -473,6 +493,49 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 self.hass.async_create_task(self.async_request_refresh())
             self._last_price = new_price
+
+    @callback
+    def _handle_feed_in_price_change(self, event: Event[EventStateChangedData]) -> None:
+        """Handle feed-in price sensor state changes.
+
+        When the feed-in price is a separate sensor from the buy price, its
+        period boundaries are not covered by _handle_price_change. Without
+        this listener, current_feed_in_price (and PVCurtailmentSensor) would
+        only refresh when the buy price sensor happens to change, the
+        mid-period timer fires, or the 60-min base update_interval elapses —
+        so it can lag the actual feed-in price by up to an hour.
+        """
+        new_state = event.data.get("new_state")
+        if not new_state:
+            return
+
+        try:
+            float(new_state.state)
+        except (ValueError, TypeError):
+            return  # Sensor is unavailable/unknown, ignore
+
+        old_state = event.data.get("old_state")
+        was_unavailable = (
+            self._last_feed_in_period_start is None
+            or old_state is None
+            or old_state.state in ("unknown", "unavailable")
+        )
+
+        try:
+            _, start_times, _ = extract_price_forecast_with_timestamps(new_state)
+            period_start: datetime | None = start_times[0] if start_times else None
+        except Exception:  # noqa: BLE001
+            period_start = None
+
+        if was_unavailable or (
+            period_start is not None and period_start != self._last_feed_in_period_start
+        ):
+            _LOGGER.debug(
+                "Feed-in price period changed at %s, triggering optimization",
+                period_start,
+            )
+            self._last_feed_in_period_start = period_start
+            self.hass.async_create_task(self.async_request_refresh())
 
     @callback
     def _schedule_mid_period_run(
@@ -816,6 +879,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_price:
             self._unsub_price()
             self._unsub_price = None
+        if self._unsub_feed_in_price:
+            self._unsub_feed_in_price()
+            self._unsub_feed_in_price = None
         if self._unsub_soc:
             self._unsub_soc()
             self._unsub_soc = None
