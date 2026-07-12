@@ -215,7 +215,7 @@ The negative sign is because `V` represents cost — more stored energy means lo
 
 **Choosing `terminal_price`:**
 
-`max(0, min(feed_in_forecast[-1], clipped average of the last 6 h of feed-in prices))` — a blended tail that dampens transient price spikes at the forecast boundary, clamped at 0 so a negative feed-in tail never penalizes stored energy (the horizon end is artificial; the battery is never forced to sell at a loss). The shadow price from the previous run is deliberately **not** used as terminal value: λ ≈ sqrt(RTE) × P_best, so using it would make discharge at the best price hour break-even and suppress discharge exactly at the peak (a circular dependency in rolling-horizon re-optimization). The shadow price is only used by hybrid mode as the charge/discharge switching threshold.
+`max(0, min(feed_in_forecast[-1], clipped average of the last 6 h of feed-in prices))` — a blended tail that dampens transient price spikes at the forecast boundary, clamped at 0 so a negative feed-in tail never penalizes stored energy (the horizon end is artificial; the battery is never forced to sell at a loss). The shadow price from the previous run is deliberately **not** used as terminal value: λ ≈ sqrt(RTE) × P_best, so using it would make discharge at the best price hour break-even and suppress discharge exactly at the peak (a circular dependency in rolling-horizon re-optimization). The shadow price is only used by the hybrid/hybrid+ modes as the charge/discharge (and, in hybrid+, surplus-capture) switching threshold.
 
 ---
 
@@ -394,6 +394,10 @@ The shadow price is always the raw DP value — there is no separate "post-proce
 
 **Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
 
+**Use by hybrid+ mode**: hybrid+ additionally uses λ to gate PV-surplus capture. Plain hybrid stores any surplus as soon as it appears; hybrid+ only stores it when `λ × sqrt(RTE)` exceeds the current feed-in price. Because λ already prices in upcoming cheap-surplus hours (e.g. a midday PV peak coinciding with low prices), a low λ means the battery can be filled more cheaply later — so the current surplus is exported at the (higher) feed-in price instead, with a ±5% hysteresis band around the threshold to prevent oscillation.
+
+Conversely, when little future surplus is forecast, λ stays high: every kWh not captured now would have to be bought from the grid later, or is missing during expensive evening hours. The threshold `λ × sqrt(RTE) ≥ feed-in` is then met and hybrid+ captures the surplus immediately — identical to plain hybrid. No separate rule is needed; the shadow price encodes "how cheaply can the battery still be filled later" by construction. Exporting only wins when the battery would fill up anyway (little headroom relative to the forecast surplus) or when stored energy has little future value (flat prices, no discharge opportunity).
+
 ---
 
 ## 10. Rolling-Horizon Execution
@@ -566,7 +570,7 @@ When concentrating, which battery is chosen depends on the control mode:
 
 | Mode | Selection criterion |
 |------|---------------------|
-| `zero_grid` / `hybrid` | Closest to 50% rel\_soc — can handle charge and discharge direction changes longest without hitting a SoC limit |
+| `zero_grid` / `hybrid` / `hybrid_plus` | Closest to 50% rel\_soc — can handle charge and discharge direction changes longest without hitting a SoC limit |
 | Scheduled charge | Lowest rel\_soc (most headroom) |
 | Scheduled discharge | Highest rel\_soc (most energy available) |
 

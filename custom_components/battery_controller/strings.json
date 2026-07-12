@@ -364,6 +364,7 @@
           "zero_grid": "Zero grid",
           "follow_schedule": "Follow schedule",
           "hybrid": "Hybrid",
+          "hybrid_plus": "Hybrid+",
           "manual": "Manual"
         }
       }
