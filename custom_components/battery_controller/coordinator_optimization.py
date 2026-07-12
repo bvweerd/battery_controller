@@ -310,6 +310,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     @control_mode.setter
     def control_mode(self, mode: str) -> None:
         """Set control mode and reset commitment state to prevent stale locks."""
+        if mode == self._control_mode:
+            # Re-selecting the active mode (e.g. an automation periodically
+            # calling select.select_option) must not reset the commitment
+            # filter or force the real-time loop through an idle setpoint —
+            # nothing changed, so there is no stale state to clear.
+            return
         self._control_mode = mode
         self._committed_action = ACTION_IDLE
         self._committed_price = 0.0
