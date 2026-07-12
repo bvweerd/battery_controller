@@ -1,20 +1,34 @@
 """Tests for optimizer.py."""
 
+import math
+
 import pytest
 
 from custom_components.battery_controller.battery_model import BatteryConfig
-import math
-
 from custom_components.battery_controller.const import MAX_SOC_STATES
+from custom_components.battery_controller.efficiency_curve import EfficiencyCurve
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
+    _filter_micro_cycles,
+    _filter_oscillations,
+    _find_nearest_soc_idx,
     calculate_step_cost,
     compute_soc_resolution_wh,
     optimize_battery_schedule,
-    _find_nearest_soc_idx,
-    _filter_micro_cycles,
-    _filter_oscillations,
 )
+
+
+def _flat_curve(eff: float, max_kw: float = 10.0) -> EfficiencyCurve:
+    """Create a flat efficiency curve at a scalar efficiency value."""
+    return [(0.0, eff), (max_kw, eff)]
+
+
+def _rte_curves(
+    rte: float, max_kw: float = 5.0
+) -> tuple[EfficiencyCurve, EfficiencyCurve]:
+    """Return (charge_curve, discharge_curve) for a given round-trip efficiency."""
+    eff = math.sqrt(rte)
+    return _flat_curve(eff, max_kw), _flat_curve(eff, max_kw)
 
 
 @pytest.fixture
@@ -24,7 +38,8 @@ def battery_config():
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -37,7 +52,8 @@ def dc_battery_config():
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
         pv_dc_coupled=True,
@@ -59,7 +75,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -76,7 +93,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=3000,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -94,7 +112,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=500,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -114,7 +133,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=2000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -134,7 +154,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=0,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -146,7 +167,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=0,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=battery_config,
         )
@@ -172,7 +194,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=0,  # No PV — pure grid charging
@@ -185,7 +208,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=2200,  # absorbed passively on top of the AC charge
@@ -210,7 +234,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=0,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.0,
             battery_config=dc_battery_config,
             pv_dc_production_w=3000,
@@ -240,7 +265,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=3000,  # 3 kW DC PV absorbed into battery passively
@@ -260,7 +286,8 @@ class TestCalculateStepCost:
             feed_in_price=0.07,
             pv_production_w=0,
             consumption_w=1000,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=dc_battery_config,
             pv_dc_production_w=3000,  # 3 kW DC PV, battery full → goes to AC
@@ -599,7 +626,8 @@ class TestActionSpace:
             capacity_kwh=10.0,
             max_charge_power_kw=4.6,
             max_discharge_power_kw=4.6,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -807,7 +835,8 @@ class TestOscillationPrevention:
             price_forecast=[0.30, 0.30],
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
-            rte=battery_config.round_trip_efficiency,
+            charge_curve=battery_config.charge_efficiency_curve_parsed,
+            discharge_curve=battery_config.discharge_efficiency_curve_parsed,
             step_durations_hours=[0.25, 0.25],
             min_soc_kwh=battery_config.min_soc_kwh,
             max_soc_kwh=battery_config.max_soc_kwh,
@@ -862,7 +891,8 @@ class TestQuarterHourOscillationFilter:
             price_forecast=prices,
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
-            rte=0.9,
+            charge_curve=_flat_curve(math.sqrt(0.9)),
+            discharge_curve=_flat_curve(math.sqrt(0.9)),
             step_durations_hours=step_durations,
             min_soc_kwh=1.0,
             max_soc_kwh=10.0,
@@ -903,7 +933,8 @@ class TestQuarterHourOscillationFilter:
             price_forecast=prices,
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
-            rte=0.9,
+            charge_curve=_flat_curve(math.sqrt(0.9)),
+            discharge_curve=_flat_curve(math.sqrt(0.9)),
             step_durations_hours=step_durations,
             min_soc_kwh=1.0,
             max_soc_kwh=10.0,
@@ -937,7 +968,8 @@ class TestQuarterHourOscillationFilter:
             price_forecast=prices,
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
-            rte=0.9,
+            charge_curve=_flat_curve(math.sqrt(0.9)),
+            discharge_curve=_flat_curve(math.sqrt(0.9)),
             step_durations_hours=step_durations,
             min_soc_kwh=1.0,
             max_soc_kwh=10.0,
@@ -959,7 +991,8 @@ class TestMicroCycleFilter:
             mode_schedule=["charging", "idle"],
             initial_soc_kwh=5.0,
             step_durations_hours=[0.25, 0.25],
-            rte=battery_config.round_trip_efficiency,
+            charge_curve=battery_config.charge_efficiency_curve_parsed,
+            discharge_curve=battery_config.discharge_efficiency_curve_parsed,
             min_soc_kwh=battery_config.min_soc_kwh,
             max_soc_kwh=battery_config.max_soc_kwh,
             min_cycle_kwh=0.2,
@@ -1089,7 +1122,8 @@ class TestOscillationFilterDcPv:
             price_forecast=prices,
             min_price_spread=0.02,
             degradation_cost_per_kwh=0.03,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=step_durations,
             min_soc_kwh=0.5,
             max_soc_kwh=5.0,
@@ -1108,7 +1142,8 @@ class TestOscillationFilterDcPv:
             price_forecast=prices,
             min_price_spread=0.02,
             degradation_cost_per_kwh=0.03,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=step_durations,
             min_soc_kwh=0.5,
             max_soc_kwh=5.0,
@@ -1137,7 +1172,8 @@ class TestSocDependentDerating:
             capacity_kwh=5.2,
             max_charge_power_kw=1.2,
             max_discharge_power_kw=1.2,
-            round_trip_efficiency=0.92,
+            charge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
             min_soc_percent=10.0,  # min = 0.52 kWh
             max_soc_percent=100.0,  # max = 5.2 kWh
             high_soc_charge_threshold_pct=95.0,  # above 4.94 kWh → 0.45 kW
@@ -1233,7 +1269,8 @@ class TestSocDependentDerating:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             # Explicitly no derating (defaults)
@@ -1270,7 +1307,8 @@ class TestCalculateStepCostGridCap:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=1.0,  # cap at 1 kW
@@ -1284,7 +1322,8 @@ class TestCalculateStepCostGridCap:
             feed_in_price=0.10,
             pv_production_w=0.0,
             consumption_w=0.0,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=config,
         )
@@ -1297,13 +1336,15 @@ class TestCalculateStepCostGridCap:
             feed_in_price=0.10,
             pv_production_w=0.0,
             consumption_w=0.0,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             degradation_cost_per_kwh=0.03,
             battery_config=BatteryConfig(
                 capacity_kwh=10.0,
                 max_charge_power_kw=5.0,
                 max_discharge_power_kw=5.0,
-                round_trip_efficiency=0.90,
+                charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+                discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
                 min_soc_percent=10.0,
                 max_soc_percent=90.0,
                 max_grid_power_kw=0.0,  # no cap
@@ -1322,7 +1363,8 @@ class TestOptimizeBatteryScheduleEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1345,7 +1387,8 @@ class TestOptimizeBatteryScheduleEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1368,7 +1411,8 @@ class TestOptimizeBatteryScheduleEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1393,7 +1437,8 @@ class TestOptimizeBatteryScheduleEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             pv_dc_coupled=True,
@@ -1429,7 +1474,8 @@ class TestCalculateScheduleTotalCostNoPvDc:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1461,7 +1507,8 @@ class TestFilterOscillationsEmpty:
             price_forecast=[],
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.03,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=[],
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
@@ -1497,7 +1544,8 @@ class TestFilterOscillationsGetChargeCostEdges:
             price_forecast=[0.20, 0.05],  # low discharge price to force filtering
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.10,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=[0.25, 0.25],
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
@@ -1525,7 +1573,8 @@ class TestFilterOscillationsGetChargeCostEdges:
             price_forecast=[0.05, 0.10],  # spread too small to keep
             min_price_spread=0.20,
             degradation_cost_per_kwh=0.10,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=[0.25, 0.25],
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
@@ -1546,7 +1595,8 @@ class TestFilterMicroCyclesEmpty:
             mode_schedule=[],
             initial_soc_kwh=5.0,
             step_durations_hours=[],
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
         )
@@ -1593,7 +1643,8 @@ class TestSubResolutionACSkip:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1624,7 +1675,8 @@ class TestForwardPassDCIdlePassiveCharge:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             pv_dc_coupled=True,
@@ -1689,7 +1741,8 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
             price_forecast=[0.10, 0.30, 0.10],
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.01,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=[1.0, 1.0, 1.0],
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
@@ -1741,7 +1794,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1768,7 +1822,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1793,7 +1848,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1801,7 +1857,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1831,7 +1888,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.80,
+            charge_efficiency_curve=f"{math.sqrt(0.80):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.80):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1839,14 +1897,17 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.95,
+            charge_efficiency_curve=f"{math.sqrt(0.95):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.95):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
         combined = aggregate_battery_configs([low_rte, high_rte])
 
-        # Weighted average RTE = (0.80*5 + 0.95*5) / 10 = 0.875
-        assert combined.round_trip_efficiency == pytest.approx(0.875)
+        # Weighted average per-direction efficiency: (sqrt(0.80) + sqrt(0.95)) / 2
+        # derived RTE = avg_eff^2
+        expected_rte = ((math.sqrt(0.80) + math.sqrt(0.95)) / 2) ** 2
+        assert combined.round_trip_efficiency == pytest.approx(expected_rte, abs=1e-4)
 
         result = self._run(combined, current_soc_kwh=5.0)
         assert len(result.power_schedule_kw) == 8
@@ -1867,7 +1928,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=1.2,
             max_discharge_power_kw=1.2,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1875,7 +1937,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1902,7 +1965,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -1910,7 +1974,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             pv_dc_coupled=True,
@@ -1955,7 +2020,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=1.2,
             max_discharge_power_kw=1.2,
-            round_trip_efficiency=0.92,
+            charge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=100.0,
         )
@@ -1963,7 +2029,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=5.0,
             max_charge_power_kw=1.2,
             max_discharge_power_kw=1.2,
-            round_trip_efficiency=0.92,
+            charge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.92):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=100.0,
             high_soc_charge_threshold_pct=95.0,
@@ -2022,7 +2089,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=cap_a,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=min_pct,
             max_soc_percent=90.0,
         )
@@ -2030,7 +2098,8 @@ class TestOptimizeWithMultiplePacks:
             capacity_kwh=cap_b,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=min_pct,
             max_soc_percent=90.0,
         )
@@ -2084,7 +2153,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=0.0,
             max_discharge_power_kw=0.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2092,7 +2162,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2117,7 +2188,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=0.0,
             max_discharge_power_kw=0.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2125,7 +2197,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=0.0,
             max_discharge_power_kw=0.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2152,7 +2225,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=50.0,
             max_soc_percent=50.0,  # zero usable capacity
         )
@@ -2175,7 +2249,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=50.0,
             max_soc_percent=50.0,
         )
@@ -2183,7 +2258,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2210,7 +2286,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2228,7 +2305,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2257,7 +2335,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2286,7 +2365,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.50,
+            charge_efficiency_curve=f"{math.sqrt(0.50):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.50):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2327,7 +2407,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=0.0,  # unlimited
@@ -2336,7 +2417,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=3.0,  # capped at 3 kW
@@ -2360,7 +2442,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=2.0,
@@ -2369,7 +2452,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=3.0,
@@ -2391,7 +2475,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2416,7 +2501,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=5.0,
             max_charge_power_kw=2.5,
             max_discharge_power_kw=2.5,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
@@ -2447,7 +2533,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=20.0,  # min = 2.0 kWh
             max_soc_percent=80.0,  # max = 8.0 kWh  → 6.0 kWh usable
         )
@@ -2455,7 +2542,8 @@ class TestMultiPackEdgeCases:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=5.0,  # min = 0.5 kWh
             max_soc_percent=95.0,  # max = 9.5 kWh  → 9.0 kWh usable
         )
@@ -2493,7 +2581,8 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
             price_forecast=[0.05, 0.40],
             min_price_spread=0.05,
             degradation_cost_per_kwh=0.01,
-            rte=0.90,
+            charge_curve=_flat_curve(math.sqrt(0.90)),
+            discharge_curve=_flat_curve(math.sqrt(0.90)),
             step_durations_hours=[1.0, 1.0],
             min_soc_kwh=1.0,
             max_soc_kwh=9.0,
@@ -2506,11 +2595,11 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
         assert len(result_power) == 2
 
 
-class TestEffOverrideZeroGuard:
-    """T3: discharge_eff_override=0.0 must not cause ZeroDivisionError (A3 fix)."""
+class TestEffCurveOverride:
+    """Curve overrides replace the nominal battery config curves."""
 
-    def test_zero_discharge_eff_override_falls_back_to_sqrt_rte(self, battery_config):
-        """A discharge_eff_override of 0.0 is ignored; sqrt(RTE) is used instead."""
+    def test_discharge_eff_curve_override_applied(self, battery_config):
+        """discharge_eff_curve_override replaces battery_config curve."""
         prices = [0.10, 0.30, 0.10, 0.30]
         result = optimize_battery_schedule(
             battery_config=battery_config,
@@ -2519,14 +2608,13 @@ class TestEffOverrideZeroGuard:
             feed_in_forecast=prices,
             pv_forecast=[0.0, 0.0, 0.0, 0.0],
             consumption_forecast=[1.0, 1.0, 1.0, 1.0],
-            discharge_eff_override=0.0,
+            discharge_eff_curve_override=_flat_curve(0.85),
         )
-        # Should complete without ZeroDivisionError and return a valid schedule.
         assert result is not None
         assert len(result.power_schedule_kw) == 4
 
-    def test_zero_charge_eff_override_falls_back_to_sqrt_rte(self, battery_config):
-        """A charge_eff_override of 0.0 is ignored; sqrt(RTE) is used instead."""
+    def test_charge_eff_curve_override_applied(self, battery_config):
+        """charge_eff_curve_override replaces battery_config curve."""
         prices = [0.10, 0.30, 0.10, 0.30]
         result = optimize_battery_schedule(
             battery_config=battery_config,
@@ -2535,7 +2623,7 @@ class TestEffOverrideZeroGuard:
             feed_in_forecast=prices,
             pv_forecast=[0.0, 0.0, 0.0, 0.0],
             consumption_forecast=[1.0, 1.0, 1.0, 1.0],
-            charge_eff_override=0.0,
+            charge_eff_curve_override=_flat_curve(0.85),
         )
         assert result is not None
         assert len(result.power_schedule_kw) == 4
@@ -2584,7 +2672,8 @@ class TestBaselineGridCap:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
             max_grid_power_kw=3.0,
@@ -2618,7 +2707,8 @@ class TestTerminalPriceClamp:
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.4f}",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
