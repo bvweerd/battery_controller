@@ -37,6 +37,8 @@ from .const import (
     CONF_MIN_SOC_PERCENT,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
+    CONF_CHARGE_EFFICIENCY_CURVE,
+    CONF_DISCHARGE_EFFICIENCY_CURVE,
     CONF_PRICE_SENSOR,
     CONF_PV_DC_EFFICIENCY,
     CONF_PV_FORECAST_SENSORS,
@@ -55,16 +57,18 @@ from .const import (
     DEFAULT_MAX_DISCHARGE_POWER_KW,
     DEFAULT_MAX_SOC_PERCENT,
     DEFAULT_MIN_SOC_PERCENT,
+    DEFAULT_CHARGE_EFFICIENCY_CURVE,
+    DEFAULT_DISCHARGE_EFFICIENCY_CURVE,
     DEFAULT_MAX_GRID_POWER_KW,
     DEFAULT_PV_DC_EFFICIENCY,
     DEFAULT_PV_ORIENTATION_DEG,
     DEFAULT_PV_TILT_DEG,
-    DEFAULT_ROUND_TRIP_EFFICIENCY,
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
     PV_SUBENTRY_TYPE,
 )
+from .efficiency_curve import parse_efficiency_curve
 
 
 def _build_battery_subentry_schema(
@@ -96,12 +100,19 @@ def _build_battery_subentry_schema(
                 description={"suggested_value": d.get(CONF_MAX_DISCHARGE_POWER_KW)},
             ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000.0)),
             vol.Required(
-                CONF_ROUND_TRIP_EFFICIENCY,
+                CONF_CHARGE_EFFICIENCY_CURVE,
                 default=d.get(
-                    CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY
+                    CONF_CHARGE_EFFICIENCY_CURVE, DEFAULT_CHARGE_EFFICIENCY_CURVE
                 ),
-                description={"suggested_value": d.get(CONF_ROUND_TRIP_EFFICIENCY)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=1.0)),
+                description={"suggested_value": d.get(CONF_CHARGE_EFFICIENCY_CURVE)},
+            ): str,
+            vol.Required(
+                CONF_DISCHARGE_EFFICIENCY_CURVE,
+                default=d.get(
+                    CONF_DISCHARGE_EFFICIENCY_CURVE, DEFAULT_DISCHARGE_EFFICIENCY_CURVE
+                ),
+                description={"suggested_value": d.get(CONF_DISCHARGE_EFFICIENCY_CURVE)},
+            ): str,
             vol.Required(
                 CONF_MIN_SOC_PERCENT,
                 default=d.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT),
@@ -165,6 +176,18 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     validated = schema(user_input)
     if validated[CONF_MIN_SOC_PERCENT] >= validated[CONF_MAX_SOC_PERCENT]:
         raise vol.Invalid("min_soc_percent must be less than max_soc_percent")
+    max_charge_kw = float(validated[CONF_MAX_CHARGE_POWER_KW])
+    max_discharge_kw = float(validated[CONF_MAX_DISCHARGE_POWER_KW])
+    try:
+        parse_efficiency_curve(validated[CONF_CHARGE_EFFICIENCY_CURVE], max_charge_kw)
+    except (ValueError, TypeError) as exc:
+        raise vol.Invalid(str(exc), path=[CONF_CHARGE_EFFICIENCY_CURVE]) from exc
+    try:
+        parse_efficiency_curve(
+            validated[CONF_DISCHARGE_EFFICIENCY_CURVE], max_discharge_kw
+        )
+    except (ValueError, TypeError) as exc:
+        raise vol.Invalid(str(exc), path=[CONF_DISCHARGE_EFFICIENCY_CURVE]) from exc
     if (
         CONF_HIGH_SOC_MAX_CHARGE_KW in validated
         and validated[CONF_HIGH_SOC_MAX_CHARGE_KW] > validated[CONF_MAX_CHARGE_POWER_KW]
@@ -190,7 +213,10 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
             CONF_CAPACITY_KWH: float(validated[CONF_CAPACITY_KWH]),
             CONF_MAX_CHARGE_POWER_KW: float(validated[CONF_MAX_CHARGE_POWER_KW]),
             CONF_MAX_DISCHARGE_POWER_KW: float(validated[CONF_MAX_DISCHARGE_POWER_KW]),
-            CONF_ROUND_TRIP_EFFICIENCY: float(validated[CONF_ROUND_TRIP_EFFICIENCY]),
+            CONF_CHARGE_EFFICIENCY_CURVE: str(validated[CONF_CHARGE_EFFICIENCY_CURVE]),
+            CONF_DISCHARGE_EFFICIENCY_CURVE: str(
+                validated[CONF_DISCHARGE_EFFICIENCY_CURVE]
+            ),
             CONF_MIN_SOC_PERCENT: float(validated[CONF_MIN_SOC_PERCENT]),
             CONF_MAX_SOC_PERCENT: float(validated[CONF_MAX_SOC_PERCENT]),
             CONF_BATTERY_SOC_SENSOR: validated[CONF_BATTERY_SOC_SENSOR],
@@ -558,10 +584,43 @@ async def _test_api_connection(hass: HomeAssistant) -> str | None:
     return None
 
 
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: config_entries.ConfigEntry
+) -> bool:
+    """Migrate old entry versions to current schema."""
+    import math as _math
+
+    if config_entry.version == 4:
+        # v4 → v5: replace round_trip_efficiency scalar with per-direction curve strings
+        for subentry_id, subentry in config_entry.subentries.items():
+            data = dict(subentry.data)
+            if (
+                CONF_ROUND_TRIP_EFFICIENCY in data
+                and CONF_CHARGE_EFFICIENCY_CURVE not in data
+            ):
+                rte = float(data.pop(CONF_ROUND_TRIP_EFFICIENCY))
+                sqrt_rte_str = f"{_math.sqrt(rte):.4f}"
+                data[CONF_CHARGE_EFFICIENCY_CURVE] = sqrt_rte_str
+                data[CONF_DISCHARGE_EFFICIENCY_CURVE] = sqrt_rte_str
+                hass.config_entries.async_update_subentry(
+                    config_entry,
+                    subentry,
+                    data=data,
+                )
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            version=5,
+        )
+        return True
+
+    return False
+
+
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Battery Controller."""
 
-    VERSION = 4
+    VERSION = 5
 
     @classmethod
     @callback

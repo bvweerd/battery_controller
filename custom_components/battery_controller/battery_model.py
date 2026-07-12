@@ -6,6 +6,13 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from .efficiency_curve import (
+    EfficiencyCurve,
+    aggregate_curves,
+    interpolate_efficiency,
+    parse_efficiency_curve,
+)
+
 
 @dataclass
 class BatteryConfig:
@@ -15,7 +22,11 @@ class BatteryConfig:
     usable_capacity_kwh: float | None = None
     max_charge_power_kw: float = 5.0
     max_discharge_power_kw: float = 5.0
-    round_trip_efficiency: float = 0.90
+
+    # Efficiency curves: plain float string ("0.92") or power:eff pairs ("0:0.90, 5:0.95")
+    charge_efficiency_curve: str = "0.90"
+    discharge_efficiency_curve: str = "0.90"
+
     min_soc_percent: float = 10.0
     max_soc_percent: float = 90.0
 
@@ -40,16 +51,31 @@ class BatteryConfig:
     low_soc_max_discharge_kw: float = 0.0
 
     # Derived values (calculated in __post_init__)
+    charge_efficiency_curve_parsed: EfficiencyCurve = field(init=False)
+    discharge_efficiency_curve_parsed: EfficiencyCurve = field(init=False)
     charge_efficiency: float = field(init=False)
     discharge_efficiency: float = field(init=False)
+    round_trip_efficiency: float = field(init=False)
     min_soc_kwh: float = field(init=False)
     max_soc_kwh: float = field(init=False)
 
     def __post_init__(self) -> None:
         """Calculate derived values."""
-        # Split RTE equally between charge and discharge for AC path
-        self.charge_efficiency = math.sqrt(self.round_trip_efficiency)
-        self.discharge_efficiency = math.sqrt(self.round_trip_efficiency)
+        self.charge_efficiency_curve_parsed = parse_efficiency_curve(
+            self.charge_efficiency_curve, self.max_charge_power_kw
+        )
+        self.discharge_efficiency_curve_parsed = parse_efficiency_curve(
+            self.discharge_efficiency_curve, self.max_discharge_power_kw
+        )
+        # Scalar efficiency at zero power — used by the oscillation filter and diagnostics
+        self.charge_efficiency = interpolate_efficiency(
+            self.charge_efficiency_curve_parsed, 0.0
+        )
+        self.discharge_efficiency = interpolate_efficiency(
+            self.discharge_efficiency_curve_parsed, 0.0
+        )
+        # Derived scalar RTE for diagnostics / backward-compat consumers
+        self.round_trip_efficiency = self.charge_efficiency * self.discharge_efficiency
 
         # Calculate usable capacity if not specified
         if self.usable_capacity_kwh is None:
@@ -97,28 +123,36 @@ class BatteryConfig:
         """Create BatteryConfig from a battery subentry data dict."""
         from .const import (
             CONF_CAPACITY_KWH,
-            CONF_MAX_CHARGE_POWER_KW,
-            CONF_MAX_DISCHARGE_POWER_KW,
-            CONF_ROUND_TRIP_EFFICIENCY,
-            CONF_MIN_SOC_PERCENT,
-            CONF_MAX_SOC_PERCENT,
-            CONF_PV_DC_EFFICIENCY,
+            CONF_CHARGE_EFFICIENCY_CURVE,
+            CONF_DISCHARGE_EFFICIENCY_CURVE,
             CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
             CONF_HIGH_SOC_MAX_CHARGE_KW,
             CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
             CONF_LOW_SOC_MAX_DISCHARGE_KW,
+            CONF_MAX_CHARGE_POWER_KW,
+            CONF_MAX_DISCHARGE_POWER_KW,
+            CONF_MAX_SOC_PERCENT,
+            CONF_MIN_SOC_PERCENT,
+            CONF_PV_DC_EFFICIENCY,
+            CONF_ROUND_TRIP_EFFICIENCY,
             DEFAULT_CAPACITY_KWH,
-            DEFAULT_MAX_CHARGE_POWER_KW,
-            DEFAULT_MAX_DISCHARGE_POWER_KW,
-            DEFAULT_ROUND_TRIP_EFFICIENCY,
-            DEFAULT_MIN_SOC_PERCENT,
-            DEFAULT_MAX_SOC_PERCENT,
-            DEFAULT_PV_DC_EFFICIENCY,
             DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
             DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
             DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
             DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
+            DEFAULT_MAX_CHARGE_POWER_KW,
+            DEFAULT_MAX_DISCHARGE_POWER_KW,
+            DEFAULT_MAX_SOC_PERCENT,
+            DEFAULT_MIN_SOC_PERCENT,
+            DEFAULT_PV_DC_EFFICIENCY,
+            DEFAULT_ROUND_TRIP_EFFICIENCY,
         )
+
+        # Backward compat: if new curve keys absent, derive flat curves from scalar RTE
+        rte = float(data.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY))
+        sqrt_rte_str = f"{math.sqrt(rte):.4f}"
+        charge_curve_str = data.get(CONF_CHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
+        discharge_curve_str = data.get(CONF_DISCHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
 
         return cls(
             capacity_kwh=float(data.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
@@ -128,9 +162,8 @@ class BatteryConfig:
             max_discharge_power_kw=float(
                 data.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
             ),
-            round_trip_efficiency=float(
-                data.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
-            ),
+            charge_efficiency_curve=charge_curve_str,
+            discharge_efficiency_curve=discharge_curve_str,
             min_soc_percent=float(
                 data.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
             ),
@@ -167,35 +200,45 @@ class BatteryConfig:
         """Create BatteryConfig from Home Assistant config dict."""
         from .const import (
             CONF_CAPACITY_KWH,
-            CONF_USABLE_CAPACITY_KWH,
-            CONF_MAX_CHARGE_POWER_KW,
-            CONF_MAX_DISCHARGE_POWER_KW,
-            CONF_ROUND_TRIP_EFFICIENCY,
-            CONF_MIN_SOC_PERCENT,
-            CONF_MAX_SOC_PERCENT,
-            CONF_PV_DC_COUPLED,
-            CONF_PV_DC_PEAK_POWER_KWP,
-            CONF_PV_DC_EFFICIENCY,
-            CONF_MAX_GRID_POWER_KW,
+            CONF_CHARGE_EFFICIENCY_CURVE,
+            CONF_DISCHARGE_EFFICIENCY_CURVE,
             CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
             CONF_HIGH_SOC_MAX_CHARGE_KW,
             CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
             CONF_LOW_SOC_MAX_DISCHARGE_KW,
+            CONF_MAX_CHARGE_POWER_KW,
+            CONF_MAX_DISCHARGE_POWER_KW,
+            CONF_MAX_GRID_POWER_KW,
+            CONF_MAX_SOC_PERCENT,
+            CONF_MIN_SOC_PERCENT,
+            CONF_PV_DC_COUPLED,
+            CONF_PV_DC_EFFICIENCY,
+            CONF_PV_DC_PEAK_POWER_KWP,
+            CONF_ROUND_TRIP_EFFICIENCY,
+            CONF_USABLE_CAPACITY_KWH,
             DEFAULT_CAPACITY_KWH,
-            DEFAULT_MAX_CHARGE_POWER_KW,
-            DEFAULT_MAX_DISCHARGE_POWER_KW,
-            DEFAULT_ROUND_TRIP_EFFICIENCY,
-            DEFAULT_MIN_SOC_PERCENT,
-            DEFAULT_MAX_SOC_PERCENT,
-            DEFAULT_PV_DC_COUPLED,
-            DEFAULT_PV_DC_PEAK_POWER_KWP,
-            DEFAULT_PV_DC_EFFICIENCY,
-            DEFAULT_MAX_GRID_POWER_KW,
             DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
             DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
             DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
             DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
+            DEFAULT_MAX_CHARGE_POWER_KW,
+            DEFAULT_MAX_DISCHARGE_POWER_KW,
+            DEFAULT_MAX_GRID_POWER_KW,
+            DEFAULT_MAX_SOC_PERCENT,
+            DEFAULT_MIN_SOC_PERCENT,
+            DEFAULT_PV_DC_COUPLED,
+            DEFAULT_PV_DC_EFFICIENCY,
+            DEFAULT_PV_DC_PEAK_POWER_KWP,
+            DEFAULT_ROUND_TRIP_EFFICIENCY,
         )
+
+        # Backward compat: if new curve keys absent, derive flat curves from scalar RTE
+        rte = float(
+            config.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
+        )
+        sqrt_rte_str = f"{math.sqrt(rte):.4f}"
+        charge_curve_str = config.get(CONF_CHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
+        discharge_curve_str = config.get(CONF_DISCHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
 
         return cls(
             capacity_kwh=float(config.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
@@ -206,9 +249,8 @@ class BatteryConfig:
             max_discharge_power_kw=float(
                 config.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
             ),
-            round_trip_efficiency=float(
-                config.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
-            ),
+            charge_efficiency_curve=charge_curve_str,
+            discharge_efficiency_curve=discharge_curve_str,
             min_soc_percent=float(
                 config.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
             ),
@@ -247,13 +289,57 @@ class BatteryConfig:
             ),
         )
 
+    @classmethod
+    def _from_aggregated(
+        cls,
+        *,
+        capacity_kwh: float,
+        max_charge_power_kw: float,
+        max_discharge_power_kw: float,
+        charge_curve: EfficiencyCurve,
+        discharge_curve: EfficiencyCurve,
+        min_soc_percent: float,
+        max_soc_percent: float,
+        pv_dc_coupled: bool,
+        pv_dc_peak_power_kwp: float,
+        pv_dc_efficiency: float,
+        max_grid_power_kw: float,
+        high_soc_charge_threshold_pct: float,
+        high_soc_max_charge_kw: float,
+        low_soc_discharge_threshold_pct: float,
+        low_soc_max_discharge_kw: float,
+    ) -> BatteryConfig:
+        """Create BatteryConfig from pre-parsed aggregated curves."""
+
+        # Serialize the curves to strings so the normal constructor path works
+        def _curve_to_str(curve: EfficiencyCurve) -> str:
+            return ", ".join(f"{p}:{e}" for p, e in curve)
+
+        return cls(
+            capacity_kwh=capacity_kwh,
+            max_charge_power_kw=max_charge_power_kw,
+            max_discharge_power_kw=max_discharge_power_kw,
+            charge_efficiency_curve=_curve_to_str(charge_curve),
+            discharge_efficiency_curve=_curve_to_str(discharge_curve),
+            min_soc_percent=min_soc_percent,
+            max_soc_percent=max_soc_percent,
+            pv_dc_coupled=pv_dc_coupled,
+            pv_dc_peak_power_kwp=pv_dc_peak_power_kwp,
+            pv_dc_efficiency=pv_dc_efficiency,
+            max_grid_power_kw=max_grid_power_kw,
+            high_soc_charge_threshold_pct=high_soc_charge_threshold_pct,
+            high_soc_max_charge_kw=high_soc_max_charge_kw,
+            low_soc_discharge_threshold_pct=low_soc_discharge_threshold_pct,
+            low_soc_max_discharge_kw=low_soc_max_discharge_kw,
+        )
+
 
 def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     """Aggregate multiple BatteryConfigs into one combined config for the optimizer.
 
-    Capacity and power limits are summed.  RTE and SoC limits are
-    capacity-weighted averages so the aggregate SoC constraints (in kWh)
-    equal the sum of the individual ones.
+    Capacity and power limits are summed.  Efficiency curves are
+    capacity-weighted averages.  SoC limits are capacity-weighted so the
+    aggregate SoC constraints (in kWh) equal the sum of the individual ones.
     """
     if not configs:
         return BatteryConfig()
@@ -261,15 +347,22 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         return configs[0]
 
     total_cap = sum(c.capacity_kwh for c in configs)
-    # Capacity-weighted RTE
-    weighted_rte = (
-        sum(c.round_trip_efficiency * c.capacity_kwh for c in configs) / total_cap
+    weights = [c.capacity_kwh for c in configs]
+
+    # Capacity-weighted efficiency curves
+    combined_charge_curve = aggregate_curves(
+        [c.charge_efficiency_curve_parsed for c in configs], weights
     )
+    combined_discharge_curve = aggregate_curves(
+        [c.discharge_efficiency_curve_parsed for c in configs], weights
+    )
+
     # SoC limits: sum of kWh limits, expressed back as % of combined capacity
     total_min_kwh = sum(c.min_soc_kwh for c in configs)
     total_max_kwh = sum(c.max_soc_kwh for c in configs)
     combined_min_pct = total_min_kwh / total_cap * 100.0
     combined_max_pct = total_max_kwh / total_cap * 100.0
+
     # DC PV: aggregate across all batteries
     dc_configs = [c for c in configs if c.pv_dc_coupled]
     pv_dc_coupled = bool(dc_configs)
@@ -301,11 +394,12 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     )
     combined_low_max_discharge_kw = sum(c.low_soc_max_discharge_kw for c in configs)
 
-    return BatteryConfig(
+    return BatteryConfig._from_aggregated(
         capacity_kwh=total_cap,
         max_charge_power_kw=sum(c.max_charge_power_kw for c in configs),
         max_discharge_power_kw=sum(c.max_discharge_power_kw for c in configs),
-        round_trip_efficiency=weighted_rte,
+        charge_curve=combined_charge_curve,
+        discharge_curve=combined_discharge_curve,
         min_soc_percent=combined_min_pct,
         max_soc_percent=combined_max_pct,
         pv_dc_coupled=pv_dc_coupled,

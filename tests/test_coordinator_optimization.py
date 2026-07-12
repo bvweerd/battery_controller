@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -1041,7 +1042,8 @@ def test_split_setpoint_charging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1049,7 +1051,8 @@ def test_split_setpoint_charging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1079,7 +1082,8 @@ def test_split_setpoint_discharging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1101,7 +1105,8 @@ def test_split_setpoint_idle(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1132,7 +1137,8 @@ def test_get_current_battery_state_with_sensors(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1429,7 +1435,8 @@ def test_read_battery_state_kwh_soc_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1450,7 +1457,8 @@ def test_read_battery_state_fallback_soc_when_unavailable(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1471,7 +1479,8 @@ def test_read_battery_state_no_soc_sensor_uses_fallback(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1493,7 +1502,8 @@ def test_read_battery_state_charging_mode_w_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1519,7 +1529,8 @@ def test_read_battery_state_discharging_mode_kw_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1545,7 +1556,8 @@ def test_read_battery_state_unknown_unit_warns(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1571,7 +1583,8 @@ def test_get_current_battery_state_charging_mode(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1605,7 +1618,8 @@ def test_get_current_battery_state_discharging_mode(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1884,7 +1898,8 @@ def test_split_setpoint_charging_zero_headroom(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=0.0,
         max_soc_percent=100.0,
     )
@@ -1912,7 +1927,8 @@ def test_split_setpoint_discharging_zero_available(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=0.0,
         max_soc_percent=100.0,
     )
@@ -3076,7 +3092,8 @@ def _make_two_battery_coord(hass, soc1_kwh: float, soc2_kwh: float):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -3137,7 +3154,8 @@ def test_split_setpoint_overflow_redistribution(hass):
         capacity_kwh=5.0,
         max_charge_power_kw=1.0,  # low max
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -3145,7 +3163,8 @@ def test_split_setpoint_overflow_redistribution(hass):
         capacity_kwh=5.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )

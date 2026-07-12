@@ -57,7 +57,8 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `capacity_kwh` | Total battery capacity |
 | `min_soc_kwh / max_soc_kwh` | Operating SoC limits |
 | `max_charge_power_kw / max_discharge_power_kw` | Nominal power limits |
-| `round_trip_efficiency` (RTE) | End-to-end efficiency (e.g. 0.90 = 90%) |
+| `charge_efficiency_curve` | Charge efficiency as a function of power (see §4.1) |
+| `discharge_efficiency_curve` | Discharge efficiency as a function of power (see §4.1) |
 | `pv_dc_coupled` | Whether DC-coupled PV is present |
 | `pv_dc_efficiency` | DC MPPT + DC-DC conversion efficiency (~0.97) |
 | `max_grid_power_kw` | Grid connection cap (0 = unlimited) |
@@ -104,9 +105,11 @@ actions = discharge_actions + charge_actions
 **Boundary actions** are evaluated separately for each SoC state after the main action loop to capture the residual capacity that the 100 W grid cannot reach (up to ~115 Wh per step):
 
 ```
-drain_w = (soc_wh - min_soc_wh) × sqrt_RTE / step_hours   → new_soc_idx = 0
-fill_w  = (max_soc_wh - soc_wh) / (step_hours × sqrt_RTE) → new_soc_idx = n_soc_states − 1
+drain_w = (soc_wh - min_soc_wh) × dis_eff(0) / step_hours   → new_soc_idx = 0
+fill_w  = (max_soc_wh - soc_wh) / (step_hours × chg_eff(0)) → new_soc_idx = n_soc_states − 1
 ```
+
+The zero-power efficiency scalar is used here as a conservative estimate to avoid a circular dependency (the exact boundary power is not known until after the SoC transition is computed).
 
 `new_soc_idx` is set directly (not recomputed via the energy formula) to avoid floating-point errors at exact boundaries.
 
@@ -122,16 +125,34 @@ fill_w  = (max_soc_wh - soc_wh) / (step_hours × sqrt_RTE) → new_soc_idx = n_s
 
 ### 4.1 Efficiency Model
 
-Round-trip efficiency is split symmetrically between charge and discharge:
+Each direction (charge / discharge) has its own **power-dependent efficiency curve**: a piecewise-linear function mapping AC power (kW) → efficiency (0–1). This captures the I²R (resistive) losses that increase with current.
 
+**Configuration format**: a plain scalar (e.g. `0.95`) produces a flat curve valid at all power levels. A colon-separated list (e.g. `0:0.95, 5:0.92`) defines breakpoints that are linearly interpolated; efficiency is clamped flat outside the specified range.
+
+**Scalar round-trip efficiency (RTE)**: The optimizer derives a scalar `round_trip_efficiency = charge_eff(0) × discharge_eff(0)` (zero-power values) for use in the oscillation filter threshold and hybrid-mode shadow price thresholds. For a symmetric flat curve at 0.9487: RTE ≈ 0.90.
+
+**Per-action interpolation**: inside the DP backward pass, each candidate action uses:
 ```
-charge_efficiency    = sqrt(RTE)
-discharge_efficiency = sqrt(RTE)
+action_kw  = |action_w| / 1000
+charge_eff = interpolate(charge_curve, action_kw)   # for action_w > 0
+dis_eff    = interpolate(discharge_curve, action_kw) # for action_w < 0
 ```
 
-So charge × discharge = RTE end-to-end. For RTE = 0.90: each direction is ~0.9487.
+SoC transitions use the action-specific efficiency:
+```
+charging:    new_soc = soc + action_w × dt × charge_eff
+discharging: new_soc = soc − |action_w| × dt / dis_eff
+```
 
-The efficiency is treated as constant across all power levels and SoC values. C-rate-dependent losses (I²R) and SoC-dependent losses are deliberately omitted: literature confirms both effects are negligible for LFP within the 10–90% SoC operating window and at the C-rates typical for home storage (≤ 0.5C). The user-configured RTE already accounts for real-world losses at typical operating conditions.
+**Boundary actions** (drain to min / fill to max) use the zero-power scalar as a conservative power estimate to avoid a circular dependency.
+
+**Multi-battery aggregation**: when multiple batteries are aggregated, the resulting curve is a capacity-weighted average computed at the union of all breakpoints.
+
+**Calibration**: runtime efficiency corrections are applied as scalar multipliers to each curve point:
+```
+charge override:    [(p, min(1.0, eff × correction)) for p, eff in charge_curve]
+discharge override: [(p, max(1e-6, eff / correction)) for p, eff in discharge_curve]
+```
 
 DC-coupled PV uses its own path efficiency (`pv_dc_efficiency` ≈ 0.97, MPPT only, no AC conversion).
 
@@ -236,8 +257,8 @@ V[t][s] = min over all actions a of:
 
 where `s'` is the SoC state after applying action `a`:
 
-- **Charging**: `s' = s + a × dt × sqrt(RTE)` plus passive DC PV charging up to the remaining headroom (if DC-coupled)
-- **Discharging**: `s' = s - |a| × dt / sqrt(RTE)` (energy drawn from battery, with losses)
+- **Charging**: `s' = s + a × dt × charge_eff(|a|/1000)` plus passive DC PV charging up to the remaining headroom (if DC-coupled)
+- **Discharging**: `s' = s - |a| × dt / dis_eff(|a|/1000)` (energy drawn from battery, with losses)
 - **Idle**: `s' = s` (or passive DC PV charging if DC-coupled)
 
 The backward pass runs from `t = N-1` down to `t = 0`:
@@ -322,10 +343,11 @@ The DP sometimes schedules rapid charge↔discharge switches that are technicall
 **Minimum profitable spread**: For arbitrage to be worthwhile, the discharge price must exceed the charge price by at least:
 
 ```
-min_arbitrage_spread = (2 × degradation_cost_per_kwh + min_price_spread) / sqrt(RTE)
+_rte      = chg_eff(0) × dis_eff(0)   # zero-power RTE scalar (conservative)
+min_arbitrage_spread = (2 × degradation_cost_per_kwh + min_price_spread) / sqrt(_rte)
 ```
 
-This accounts for RTE losses in both directions and the user-configured minimum spread.
+The zero-power efficiency scalar is used here as a conservative estimate (real-world operation at non-zero power is less efficient, so this filter is slightly permissive — it suppresses fewer cycles than strictly optimal, which is safe).
 
 **Algorithm**: Iterative lookahead scan (repeated until no more changes):
 
@@ -389,10 +411,11 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 - For boundary SoC states, a one-sided difference is used.
 
 **Interpretation**:
-- If the current grid buy price is less than `λ × sqrt(RTE)`, it is profitable to charge — 1 kWh bought from AC stores `sqrt(RTE)` kWh worth `λ` each, so the stored energy is worth more than its purchase cost.
-- If the current feed-in price is greater than `λ / sqrt(RTE)`, it is profitable to discharge/export — 1 stored kWh yields `sqrt(RTE)` kWh on the AC side, so the sale revenue exceeds the value of keeping the energy.
+Let `chg0 = chg_eff(0)` and `dis0 = dis_eff(0)` (zero-power scalars):
+- If the current grid buy price is less than `λ × chg0`, it is profitable to charge — 1 kWh bought from AC stores `chg0` kWh worth `λ` each.
+- If the current feed-in price is greater than `λ / dis0`, it is profitable to discharge/export — 1 stored kWh yields `dis0` kWh on the AC side.
 
-Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces only the **charge-side SoC transition** for planning. The economic cost model and arbitrage thresholds continue to use the nominal `sqrt(RTE)` so a charging-speed limit is not double-counted as extra energy loss.
+Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces the charge-side efficiency curve for planning. The arbitrage thresholds continue to use the zero-power scalar from the corrected curve.
 
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
@@ -438,7 +461,7 @@ Several implementation details prevent subtle correctness bugs:
 | Partial first step | Use `step_durations_hours[1]` (not `min(step_durations_hours)`) to compute `power_step_w`; optimizer always uses step 0 as the immediate setpoint (primary runs are at period boundaries so step 0 is full) |
 | Horizon-end discharge | Terminal condition `V[T][s] = -stored_kwh × terminal_price` prevents horizon-end drain |
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
-| RTE symmetry | `charge_eff = discharge_eff = sqrt(RTE)` ensures `charge_eff × discharge_eff = RTE` exactly |
+| Efficiency curve scalar | `round_trip_efficiency = chg_eff(0) × dis_eff(0)` is derived at zero power for oscillation filter and hybrid-mode thresholds |
 | Derating precomputed outside `t`-loop | `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are arrays computed once from `soc_states` before the backward pass, avoiding repeated method calls in the tight inner loop |
 
 ## 12. Variable Price Intervals (15-min / 30-min / hourly)
