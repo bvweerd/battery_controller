@@ -247,6 +247,27 @@ async def test_mode_switch_resets_commitment(hass):
     # Mode switch must mark the next optimization run as triggered by a mode change.
     assert coordinator._optimization_trigger_source == "mode_change"
 
+    # Re-selecting the already-active mode is a no-op: it must NOT reset the
+    # commitment filter or force the real-time loop through an idle setpoint
+    # (e.g. an automation periodically calling select.select_option).
+    coordinator._committed_action = "charging"
+    coordinator._committed_power = 1.2
+    coordinator._committed_price = 0.25
+    coordinator._committed_step_start = fixed_now
+    coordinator._effective_mode = "charging"
+    coordinator._controller_schedule_w = 1200.0
+    coordinator._optimization_trigger_source = "price_boundary"
+
+    coordinator.control_mode = MODE_HYBRID  # same as current mode
+
+    assert coordinator._committed_action == "charging"
+    assert coordinator._committed_power == 1.2
+    assert coordinator._committed_price == 0.25
+    assert coordinator._committed_step_start == fixed_now
+    assert coordinator._effective_mode == "charging"
+    assert coordinator._controller_schedule_w == 1200.0
+    assert coordinator._optimization_trigger_source == "price_boundary"
+
 
 def _make_coordinator(hass):
     """Build a minimal OptimizationCoordinator for scheduling tests."""
