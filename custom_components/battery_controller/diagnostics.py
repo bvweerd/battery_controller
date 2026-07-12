@@ -187,7 +187,8 @@ async def async_get_config_entry_diagnostics(
                 "feed_in_price_forecast_model": data.get(
                     "feed_in_price_forecast_model"
                 ),
-                # Terminal shadow price (= current shadow price; next run uses it as terminal)
+                # Current shadow price, exported for informational/analyzer display only.
+                # Not used as the DP terminal condition (see optimizer.py terminal_price).
                 "terminal_shadow_price": data.get("shadow_price_eur_kwh"),
             }
 
