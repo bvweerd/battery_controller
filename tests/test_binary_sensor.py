@@ -80,7 +80,22 @@ class TestPVCurtailmentSensor:
         )
         assert sensor.is_on is True
 
-    def test_is_on_true_when_soc_at_max(self):
+    def test_is_on_true_when_price_negative_regardless_of_battery_state(self):
+        """Purely price-based: negative price = ON, even while the battery is
+        absorbing the full setpoint or has plenty of SoC headroom."""
+        battery_state = MagicMock()
+        battery_state.soc_kwh = 5.0  # well below max
+        battery_state.power_kw = 1.0  # absorbing the full 1000W setpoint
+        sensor = self._make_sensor(
+            data={
+                "current_feed_in_price": -0.05,
+                "battery_state": battery_state,
+                "control_action": {"target_power_w": 1000.0},
+            }
+        )
+        assert sensor.is_on is True
+
+    def test_is_on_true_when_soc_at_max_and_price_negative(self):
         battery_state = MagicMock()
         battery_state.soc_kwh = 9.85  # 98.5% of 10.0 kWh
         battery_state.power_kw = -0.5
@@ -93,84 +108,11 @@ class TestPVCurtailmentSensor:
         )
         assert sensor.is_on is True
 
-    def test_is_on_true_when_setpoint_high_and_actual_low(self):
-        """Condition B: setpoint >200W and actual < 70% of setpoint."""
-        battery_state = MagicMock()
-        battery_state.soc_kwh = 5.0  # well below max
-        battery_state.power_kw = 0.1  # 100W actual
-        sensor = self._make_sensor(
-            data={
-                "current_feed_in_price": -0.05,
-                "battery_state": battery_state,
-                "control_action": {"target_power_w": 1000.0},  # setpoint 1000W
-            }
-        )
-        # actual 100W < 0.70 * 1000W = 700W → True
-        assert sensor.is_on is True
-
-    def test_is_on_false_when_setpoint_below_threshold(self):
-        """Setpoint <= 200W: condition B does not trigger."""
+    def test_follows_price_sign_flips(self):
+        """The sensor tracks the price sign directly, with no latched state."""
         battery_state = MagicMock()
         battery_state.soc_kwh = 5.0
-        battery_state.power_kw = 0.0
-        sensor = self._make_sensor(
-            data={
-                "current_feed_in_price": -0.05,
-                "battery_state": battery_state,
-                "control_action": {"target_power_w": 150.0},  # below _MIN_SETPOINT_W
-            }
-        )
-        assert sensor.is_on is False
-
-    def test_is_on_false_when_actual_power_sufficient(self):
-        """Battery absorbing enough power (>=70% of setpoint)."""
-        battery_state = MagicMock()
-        battery_state.soc_kwh = 5.0
-        battery_state.power_kw = 0.8  # 800W actual
-        sensor = self._make_sensor(
-            data={
-                "current_feed_in_price": -0.05,
-                "battery_state": battery_state,
-                "control_action": {"target_power_w": 1000.0},
-            }
-        )
-        # 800W >= 0.70 * 1000W = 700W → should not trigger condition B
-        assert sensor.is_on is False
-
-    def test_condition_b_hysteresis_holds_on_through_noise_band(self):
-        """Once triggered, condition B must stay on while actual power hovers
-        between ABSORPTION_THRESHOLD and _ABSORPTION_RECOVER_THRESHOLD instead
-        of flapping with every real-time (~5-10s) sensor update."""
-        battery_state = MagicMock()
-        battery_state.soc_kwh = 5.0
-        battery_state.power_kw = 0.1  # 100W: well below 70% of 1000W setpoint
-        sensor = self._make_sensor(
-            data={
-                "current_feed_in_price": -0.05,
-                "battery_state": battery_state,
-                "control_action": {"target_power_w": 1000.0},
-            }
-        )
-        assert sensor.is_on is True  # entry: 100W < 700W
-
-        # Noisy reading recovers to 750W — within the hysteresis band
-        # (700W-850W) — must NOT clear the suggestion yet.
         battery_state.power_kw = 0.75
-        assert sensor.is_on is True
-
-        # Recovers above the exit threshold (850W) — now it clears.
-        battery_state.power_kw = 0.9
-        assert sensor.is_on is False
-
-        # Dips back into the band — stays off (no re-trigger inside the band).
-        battery_state.power_kw = 0.75
-        assert sensor.is_on is False
-
-    def test_condition_b_hysteresis_resets_when_setpoint_drops(self):
-        """A setpoint falling below the noise floor clears a latched condition B."""
-        battery_state = MagicMock()
-        battery_state.soc_kwh = 5.0
-        battery_state.power_kw = 0.1
         sensor = self._make_sensor(
             data={
                 "current_feed_in_price": -0.05,
@@ -180,8 +122,11 @@ class TestPVCurtailmentSensor:
         )
         assert sensor.is_on is True
 
-        sensor.coordinator.data["control_action"] = {"target_power_w": 100.0}
+        sensor.coordinator.data["current_feed_in_price"] = 0.10
         assert sensor.is_on is False
+
+        sensor.coordinator.data["current_feed_in_price"] = -0.02
+        assert sensor.is_on is True
 
     def test_extra_state_attributes_empty_when_no_data(self):
         sensor = self._make_sensor(data=None)
@@ -305,9 +250,8 @@ class TestPVCurtailmentMissingControlAction:
         return PVCurtailmentSensor(coord, device, entry)
 
     def test_missing_target_power_w_does_not_raise(self):
-        """control_action dict with no target_power_w key falls back to 0.0."""
-        # Condition B requires setpoint > _MIN_SETPOINT_W (200W);
-        # default 0.0 means it never triggers — sensor should return False.
+        """control_action dict with no target_power_w key must not break is_on."""
+        # Purely price-based: negative price → ON regardless of control_action.
         sensor = self._make_sensor(
             data={
                 "current_feed_in_price": -0.05,
@@ -316,10 +260,10 @@ class TestPVCurtailmentMissingControlAction:
             }
         )
         sensor.coordinator.battery_config.max_soc_kwh = 10.0
-        assert sensor.is_on is False
+        assert sensor.is_on is True
 
     def test_none_control_action_does_not_raise(self):
-        """control_action absent from data dict entirely falls back to empty dict."""
+        """control_action absent from data dict entirely must not break is_on."""
         sensor = self._make_sensor(
             data={
                 "current_feed_in_price": -0.05,
@@ -328,7 +272,7 @@ class TestPVCurtailmentMissingControlAction:
             }
         )
         sensor.coordinator.battery_config.max_soc_kwh = 10.0
-        assert sensor.is_on is False
+        assert sensor.is_on is True
 
 
 @pytest.mark.asyncio
