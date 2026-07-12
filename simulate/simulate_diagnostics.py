@@ -164,7 +164,7 @@ def extract_inputs(diag: dict) -> tuple:
     # Use actual feed-in forecast from schedule if available (new diagnostics field)
     feed_in_forecast = sched.get("feed_in_price_forecast") or list(price_forecast)
 
-    # Terminal shadow price stored in schedule for DP reproduction
+    # Shadow price from the diagnostics snapshot; informational only (not a DP input).
     terminal_shadow_price = sched.get("terminal_shadow_price")
     charge_eff_correction = opt_data.get("charge_eff_correction")
     if charge_eff_correction is None:
@@ -990,10 +990,10 @@ def print_whatif(
 
     print()
     print(
-        "  The actual terminal price comes from the shadow price (λ) of the previous run"
+        "  The actual terminal price comes from the feed-in forecast, not the previous"
     )
     print(
-        "  when available, otherwise from min(feed_in_forecast[-1], 6-step tail average)"
+        "  run's shadow price: max(0, min(feed_in_forecast[-1], clipped 6h tail average))"
     )
     print(f"  = {terminal_price:.4f} €/kWh")
     print(
