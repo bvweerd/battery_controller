@@ -977,6 +977,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
+        await super().async_shutdown()
 
     def _read_battery_state(
         self,

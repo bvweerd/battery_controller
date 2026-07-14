@@ -180,8 +180,8 @@ async def test_async_update_data_no_radiation(hass):
 
 
 @pytest.mark.asyncio
-async def test_async_shutdown_is_noop(hass):
-    """async_shutdown is a no-op (no exception)."""
+async def test_async_shutdown_stops_polling(hass):
+    """async_shutdown uses the base-class implementation (cancels the timer)."""
     with patch(
         "custom_components.battery_controller.coordinator_weather.async_get_clientsession",
         return_value=MagicMock(),
@@ -189,6 +189,7 @@ async def test_async_shutdown_is_noop(hass):
         coord = WeatherDataCoordinator(hass)
 
     await coord.async_shutdown()  # Should not raise
+    assert coord._shutdown_requested is True
 
 
 @pytest.mark.asyncio

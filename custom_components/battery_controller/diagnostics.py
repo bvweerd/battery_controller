@@ -8,6 +8,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BATTERY_POWER_SENSOR,
@@ -16,6 +17,7 @@ from .const import (
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_PRICE_SENSOR,
+    WEATHER_STALE_AFTER_MINUTES,
 )
 
 # Sensor entity IDs may be considered private; redact them
@@ -38,6 +40,20 @@ def _subentry_name_map(entry: ConfigEntry) -> dict[str, str]:
 def _remap_keys(d: dict[str, Any], name_map: dict[str, str]) -> dict[str, Any]:
     """Replace subentry ID keys with their human-readable titles."""
     return {name_map.get(k, k): v for k, v in d.items()}
+
+
+def _data_age_minutes(data: dict[str, Any] | None) -> float | None:
+    """Return the age of coordinator data in minutes, from its timestamp."""
+    if not data:
+        return None
+    timestamp = data.get("timestamp")
+    if isinstance(timestamp, str):
+        timestamp = dt_util.parse_datetime(timestamp)
+    if timestamp is None:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=dt_util.UTC)
+    return round((dt_util.utcnow() - timestamp).total_seconds() / 60, 1)
 
 
 async def async_get_config_entry_diagnostics(
@@ -76,8 +92,15 @@ async def async_get_config_entry_diagnostics(
     # Weather coordinator data
     weather_data = {}
     if weather_coord and weather_coord.data:
+        weather_age = _data_age_minutes(weather_coord.data)
         weather_data = {
             "last_update_success": weather_coord.last_update_success,
+            # Age + staleness computed at dump time: last_update_success alone
+            # stays True when polling silently stops, hiding a dead coordinator.
+            "age_minutes": weather_age,
+            "stale": (
+                weather_age is not None and weather_age > WEATHER_STALE_AFTER_MINUTES
+            ),
             "radiation_forecast": weather_coord.data.get("radiation_forecast"),
             "wind_speed_forecast": weather_coord.data.get("wind_speed_forecast"),
             "temperature_forecast": weather_coord.data.get("temperature_forecast"),
@@ -90,6 +113,7 @@ async def async_get_config_entry_diagnostics(
     if forecast_coord and forecast_coord.data:
         forecast_data = {
             "last_update_success": forecast_coord.last_update_success,
+            "age_minutes": _data_age_minutes(forecast_coord.data),
             "pv_forecast_kw": forecast_coord.data.get("pv_forecast_kw"),
             "pv_dc_forecast_kw": forecast_coord.data.get("pv_dc_forecast_kw"),
             "consumption_forecast_kw": forecast_coord.data.get(

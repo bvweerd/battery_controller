@@ -191,6 +191,7 @@ PRICE_CHANGE_REOPTIMIZE_ABS_EUR = (
 STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
+WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
 SOC_UNCERTAINTY_RESERVE_FRACTION = (
     0.10  # max fraction of capacity reserved for solar forecast uncertainty
 )

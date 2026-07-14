@@ -330,5 +330,19 @@
         "name": "Gebruik Maximale Energie Voorgesteld"
       }
     }
+  },
+  "issues": {
+    "price_sensor_unavailable": {
+      "title": "Elektriciteitsprijssensor niet beschikbaar",
+      "description": "De prijssensor **{sensor}** is niet beschikbaar en er bestaat nog geen historisch prijsmodel. De batterij-optimalisatie kan niet draaien zonder prijsdata. Controleer of de sensor werkt en forecast-attributen heeft."
+    },
+    "weather_data_unavailable": {
+      "title": "Weerdata niet beschikbaar (open-meteo)",
+      "description": "De batterijcontroller kan de open-meteo weer-API niet bereiken. PV-productie wordt op nul verondersteld totdat de verbinding is hersteld. Controleer je internetverbinding of de status van open-meteo."
+    },
+    "weather_data_stale": {
+      "title": "Weerdata is verouderd (open-meteo)",
+      "description": "De weerdata is {age_hours} uur oud en wordt niet meer ververst. De kwaliteit van de PV-voorspelling neemt af naarmate de data veroudert. Controleer je internetverbinding of de status van open-meteo; herlaad de integratie als het probleem aanhoudt."
+    }
   }
 }
