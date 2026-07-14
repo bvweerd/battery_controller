@@ -815,7 +815,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "per_battery_states": dict(self._per_battery_states),
                 "battery_setpoints": battery_setpoints,
                 "optimal_power_kw": control_action["target_power_kw"],
-                "optimal_mode": control_action["action_mode"],
+                # Report the effective control mode (e.g. "zero_grid"), matching
+                # what the full optimizer run publishes. Using the instantaneous
+                # physical action here would flip the "Optimal Mode" sensor to
+                # "discharging"/"charging" between optimizer runs whenever the
+                # zero-grid loop moves the battery — even though the control mode
+                # is still zero_grid. The physical action is already visible via
+                # the Battery Power / Setpoint sensors.
+                "optimal_mode": rt_effective_mode,
             }
         )
 
