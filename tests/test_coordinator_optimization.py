@@ -1925,6 +1925,101 @@ async def test_handle_realtime_update_stale_sensor_returns_early(hass, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stale_zero_grid_unwinds_toward_zero(hass, monkeypatch):
+    """A stale (steady) grid sensor in zero_grid must still unwind an
+    over-committed discharge toward zero.
+
+    Reproduces the post-spike self-lock: after a Quooker/kettle spike the
+    integrator is left discharging ~1.5 kW, which holds the grid at a steady
+    export so an on-change power sensor stops updating and reads as "stale".
+    The correction must not be skipped — reducing battery power changes the
+    grid and wakes the sensor.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    # Battery left over-discharging 1500 W after a spike.
+    coord.zero_grid_controller.reset_setpoint(-1500.0)
+    coord.data = {
+        "control_action": {"target_power_kw": -1.5, "target_power_w": -1500.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-1.5, mode="discharging"
+        ),
+        "per_battery_states": {},
+    }
+
+    hass.states.async_set("sensor.grid_w", "-1300", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -1300.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-1.5, mode="discharging"
+        ),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "stale steady grid must still correct an over-commitment"
+    new_w = updated[-1]["control_action"]["target_power_w"]
+    # Moved toward zero (covers only base load now), not held at -1500 W.
+    assert -1500.0 < new_w <= 0.0
+    assert abs(new_w) < 1500.0
+
+
+@pytest.mark.asyncio
+async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
+    """A stale (possibly dead/frozen) grid sensor must never drive the battery
+    into a larger discharge — the original P4.1 runaway protection is kept."""
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(-200.0)
+    coord.data = {
+        "control_action": {"target_power_kw": -0.2, "target_power_w": -200.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-0.2, mode="discharging"
+        ),
+        "per_battery_states": {},
+    }
+
+    # Sensor frozen at a large import value.
+    hass.states.async_set("sensor.grid_w", "2000", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 2000.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-0.2, mode="discharging"
+        ),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert not updated, "stale frozen sensor must not drive a larger discharge"
+    # Integrator memory restored — not wound up further.
+    assert coord.zero_grid_controller.last_target_w == pytest.approx(-200.0)
+
+
+@pytest.mark.asyncio
 async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
     """_handle_realtime_update uses zero_grid schedule when control mode is zero_grid (481-482)."""
     coord = _make_coordinator(hass)
