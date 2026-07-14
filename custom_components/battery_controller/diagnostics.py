@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -49,11 +50,12 @@ def _data_age_minutes(data: dict[str, Any] | None) -> float | None:
     timestamp = data.get("timestamp")
     if isinstance(timestamp, str):
         timestamp = dt_util.parse_datetime(timestamp)
-    if timestamp is None:
+    if not isinstance(timestamp, datetime):
         return None
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=dt_util.UTC)
-    return round((dt_util.utcnow() - timestamp).total_seconds() / 60, 1)
+    age_minutes: float = (dt_util.utcnow() - timestamp).total_seconds() / 60
+    return round(age_minutes, 1)
 
 
 async def async_get_config_entry_diagnostics(
