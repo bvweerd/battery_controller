@@ -49,6 +49,21 @@ class ZeroGridController:
         self._last_target_w = 0.0
         self._setpoint_w = 0.0  # Target grid power (0 = zero-grid)
 
+    @property
+    def last_target_w(self) -> float:
+        """Return the internal setpoint memory in W (positive = charge)."""
+        return self._last_target_w
+
+    def reset_setpoint(self, value_w: float = 0.0) -> None:
+        """Force the internal setpoint memory to a specific value.
+
+        Used on mode changes and by the coordinator's stale-sensor fail-safe to
+        keep the integrator state consistent when a computed setpoint is
+        rejected.
+        """
+        self._last_target_w = value_w
+        self._setpoint_w = value_w
+
     def calculate_battery_setpoint(
         self,
         current_grid_w: float,
