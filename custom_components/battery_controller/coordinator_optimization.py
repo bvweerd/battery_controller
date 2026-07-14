@@ -1734,6 +1734,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # Too small to measure reliably; skip.
             return
 
+        # Skip if the step crosses the low-SoC discharge derating threshold.
+        # The DP plans at the start-SoC limit for the whole step, but the
+        # inverter throttles once the threshold is reached mid-step.  The
+        # resulting actual/planned ratio reflects the derating, not real
+        # efficiency losses, so including it would corrupt the calibration
+        # (same guard as the high-SoC check in the charge calibration).
+        bc = self.battery_config
+        if bc.low_soc_max_discharge_kw > 0:
+            threshold_kwh = bc.low_soc_discharge_threshold_pct / 100 * bc.capacity_kwh
+            if planned_next_soc < threshold_kwh <= prev_soc:
+                _LOGGER.debug(
+                    "Discharge efficiency calibration: skipping sample — step crosses "
+                    "low-SoC derating threshold (%.1f%% / %.2f kWh)",
+                    bc.low_soc_discharge_threshold_pct,
+                    threshold_kwh,
+                )
+                return
+
         actual_delta = prev_soc - battery_state.soc_kwh  # positive: SoC went down
         # Cap upward to 1.2× planned to filter out unexpected external discharge
         # (e.g. grid outage, SoC sensor noise causing apparent over-discharge).
