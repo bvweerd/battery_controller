@@ -654,26 +654,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return
 
         # Stale sensor detection (P4.1): if the first grid sensor has not updated
-        # recently, treat its reading as unreliable and skip the zero_grid correction.
+        # recently its reading may be unreliable. We do NOT unconditionally skip,
+        # because a steady grid produced by the battery's own action keeps an
+        # on-change power sensor from emitting updates. Misclassifying a
+        # genuinely-steady reading as "stale" and skipping would freeze the
+        # controller in an over-committed setpoint (e.g. the battery left
+        # discharging after a Quooker/kettle spike), which only the next full
+        # optimizer run would clear. Instead the flag is handled per-mode below.
         stale_limit_s = STALE_SENSOR_MULTIPLIER * float(
             self.config.get(
                 CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
             )
         )
+        grid_sensor_stale = False
         if self._power_consumption_sensors:
             first_sensor = self._power_consumption_sensors[0]
             state = self.hass.states.get(first_sensor)
             if state is not None and state.last_updated is not None:
                 age_s = (dt_util.utcnow() - state.last_updated).total_seconds()
-                if age_s > stale_limit_s:
-                    _LOGGER.debug(
-                        "Grid power sensor '%s' is stale (%.0f s old, limit %.0f s); "
-                        "skipping zero_grid correction",
-                        first_sensor,
-                        age_s,
-                        stale_limit_s,
-                    )
-                    return
+                grid_sensor_stale = age_s > stale_limit_s
 
         # Read current battery state
         battery_state = self.get_current_battery_state()
@@ -707,7 +706,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             rt_effective_mode, current_grid_w
         )
 
+        # A stale grid reading is only relevant to grid-driven control. For
+        # follow_schedule / manual / idle the setpoint comes from the DP schedule
+        # or the user, not the live grid, so holding the last setpoint (as before)
+        # is correct and safe.
+        if grid_sensor_stale and controller_mode != "zero_grid":
+            _LOGGER.debug(
+                "Grid power sensor stale (>%.0f s); holding %s setpoint",
+                stale_limit_s,
+                controller_mode,
+            )
+            return
+
         # Recalculate zero_grid setpoint with actual sensor data
+        saved_last_target_w = self.zero_grid_controller.last_target_w
         control_action = self.zero_grid_controller.get_control_action(
             current_grid_w=current_grid_w,
             current_soc_kwh=battery_state.soc_kwh,
@@ -715,6 +727,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             dp_schedule_w=controller_schedule_w,
             mode=controller_mode,
         )
+
+        # Stale sensor in zero_grid: the live grid drives the setpoint. Acting on
+        # a steady reading is exactly what breaks a self-locking over-commitment
+        # (reducing battery power changes the grid and wakes an on-change sensor).
+        # But a genuinely dead sensor stays frozen, so only allow the setpoint to
+        # move TOWARD zero — never let a stale reading push the battery into a
+        # larger charge/discharge or flip its direction (no runaway).
+        if grid_sensor_stale:
+            prev_w = (
+                self.data.get("control_action", {}).get("target_power_w", 0.0)
+                if self.data
+                else 0.0
+            )
+            new_w = control_action["target_power_w"]
+            moves_away_from_zero = abs(new_w) > abs(prev_w) or (new_w * prev_w < 0)
+            if moves_away_from_zero:
+                # Untrustworthy while stale — restore integrator state and hold.
+                self.zero_grid_controller.reset_setpoint(saved_last_target_w)
+                _LOGGER.debug(
+                    "Grid power sensor stale; holding zero_grid setpoint "
+                    "(rejected %.0f W -> %.0f W, away from zero)",
+                    prev_w,
+                    new_w,
+                )
+                return
 
         prev_target = (
             self.data.get("control_action", {}).get("target_power_kw")
@@ -778,7 +815,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "per_battery_states": dict(self._per_battery_states),
                 "battery_setpoints": battery_setpoints,
                 "optimal_power_kw": control_action["target_power_kw"],
-                "optimal_mode": control_action["action_mode"],
+                # Report the effective control mode (e.g. "zero_grid"), matching
+                # what the full optimizer run publishes. Using the instantaneous
+                # physical action here would flip the "Optimal Mode" sensor to
+                # "discharging"/"charging" between optimizer runs whenever the
+                # zero-grid loop moves the battery — even though the control mode
+                # is still zero_grid. The physical action is already visible via
+                # the Battery Power / Setpoint sensors.
+                "optimal_mode": rt_effective_mode,
             }
         )
 

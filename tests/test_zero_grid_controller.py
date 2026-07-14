@@ -315,6 +315,31 @@ class TestCreateZeroGridController:
         assert controller.config.deadband_w == 50.0
 
 
+class TestSetpointMemory:
+    """Tests for the internal setpoint memory accessor and reset."""
+
+    def test_last_target_w_reflects_last_action(self, controller):
+        controller.get_control_action(
+            current_grid_w=1000,
+            current_soc_kwh=5.0,
+            current_battery_w=0,
+            dp_schedule_w=0,
+            mode="zero_grid",
+        )
+        # Importing 1 kW -> discharge ~1 kW; memory tracks the applied target.
+        assert controller.last_target_w == pytest.approx(-1000, abs=10)
+
+    def test_reset_setpoint_forces_memory(self, controller):
+        controller._last_target_w = -1500.0
+        controller.reset_setpoint(-200.0)
+        assert controller.last_target_w == pytest.approx(-200.0)
+
+    def test_reset_setpoint_defaults_to_zero(self, controller):
+        controller._last_target_w = 1234.0
+        controller.reset_setpoint()
+        assert controller.last_target_w == 0.0
+
+
 class TestZeroDeadband:
     """T7: deadband_w=0 must not cause division or crash."""
 
