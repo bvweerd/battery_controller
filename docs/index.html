@@ -789,8 +789,23 @@ function renderDiagnostics(raw) {
   // ── Coordinator status
   const failureHtml = opt.failure_reason
     ? `<div class="mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">⚠ ${opt.failure_reason}</div>` : '';
+  // Weather staleness: prefer the stale/age_minutes fields written at dump time;
+  // for older diagnostics files fall back to comparing the weather timestamp
+  // against the optimization timestamp (≈ dump time). last_update_success alone
+  // stays true when polling silently stops, so "OK" would hide a dead coordinator.
+  const WEATHER_STALE_MIN = 120;
+  let wxAgeMin = wx.age_minutes;
+  if (wxAgeMin === undefined && wx.timestamp && opt.timestamp) {
+    wxAgeMin = (new Date(opt.timestamp) - new Date(wx.timestamp)) / 60000;
+  }
+  const wxStale = wx.stale !== undefined ? wx.stale : (wxAgeMin !== undefined && wxAgeMin > WEATHER_STALE_MIN);
+  const wxBadge = !wx.last_update_success
+    ? `<span class="badge badge-fail">Failed</span>`
+    : wxStale
+      ? `<span class="badge badge-fail">Stale (${(wxAgeMin/60).toFixed(1)} h old)</span>`
+      : `<span class="badge badge-ok">OK</span>`;
   document.getElementById('coord-status').innerHTML = `
-    ${kv('Weather coordinator', `<span class="badge ${wx.last_update_success?'badge-ok':'badge-fail'}">${wx.last_update_success?'OK':'Failed'}</span>`)}
+    ${kv('Weather coordinator', wxBadge)}
     ${kv('Weather timestamp', wx.timestamp ? new Date(wx.timestamp).toLocaleString() : '—')}
     ${kv('Forecast coordinator', `<span class="badge ${fc.last_update_success?'badge-ok':'badge-fail'}">${fc.last_update_success?'OK':'Failed'}</span>`)}
     ${kv('Forecast timestamp', fc.timestamp ? new Date(fc.timestamp).toLocaleString() : '—')}

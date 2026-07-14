@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -17,6 +17,7 @@ from .const import (
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
     DOMAIN,
+    WEATHER_STALE_AFTER_MINUTES,
 )
 from .coordinator_weather import WeatherDataCoordinator
 from .forecast_models import (
@@ -107,11 +108,27 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         # Unsubscribe handle for the daily pattern-refresh timer
         self._unsub_pattern_refresh: Any | None = None
+        # Unsubscribe handle for the weather-coordinator listener
+        self._unsub_weather: Any | None = None
 
     async def async_setup(self) -> None:
         """Set up the forecast coordinator."""
         # Update consumption pattern from history on startup
         await self.consumption_model.async_update_pattern()
+
+        # Subscribe to the weather coordinator. A DataUpdateCoordinator only
+        # keeps polling while it has listeners, and no entity subscribes to the
+        # weather coordinator directly — without this listener it would fetch
+        # exactly once at startup and then serve the same (aging) snapshot
+        # forever. The listener also recomputes the forecasts as soon as fresh
+        # weather data arrives instead of waiting for the next 15-min cycle.
+        @callback
+        def _on_weather_update() -> None:
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._unsub_weather = self.weather_coordinator.async_add_listener(
+            _on_weather_update
+        )
 
         # Re-learn the consumption pattern every 24 h so that seasonal changes
         # and new appliances are picked up automatically without an integration
@@ -132,6 +149,10 @@ class ForecastCoordinator(DataUpdateCoordinator):
         if self._unsub_pattern_refresh:
             self._unsub_pattern_refresh()
             self._unsub_pattern_refresh = None
+        if self._unsub_weather:
+            self._unsub_weather()
+            self._unsub_weather = None
+        await super().async_shutdown()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Calculate PV and consumption forecasts."""
@@ -155,8 +176,41 @@ class ForecastCoordinator(DataUpdateCoordinator):
             wind_speed_forecast: list[float] = []
             temperature_forecast: list[float] = []
             forecast_start = None
+            ir.async_delete_issue(self.hass, DOMAIN, "weather_data_stale")
         else:
             ir.async_delete_issue(self.hass, DOMAIN, "weather_data_unavailable")
+            # Stale weather detection: the shifted forecast degrades gracefully,
+            # but the user should know the weather source has stopped updating.
+            weather_ts = weather_data.get("timestamp")
+            weather_age_min = (
+                (dt_util.utcnow() - weather_ts).total_seconds() / 60
+                if weather_ts is not None
+                else None
+            )
+            if (
+                weather_age_min is not None
+                and weather_age_min > WEATHER_STALE_AFTER_MINUTES
+            ):
+                _LOGGER.warning(
+                    "Weather data is stale (%.0f min old, limit %.0f min); "
+                    "PV forecast quality degrades until open-meteo updates resume",
+                    weather_age_min,
+                    WEATHER_STALE_AFTER_MINUTES,
+                )
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "weather_data_stale",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="weather_data_stale",
+                    # Whole hours: keeps issue-registry rewrites to once per hour
+                    translation_placeholders={
+                        "age_hours": f"{weather_age_min / 60:.0f}"
+                    },
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, "weather_data_stale")
             radiation_forecast = weather_data.get("radiation_forecast", [])
             dni_forecast = weather_data.get("dni_forecast", [])
             diffuse_forecast = weather_data.get("diffuse_forecast", [])

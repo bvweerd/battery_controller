@@ -99,6 +99,10 @@
     "weather_data_unavailable": {
       "title": "Weather data unavailable (open-meteo)",
       "description": "The battery controller cannot reach the open-meteo weather API. PV production is assumed to be zero until the connection is restored. Check your internet connection or open-meteo service status."
+    },
+    "weather_data_stale": {
+      "title": "Weather data is stale (open-meteo)",
+      "description": "The weather data is {age_hours} hours old and is no longer being refreshed. The PV forecast quality degrades as the data ages. Check your internet connection or open-meteo service status; reload the integration if the problem persists."
     }
   },
   "options": {
