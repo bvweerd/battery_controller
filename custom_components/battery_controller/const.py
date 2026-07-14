@@ -99,7 +99,6 @@ CONF_MANUAL_POWER_SETPOINT_W = "manual_power_setpoint_w"
 CONF_ZERO_GRID_ENABLED = "zero_grid_enabled"
 CONF_ZERO_GRID_DEADBAND_W = "zero_grid_deadband_w"
 CONF_ZERO_GRID_RESPONSE_TIME_S = "zero_grid_response_time_s"
-CONF_ZERO_GRID_PRIORITY = "zero_grid_priority"
 
 # Configuration keys - Control mode (persisted)
 CONF_CONTROL_MODE = "control_mode"
@@ -147,7 +146,6 @@ DEFAULT_MANUAL_POWER_SETPOINT_W = 0.0
 DEFAULT_ZERO_GRID_ENABLED = True
 DEFAULT_ZERO_GRID_DEADBAND_W = 50.0
 DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
-DEFAULT_ZERO_GRID_PRIORITY = "schedule"
 
 # Default values - Fixed prices
 DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+)
