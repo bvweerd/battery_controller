@@ -1974,6 +1974,48 @@ async def test_stale_zero_grid_unwinds_toward_zero(hass, monkeypatch):
     # Moved toward zero (covers only base load now), not held at -1500 W.
     assert -1500.0 < new_w <= 0.0
     assert abs(new_w) < 1500.0
+    # The control mode is still zero_grid — not the instantaneous action.
+    assert updated[-1]["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_realtime_zero_grid_reports_zero_grid_mode(hass, monkeypatch):
+    """In zero_grid the real-time loop must report optimal_mode='zero_grid',
+    not the instantaneous physical action, so the Optimal Mode sensor does not
+    flip to 'discharging'/'charging' between optimizer runs.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+
+    # Fresh sensor reading (not stale): importing 500 W → controller discharges.
+    hass.states.async_set("sensor.grid_w", "500", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 500.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "a setpoint change must publish an update"
+    # Physical action is discharging (covers the load) ...
+    assert updated[-1]["control_action"]["action_mode"] == "discharging"
+    # ... but the reported control mode stays zero_grid.
+    assert updated[-1]["optimal_mode"] == "zero_grid"
 
 
 @pytest.mark.asyncio
