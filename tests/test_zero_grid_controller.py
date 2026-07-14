@@ -303,7 +303,6 @@ class TestCreateZeroGridController:
         config = {
             "zero_grid_deadband_w": 100.0,
             "zero_grid_response_time_s": 10.0,
-            "zero_grid_priority": "zero_grid",
         }
         controller = create_zero_grid_controller(config, battery_config)
         assert isinstance(controller, ZeroGridController)

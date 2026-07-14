@@ -145,7 +145,3 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
         )
 
         return result
-
-    async def async_shutdown(self) -> None:
-        """Cancel the periodic update timer."""
-        pass
