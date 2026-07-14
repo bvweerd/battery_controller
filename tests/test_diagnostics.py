@@ -118,6 +118,10 @@ async def test_diagnostics_dataclass_access(
     # Verification
     assert diagnostics["config_entry"]["entry_id"] == "test_entry_id"
     assert diagnostics["weather"]["last_update_success"] is True
+    # Data age is reported so stale-but-"successful" coordinators are visible
+    assert diagnostics["weather"]["age_minutes"] is not None
+    assert diagnostics["weather"]["stale"] is True  # 2024 timestamp is long stale
+    assert diagnostics["forecast"]["age_minutes"] is not None
     assert diagnostics["forecast"]["consumption_hourly_pattern"] == {"12_0": 0.5}
     assert diagnostics["optimization"]["control_mode"] == "hybrid"
     assert diagnostics["optimization"]["control_action"]["target_power_kw"] == 0.0

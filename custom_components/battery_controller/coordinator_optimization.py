@@ -653,11 +653,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             return
 
-        # Stale sensor detection (P4.1): if the first grid sensor has not updated
-        # recently its reading may be unreliable. We do NOT unconditionally skip,
-        # because a steady grid produced by the battery's own action keeps an
-        # on-change power sensor from emitting updates. Misclassifying a
-        # genuinely-steady reading as "stale" and skipping would freeze the
+        # Stale sensor detection (P4.1): if any contributing grid sensor has
+        # not reported recently its reading may be unreliable. The check covers
+        # all configured power sensors and uses last_reported, so a live push
+        # sensor holding a steady value (e.g. production at 0 W overnight) is
+        # not flagged. On-change-only sources (template/MQTT) do stop reporting
+        # whenever the grid is steady — including a grid held steady by the
+        # battery's own action. We therefore do NOT unconditionally skip:
+        # misclassifying that as "stale" and skipping would freeze the
         # controller in an over-committed setpoint (e.g. the battery left
         # discharging after a Quooker/kettle spike), which only the next full
         # optimizer run would clear. Instead the flag is handled per-mode below.
@@ -666,13 +669,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
             )
         )
-        grid_sensor_stale = False
-        if self._power_consumption_sensors:
-            first_sensor = self._power_consumption_sensors[0]
-            state = self.hass.states.get(first_sensor)
-            if state is not None and state.last_updated is not None:
-                age_s = (dt_util.utcnow() - state.last_updated).total_seconds()
-                grid_sensor_stale = age_s > stale_limit_s
+        grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
 
         # Read current battery state
         battery_state = self.get_current_battery_state()
@@ -933,6 +930,35 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return "follow_schedule"
         return self._control_mode
 
+    def _find_stale_power_sensor(
+        self, stale_limit_s: float
+    ) -> tuple[str, float] | None:
+        """Return the first available-but-stale realtime power sensor, or None.
+
+        Only sensors that currently report a value are checked: an unavailable
+        sensor is already excluded from the grid sum, but an available sensor
+        that silently stopped reporting keeps feeding an outdated value into it.
+
+        Uses last_reported rather than last_updated: a live push sensor (e.g.
+        DSMR) keeps reporting even when the value is constant — such as a
+        production sensor reading 0 W all night — and last_updated only
+        advances when the value actually changes, which would flag every
+        steady sensor as stale.
+        """
+        now = dt_util.utcnow()
+        for sensor_id in (
+            *self._power_consumption_sensors,
+            *self._power_production_sensors,
+        ):
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                continue
+            reported = state.last_reported or state.last_updated
+            age_s = (now - reported).total_seconds()
+            if age_s > stale_limit_s:
+                return sensor_id, age_s
+        return None
+
     def _get_realtime_grid_w(self) -> float | None:
         """Read current grid power from DSMR power sensors.
 
@@ -945,25 +971,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         We don't need to subtract battery_power separately.
 
         Returns:
-            Grid power in W (positive = import), or None if no sensors configured.
+            Grid power in W (positive = import), or None if no sensors are
+            configured or none of the configured sensors has a usable reading
+            (callers then fall back to the forecast-based estimate instead of
+            acting on a fictitious 0 W).
         """
         if not (self._power_consumption_sensors or self._power_production_sensors):
             return None
 
         total_consumption = 0.0
         total_production = 0.0
+        got_reading = False
 
         # Sum all consumption sensors
         for sensor_id in self._power_consumption_sensors:
             value = self._read_power_sensor_w(sensor_id)
             if value is not None:
                 total_consumption += value
+                got_reading = True
 
         # Sum all production sensors
         for sensor_id in self._power_production_sensors:
             value = self._read_power_sensor_w(sensor_id)
             if value is not None:
                 total_production += value
+                got_reading = True
+
+        if not got_reading:
+            return None
 
         return total_consumption - total_production
 
@@ -1021,6 +1056,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
+        await super().async_shutdown()
 
     def _read_battery_state(
         self,

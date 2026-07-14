@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -502,11 +502,149 @@ async def test_async_update_data_weather_recovery_deletes_issue(hass):
 
         await coord._async_update_data()
 
-    mock_delete_issue.assert_called_once_with(
+    mock_delete_issue.assert_any_call(
         hass,
         "battery_controller",
         "weather_data_unavailable",
     )
+    # Fresh (non-stale) weather data also clears the stale issue
+    mock_delete_issue.assert_any_call(
+        hass,
+        "battery_controller",
+        "weather_data_stale",
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_subscribes_weather_coordinator(hass):
+    """async_setup must register a listener on the weather coordinator.
+
+    A DataUpdateCoordinator only keeps polling while it has listeners; without
+    this subscription the weather coordinator fetches once at startup and then
+    serves the same aging snapshot forever (while last_update_success stays
+    True, so diagnostics report 'OK' on half-a-day-old data).
+    """
+    config = _minimal_config()
+    weather_coord = MagicMock()
+    weather_unsub = MagicMock()
+    weather_coord.async_add_listener = MagicMock(return_value=weather_unsub)
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.async_track_time_interval",
+            return_value=MagicMock(),
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        await coord.async_setup()
+
+    weather_coord.async_add_listener.assert_called_once()
+    assert coord._unsub_weather is weather_unsub
+
+    # The listener triggers a forecast refresh when new weather data arrives
+    listener = weather_coord.async_add_listener.call_args[0][0]
+    with patch.object(coord, "async_request_refresh", AsyncMock()) as mock_refresh:
+        listener()
+        await hass.async_block_till_done()
+    mock_refresh.assert_awaited_once()
+
+    # And shutdown unsubscribes again
+    await coord.async_shutdown()
+    weather_unsub.assert_called_once()
+    assert coord._unsub_weather is None
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_stale_weather_creates_issue(hass):
+    """Weather data older than the stale limit should raise a repair issue."""
+    now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = {
+        "radiation_forecast": [100.0] * 24,
+        "dni_forecast": [50.0] * 24,
+        "diffuse_forecast": [20.0] * 24,
+        "wind_speed_forecast": [3.0] * 24,
+        "temperature_forecast": [20.0] * 24,
+        "forecast_start_utc": now - timedelta(hours=12),
+        "timestamp": now - timedelta(hours=12),  # half a day old
+    }
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ir.async_create_issue"
+        ) as mock_create_issue,
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, _minimal_config())
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 12, None))
+
+        result = await coord._async_update_data()
+
+    assert result is not None
+    mock_create_issue.assert_called_once()
+    assert mock_create_issue.call_args[0][2] == "weather_data_stale"
+    placeholders = mock_create_issue.call_args[1]["translation_placeholders"]
+    assert placeholders == {"age_hours": "12"}
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_fresh_weather_no_stale_issue(hass):
+    """Fresh weather data must not raise the stale-weather issue."""
+    now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = {
+        "radiation_forecast": [100.0] * 24,
+        "dni_forecast": [50.0] * 24,
+        "diffuse_forecast": [20.0] * 24,
+        "wind_speed_forecast": [3.0] * 24,
+        "temperature_forecast": [20.0] * 24,
+        "forecast_start_utc": now,
+        "timestamp": now - timedelta(minutes=20),
+    }
+    mock_consumption = _make_mock_consumption()
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=mock_consumption,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ir.async_create_issue"
+        ) as mock_create_issue,
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, _minimal_config())
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 24, None))
+
+        await coord._async_update_data()
+
+    mock_create_issue.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -24,7 +24,6 @@ class ZeroGridControllerConfig:
 
     deadband_w: float = 50.0  # Hysteresis to prevent oscillation
     response_time_s: float = 5.0  # Update interval
-    priority: str = "schedule"  # 'zero_grid' or 'schedule' when in conflict
 
 
 class ZeroGridController:
@@ -297,10 +296,8 @@ def create_zero_grid_controller(
     from .const import (
         CONF_ZERO_GRID_DEADBAND_W,
         CONF_ZERO_GRID_RESPONSE_TIME_S,
-        CONF_ZERO_GRID_PRIORITY,
         DEFAULT_ZERO_GRID_DEADBAND_W,
         DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
-        DEFAULT_ZERO_GRID_PRIORITY,
     )
 
     controller_config = ZeroGridControllerConfig(
@@ -312,7 +309,6 @@ def create_zero_grid_controller(
                 CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
             )
         ),
-        priority=config.get(CONF_ZERO_GRID_PRIORITY, DEFAULT_ZERO_GRID_PRIORITY),
     )
 
     return ZeroGridController(controller_config, battery_config)

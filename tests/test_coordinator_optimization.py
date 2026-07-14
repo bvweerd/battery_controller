@@ -910,6 +910,85 @@ def test_get_realtime_grid_w_kw_unit_conversion(hass):
     assert result == pytest.approx(300.0)
 
 
+def test_get_realtime_grid_w_all_sensors_unavailable_returns_none(hass):
+    """All configured sensors unavailable must yield None, not a fictitious 0 W.
+
+    Callers (realtime loop, full optimizer run) treat None as "no live
+    reading" and fall back appropriately; 0.0 would be acted upon as a real
+    balanced-grid measurement.
+    """
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "unavailable")
+    hass.states.async_set("sensor.production", "unknown")
+
+    assert coord._get_realtime_grid_w() is None
+
+
+def test_get_realtime_grid_w_partial_unavailable_uses_available(hass):
+    """One readable sensor is enough for a (partial) grid reading."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "unavailable")
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+
+    assert coord._get_realtime_grid_w() == pytest.approx(-200.0)
+
+
+def test_find_stale_power_sensor_fresh_sensors(hass):
+    """Fresh sensors are not reported as stale."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "500", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+
+    assert coord._find_stale_power_sensor(20.0) is None
+
+
+def test_find_stale_power_sensor_detects_stale_production(hass, monkeypatch):
+    """Production sensors are also covered by the staleness check."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = []
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.production").last_reported
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+
+    stale = coord._find_stale_power_sensor(20.0)
+    assert stale is not None
+    sensor_id, age_s = stale
+    assert sensor_id == "sensor.production"
+    assert age_s == pytest.approx(30.0, abs=1.0)
+
+
+def test_find_stale_power_sensor_skips_unavailable(hass, monkeypatch):
+    """Unavailable sensors are excluded from the grid sum, so an old
+    unavailable state must not flag the reading as stale (that would block
+    every realtime update e.g. overnight)."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = []
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.production", "unavailable")
+    prod_time = hass.states.get("sensor.production").last_reported
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: prod_time + timedelta(seconds=30),
+    )
+
+    assert coord._find_stale_power_sensor(20.0) is None
+
+
 def test_resolve_controller_mode(hass):
     """_resolve_controller_mode returns correct mode string (lines 616-634)."""
     from custom_components.battery_controller.const import MODE_ZERO_GRID
@@ -1335,8 +1414,8 @@ def test_get_realtime_grid_w_value_error_skipped(hass):
     hass.states.async_set("sensor.bad_production", "also_bad")
 
     result = coord._get_realtime_grid_w()
-    # Should return 0.0 - 0.0 = 0.0 (both sensors skipped, defaults to 0)
-    assert result == 0.0
+    # Both sensors unreadable → no live reading (None), not a fictitious 0 W
+    assert result is None
 
 
 def test_read_battery_state_kwh_soc_unit(hass):
