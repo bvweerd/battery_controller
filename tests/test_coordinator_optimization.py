@@ -21,6 +21,8 @@ from custom_components.battery_controller.const import (
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
+    CONF_PV_DC_COUPLED,
+    CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_ZERO_GRID_DEADBAND_W,
     MODE_FOLLOW_SCHEDULE,
@@ -1958,6 +1960,80 @@ def test_refresh_battery_config_no_entry(hass, monkeypatch):
 
     # Should not raise — just return
     coord._refresh_battery_config()
+
+
+def _make_dc_coordinator(hass):
+    """Build a coordinator whose entry-level config declares DC-coupled PV."""
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_PV_DC_COUPLED: True,
+        CONF_PV_DC_PEAK_POWER_KWP: 3.5,
+        "battery_subentries": [
+            (
+                "bat1",
+                {
+                    CONF_MAX_CHARGE_POWER_KW: 1.2,
+                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                    CONF_ROUND_TRIP_EFFICIENCY: 0.92,
+                    CONF_MIN_SOC_PERCENT: 10.0,
+                    CONF_MAX_SOC_PERCENT: 100.0,
+                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                },
+            )
+        ],
+    }
+    return OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+
+
+def test_dc_pv_config_applied_to_battery_config(hass):
+    """Entry-level DC-PV settings must reach the aggregated battery config.
+
+    DC coupling lives on the PV-array subentries; battery subentries carry no
+    DC-PV keys, so without the overlay pv_dc_coupled would always be False and
+    the DP would never model passive DC MPPT charging.
+    """
+    coord = _make_dc_coordinator(hass)
+    assert coord.battery_config.pv_dc_coupled is True
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(3.5)
+
+
+def test_dc_pv_config_not_applied_when_ac_only(hass):
+    """Without entry-level DC coupling the battery config stays AC-only."""
+    coord = _make_coordinator(hass)
+    assert coord.battery_config.pv_dc_coupled is False
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(0.0)
+
+
+def test_refresh_battery_config_preserves_dc_pv_overlay(hass, monkeypatch):
+    """_refresh_battery_config must re-apply the DC-PV overlay after rebuilding."""
+    coord = _make_dc_coordinator(hass)
+
+    mock_subentry = MagicMock()
+    mock_subentry.data = {
+        CONF_MAX_CHARGE_POWER_KW: 2.0,
+        CONF_MAX_DISCHARGE_POWER_KW: 2.0,
+        CONF_ROUND_TRIP_EFFICIENCY: 0.90,
+        CONF_MIN_SOC_PERCENT: 10.0,
+        CONF_MAX_SOC_PERCENT: 90.0,
+    }
+    mock_entry = MagicMock()
+    mock_entry.subentries = {"bat1": mock_subentry}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: mock_entry)
+
+    coord._refresh_battery_config()
+
+    assert coord.battery_config.max_charge_power_kw == pytest.approx(2.0)
+    assert coord.battery_config.pv_dc_coupled is True
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(3.5)
 
 
 def test_get_manual_setpoint_w_with_entry(hass, monkeypatch):
