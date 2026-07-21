@@ -2040,6 +2040,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             resampled_feed_in = resample_forecast(
                 feed_in_forecast, feed_in_interval, price_interval
             )
+            if not resampled_feed_in:
+                # Downsampling a feed-in series shorter than one grid-price
+                # period yields an empty list. An empty feed-in forecast must
+                # never reach the optimizer: each step would fall back to the
+                # grid buy price and the terminal value of stored energy would
+                # become 0, making PV arbitrage look unprofitable. Fall back to
+                # the fixed feed-in price (same as an unavailable sensor).
+                fixed_price = float(
+                    self.config.get(
+                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
+                    )
+                )
+                resampled_feed_in = [fixed_price] * len(resampled_prices)
 
         # Resample hourly PV / consumption forecasts to the price sensor's native interval
         pv_forecast = resample_forecast(
