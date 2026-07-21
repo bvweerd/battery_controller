@@ -346,3 +346,49 @@ async def test_async_update_data_invalid_radiation_value_raises_update_failed(ha
 
     with pytest.raises(UpdateFailed):
         await coord._async_update_data()
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_null_values_treated_as_zero(hass):
+    """Null entries from open-meteo must not fail the whole update.
+
+    Open-meteo occasionally returns null for individual hours (typically at
+    the forecast edge). Those entries become 0.0; the rest of the forecast
+    stays usable.
+    """
+    response_data = _make_weather_response(
+        radiation=[100.0, None] + [float(100 + i) for i in range(46)],
+        dni=[50.0, None] + [float(50 + i) for i in range(46)],
+        diffuse=[20.0, None] + [float(20 + i) for i in range(46)],
+        wind=[3.0, None] + [3.0] * 46,
+        temperature=[15.0, None] + [15.0] * 46,
+    )
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value=response_data)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_weather.async_get_clientsession",
+            return_value=mock_session,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_weather.dt_util.utcnow",
+            return_value=datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc),
+        ),
+    ):
+        coord = WeatherDataCoordinator(hass)
+        result = await coord._async_update_data()
+
+    assert result["radiation_forecast"][0] == pytest.approx(100.0)
+    assert result["radiation_forecast"][1] == pytest.approx(0.0)
+    assert result["dni_forecast"][1] == pytest.approx(0.0)
+    assert result["diffuse_forecast"][1] == pytest.approx(0.0)
+    assert result["wind_speed_forecast"][1] == pytest.approx(0.0)
+    assert result["temperature_forecast"][1] == pytest.approx(0.0)

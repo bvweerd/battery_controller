@@ -96,30 +96,35 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 start_idx = i
                 break
 
-        # Extract next 48 hours
+        # Extract next 48 hours. Open-meteo occasionally returns null for
+        # individual hours (typically at the forecast edge); treat those as
+        # 0.0 instead of failing the whole update.
+        def _to_float(value: Any) -> float:
+            return float(value) if value is not None else 0.0
+
         try:
             radiation_forecast = [
-                float(v) for v in radiation[start_idx : start_idx + 48]
+                _to_float(v) for v in radiation[start_idx : start_idx + 48]
             ]
             n = len(radiation_forecast)
             dni_forecast = (
-                [float(v) for v in dni[start_idx : start_idx + 48]]
+                [_to_float(v) for v in dni[start_idx : start_idx + 48]]
                 if dni
                 else [0.0] * n
             )
             diffuse_forecast = (
-                [float(v) for v in diffuse[start_idx : start_idx + 48]]
+                [_to_float(v) for v in diffuse[start_idx : start_idx + 48]]
                 if diffuse
                 else [0.0] * n
             )
             wind_speed_forecast = (
-                [float(v) for v in wind_speed[start_idx : start_idx + 48]]
+                [_to_float(v) for v in wind_speed[start_idx : start_idx + 48]]
                 if wind_speed
                 else [0.0] * n
             )
             temperature = hourly.get("temperature_2m", [])
             temperature_forecast = (
-                [float(v) for v in temperature[start_idx : start_idx + 48]]
+                [_to_float(v) for v in temperature[start_idx : start_idx + 48]]
                 if temperature
                 else []
             )
