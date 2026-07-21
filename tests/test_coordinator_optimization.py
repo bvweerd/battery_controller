@@ -3479,6 +3479,55 @@ def test_discharge_calibration_samples_when_plan_executed(hass):
     assert coord._discharge_eff_correction == pytest.approx(0.8)
 
 
+def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
+    """No sample when the planned step crosses the low-SoC derating threshold.
+
+    The BMS throttles discharge power mid-step once the threshold is reached,
+    so actual < planned reflects derating, not efficiency. Sampling it would
+    corrupt the persisted calibration (mirror of the high-SoC charge guard).
+    """
+    coord = _make_coordinator(hass)
+    coord.battery_config.low_soc_discharge_threshold_pct = 50.0
+    coord.battery_config.low_soc_max_discharge_kw = 0.5
+
+    # capacity 10 kWh → threshold at 5.0 kWh; plan 6.0 → 4.0 crosses it
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    _mark_plan_executed(coord)
+
+    battery_state = BatteryState(
+        soc_kwh=5.2, soc_percent=52.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 0
+    assert coord._discharge_eff_correction == pytest.approx(1.0)
+
+
+def test_discharge_calibration_samples_above_low_soc_derating(hass):
+    """Sampling continues when derating is configured but the step stays above it."""
+    coord = _make_coordinator(hass)
+    coord.battery_config.low_soc_discharge_threshold_pct = 20.0
+    coord.battery_config.low_soc_max_discharge_kw = 0.5
+
+    # threshold at 2.0 kWh; plan 6.0 → 4.0 stays well above it
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    _mark_plan_executed(coord)
+
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 1
+    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+
+
 # Feed-in interval handling
 # ---------------------------------------------------------------------------
 
