@@ -43,6 +43,7 @@ from .const import (
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
     CONF_PV_DC_COUPLED,
+    CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_DEADBAND_W,
@@ -132,6 +133,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
+        self._apply_dc_pv_config()
 
         # Per-battery state cache (updated by get_current_battery_state)
         self._per_battery_states: dict[str, BatteryState] = {}
@@ -1404,6 +1406,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         ]
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
+        )
+        self._apply_dc_pv_config()
+
+    def _apply_dc_pv_config(self) -> None:
+        """Overlay entry-level DC-PV configuration onto the aggregated battery config.
+
+        DC coupling is configured on the PV-array subentries, not on the battery
+        subentries, so BatteryConfig.from_subentry can never set pv_dc_coupled.
+        Without this overlay the optimizer always sees pv_dc_coupled=False and
+        never models passive DC MPPT charging.
+        """
+        if not self.config.get(CONF_PV_DC_COUPLED):
+            return
+        self.battery_config.pv_dc_coupled = True
+        self.battery_config.pv_dc_peak_power_kwp = float(
+            self.config.get(CONF_PV_DC_PEAK_POWER_KWP, 0.0)
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
