@@ -209,10 +209,14 @@ async def test_async_update_data_no_weather_data(hass):
 
     result = await coord._async_update_data()
 
-    # Should succeed with zero PV forecast
+    # Should succeed with zero PV forecast at 15-min resolution: 48 hours of
+    # fallback radiation minus the steps already elapsed in the current hour.
     assert result is not None
-    assert result["pv_forecast_kw"] == [0.0] * 48
-    assert result["consumption_forecast_kw"] == [0.5] * 48
+    n = len(result["pv_forecast_kw"])
+    assert 48 * 4 - 3 <= n <= 48 * 4
+    assert result["pv_forecast_kw"] == [0.0] * n
+    assert result["consumption_forecast_kw"] == [0.5] * n
+    assert result["forecast_interval_minutes"] == 15
 
 
 @pytest.mark.asyncio
@@ -325,9 +329,9 @@ async def test_async_update_data_time_shifted_forecast(hass):
 
         result = await coord._async_update_data()
 
-    # Forecast was shifted by 2 hours, so 48-2=46 hours remain
+    # Forecast was shifted by 2 hours, so 48-2=46 hours remain (at 15-min steps)
     assert "pv_forecast_kw" in result
-    assert len(result["pv_forecast_kw"]) == 46
+    assert len(result["pv_forecast_kw"]) == 46 * 4
 
 
 @pytest.mark.asyncio
@@ -460,7 +464,8 @@ async def test_async_update_data_missing_weather_creates_issue(hass):
 
         result = await coord._async_update_data()
 
-    assert result["pv_forecast_kw"] == [0.0] * 48
+    assert result["pv_forecast_kw"] == [0.0] * len(result["pv_forecast_kw"])
+    assert len(result["pv_forecast_kw"]) >= 48 * 4 - 3
     mock_create_issue.assert_called_once()
 
 
@@ -689,14 +694,15 @@ async def test_async_update_data_clamps_negative_pv_outputs(hass):
         coord = ForecastCoordinator(hass, weather_coord, _minimal_config(pv_arrays))
         coord.net_load_model = MagicMock()
         coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5, 0.5], None))
+        # 2 weather hours × 4 steps/hour = 8 forecast steps
         coord.pv_ac_models[0].forecast_from_radiation = MagicMock(
-            return_value=[-1.0, 0.2]
+            return_value=[-1.0] + [0.2] * 7
         )
 
         result = await coord._async_update_data()
 
-    assert result["pv_forecast_kw"] == [0.0, 0.2]
-    assert result["per_pv_array_forecasts"]["pv_ac_1"] == [0.0, 0.2]
+    assert result["pv_forecast_kw"] == [0.0] + [0.2] * 7
+    assert result["per_pv_array_forecasts"]["pv_ac_1"] == [0.0] + [0.2] * 7
 
 
 @pytest.mark.asyncio
@@ -740,11 +746,62 @@ async def test_async_update_data_without_subentry_id_omits_per_array_key(hass):
         coord = ForecastCoordinator(hass, weather_coord, _minimal_config(pv_arrays))
         coord.net_load_model = MagicMock()
         coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5, 0.5], None))
+        # 2 weather hours × 4 steps/hour = 8 forecast steps
         coord.pv_ac_models[0].forecast_from_radiation = MagicMock(
-            return_value=[0.1, 0.2]
+            return_value=[0.1] * 4 + [0.2] * 4
         )
 
         result = await coord._async_update_data()
 
-    assert result["pv_forecast_kw"] == [0.1, 0.2]
+    assert result["pv_forecast_kw"] == [0.1] * 4 + [0.2] * 4
     assert result["per_pv_array_forecasts"] == {}
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_quarter_hour_alignment(hass):
+    """Forecast starts at the current quarter and expands hourly data per step."""
+    config = _minimal_config()
+
+    # 10:37 -> forecast must start at 10:30 (2 steps into the hour)
+    now = datetime(2024, 6, 15, 10, 37, 0, tzinfo=timezone.utc)
+    weather_data = {
+        "radiation_forecast": [100.0, 200.0],
+        "dni_forecast": [],
+        "diffuse_forecast": [],
+        "wind_speed_forecast": [3.0, 5.0],
+        "temperature_forecast": [],
+        "forecast_start_utc": datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc),
+    }
+    weather_coord = MagicMock()
+    weather_coord.data = weather_data
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=_make_mock_consumption(),
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.4, 0.8], None))
+
+        result = await coord._async_update_data()
+
+    # 2 weather hours x 4 steps - 2 elapsed steps = 6 steps: 10:30..11:45
+    assert result["forecast_interval_minutes"] == 15
+    assert result["forecast_start_utc"] == datetime(
+        2024, 6, 15, 10, 30, 0, tzinfo=timezone.utc
+    )
+    assert len(result["consumption_forecast_kw"]) == 6
+    # First 2 steps belong to hour 10 (0.4), remaining 4 to hour 11 (0.8)
+    assert result["consumption_forecast_kw"] == [0.4, 0.4, 0.8, 0.8, 0.8, 0.8]
+    # current GHI reflects the current hour's radiation value
+    assert result["current_ghi_wm2"] == 100.0

@@ -153,6 +153,15 @@ DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+
 # Default values - Control mode
 DEFAULT_CONTROL_MODE = "hybrid"
 
+# Base resolution of the PV/consumption forecast pipeline.
+# Weather input (open-meteo) is hourly, but forecasts are emitted at
+# 15-minute steps aligned to quarter-hour boundaries so they map 1:1 onto
+# 15-minute price intervals without the up-to-45-minute misalignment that
+# hourly series had at hour boundaries. Hourly inputs are expanded by
+# repetition (mean-preserving); solar geometry is evaluated per step, so
+# dawn/dusk ramps gain sub-hourly shape even from hourly radiation data.
+FORECAST_INTERVAL_MINUTES = 15
+
 # DP resolution constants
 # 10 Wh SoC states: fine enough that the post-discharge SoC maps accurately
 # (coarse states systematically undervalue concentrating discharge at the
