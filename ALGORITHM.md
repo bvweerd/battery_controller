@@ -478,10 +478,12 @@ Because primary runs fire at period boundaries, step 0 is always (or nearly alwa
 
 ### PV and consumption resampling
 
-PV production and household consumption forecasts are always computed at 60-minute resolution (the open-meteo weather API delivers hourly data). When the price interval is finer, these are resampled to match:
+PV production and household consumption forecasts are emitted by the forecast coordinator at `FORECAST_INTERVAL_MINUTES` (15-minute) resolution, aligned to quarter-hour boundaries starting at the current step. The weather input (open-meteo) is hourly; hourly series are expanded to 15-minute steps by repetition (mean-preserving), while the solar-geometry model is evaluated per 15-minute timestamp, so dawn/dusk ramps gain sub-hourly shape even from hourly radiation data. Consumption comes from hourly pattern buckets and is expanded by repetition too.
 
-- `resample_forecast(pv_forecast_kw, 60, price_interval)` — weighted-average downsampling
-- Each 15-min slot within an hour gets the same kW value as the parent hour
+The optimization coordinator resamples from the pipeline's native interval (published as `forecast_interval_minutes` in the coordinator data; 60 is assumed for data from older versions) to the price interval:
+
+- `resample_forecast(pv_forecast_kw, forecast_interval_minutes, price_interval)` — repetition when upsampling, weighted-average when downsampling
+- Because the forecast series starts at the current quarter-hour (not the current hour), step k of the forecast aligns with price period k for 15-minute price intervals — previously hourly-based series could be misaligned by up to 45 minutes at hour boundaries
 
 ### Past-entry exclusion for timestamp-bearing sensors
 

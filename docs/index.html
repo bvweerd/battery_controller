@@ -520,6 +520,30 @@ function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels, priceM
   });
 }
 
+// Convert a forecast series between step intervals (minutes): repeat when
+// upsampling, average when downsampling. Mirrors helpers.resample_forecast.
+// Forecast-coordinator arrays are emitted at fc.forecast_interval_minutes
+// (15 for current integration versions, hourly in older diagnostics) and
+// must be converted to the schedule's step interval before charting.
+function resampleSeries(data, fromMin, toMin) {
+  if (!data || !data.length || !fromMin || !toMin || fromMin === toMin) return data || [];
+  if (fromMin % toMin === 0) {
+    const f = fromMin / toMin, out = [];
+    for (const v of data) for (let i = 0; i < f; i++) out.push(v);
+    return out;
+  }
+  if (toMin % fromMin === 0) {
+    const f = toMin / fromMin, out = [];
+    for (let i = 0; i + f <= data.length; i += f) {
+      let s = 0;
+      for (let j = 0; j < f; j++) s += data[i + j];
+      out.push(s / f);
+    }
+    return out;
+  }
+  return data;
+}
+
 function chartPv(id, pvFc, consumFc, pvDcFc, labels) {
   const net = pvFc.map((v,i) => v - (consumFc[i]||0));
   const datasets = [
@@ -835,9 +859,8 @@ function renderDiagnostics(raw) {
   // ── Charts
   const prices    = sched.price_forecast || [];
   const feedInFc  = sched.feed_in_price_forecast || null; // new field; null = use buy price
-  const pvFc      = sched.pv_forecast_kw || sched.pv_forecast || fc.pv_forecast_kw || [];
-  const consumFc  = sched.consumption_forecast_kw || sched.consumption_forecast || fc.consumption_forecast_kw || [];
-  const pvDcFc    = fc.pv_dc_forecast_kw || [];
+  const pvFcSched     = sched.pv_forecast_kw || sched.pv_forecast || [];
+  const consumFcSched = sched.consumption_forecast_kw || sched.consumption_forecast || [];
   const powerKw   = sched.power_schedule_kw || [];
   const modes     = sched.mode_schedule    || [];
   const socKwh    = sched.soc_schedule_kwh || [];
@@ -860,6 +883,18 @@ function renderDiagnostics(raw) {
   const labels   = resolvedStepTimes.length > 0
     ? resolvedStepTimes.map(t => t.includes('T') ? t.slice(5,16).replace('T',' ') : t)
     : timeLabels(prices.length, startIso, stepH);
+
+  // Forecast-coordinator series come at fc.forecast_interval_minutes (15 min
+  // for current versions, hourly in older diagnostics); convert them to the
+  // schedule's step interval so they index 1:1 with the chart labels.
+  const fcIntervalMin = fc.forecast_interval_minutes || 60;
+  const chartStepMin  = sched.price_interval
+    || Math.round((resolvedStepDurs[1] || resolvedStepDurs[0] || 0.25) * 60);
+  const pvFc     = pvFcSched.length     ? pvFcSched
+    : resampleSeries(fc.pv_forecast_kw || [], fcIntervalMin, chartStepMin);
+  const consumFc = consumFcSched.length ? consumFcSched
+    : resampleSeries(fc.consumption_forecast_kw || [], fcIntervalMin, chartStepMin);
+  const pvDcFc   = resampleSeries(fc.pv_dc_forecast_kw || [], fcIntervalMin, chartStepMin);
 
   if (powerKw.length > 0) chartSchedule('chart-schedule', powerKw, modes, socKwh, labels);
   if (prices.length   > 0) {
@@ -1158,8 +1193,11 @@ function prefillSim(d) {
       if (prices.length && pvFc.length && consumFc.length) break;
     }
   }
-  if (!pvFc.length)     pvFc     = fc.pv_forecast_kw  || [];
-  if (!consumFc.length) consumFc = fc.consumption_forecast_kw || [];
+  // Forecast-coordinator fallbacks are at fc.forecast_interval_minutes
+  // (15 min for current versions); convert to the simulator step interval.
+  const fcIntMin = fc.forecast_interval_minutes || 60;
+  if (!pvFc.length)     pvFc     = resampleSeries(fc.pv_forecast_kw || [], fcIntMin, Math.round(stepH * 60));
+  if (!consumFc.length) consumFc = resampleSeries(fc.consumption_forecast_kw || [], fcIntMin, Math.round(stepH * 60));
 
   const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
   const feedInFcSim = sched.feed_in_price_forecast || null;
