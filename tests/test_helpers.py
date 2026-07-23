@@ -1,7 +1,7 @@
 """Tests for helpers.py."""
 
 import pytest
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from custom_components.battery_controller.helpers import (
@@ -10,6 +10,7 @@ from custom_components.battery_controller.helpers import (
     resample_forecast,
     calculate_pv_forecast,
     calculate_consumption_pattern,
+    extract_pv_forecast_series,
     extract_price_forecast_with_interval,
     extract_price_forecast_with_timestamps,
 )
@@ -1248,3 +1249,125 @@ class TestDstSafeSkipIndex:
         now_local = datetime(2026, 6, 10, 15, 47, tzinfo=tz)
         assert _skip_index_since_local_midnight(now_local, 60) == 15
         assert _skip_index_since_local_midnight(now_local, 15) == 63
+
+
+class TestExtractPvForecastSeries:
+    """Tests for extract_pv_forecast_series (Solcast-style sensors)."""
+
+    def _make_state(self, attributes=None, state_value="12.5"):
+        state = MagicMock()
+        state.state = state_value
+        state.attributes = attributes or {}
+        return state
+
+    def test_solcast_30min_entries_preserved(self):
+        base = datetime(2024, 6, 15, 10, 0, tzinfo=timezone.utc)
+        state = self._make_state(
+            {
+                "detailedForecast": [
+                    {"period_start": base, "pv_estimate": 1.0},
+                    {
+                        "period_start": base + timedelta(minutes=30),
+                        "pv_estimate": 2.0,
+                    },
+                    {"period_start": base + timedelta(hours=1), "pv_estimate": 3.0},
+                ]
+            }
+        )
+        result = extract_pv_forecast_series([state])
+        assert result == [
+            (base, 1.0),
+            (base + timedelta(minutes=30), 2.0),
+            (base + timedelta(hours=1), 3.0),
+        ]
+
+    def test_solcast_iso_string_timestamps(self):
+        state = self._make_state(
+            {
+                "detailedForecast": [
+                    {
+                        "period_start": "2024-06-15T10:30:00+00:00",
+                        "pv_estimate": 2.5,
+                    },
+                ]
+            }
+        )
+        result = extract_pv_forecast_series([state])
+        expected_ts = datetime(2024, 6, 15, 10, 30, tzinfo=timezone.utc)
+        assert result == [(expected_ts, 2.5)]
+
+    def test_today_and_tomorrow_sensors_combined_sorted(self):
+        today_ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        tomorrow_ts = today_ts + timedelta(days=1)
+        # Pass tomorrow first: output must still be sorted by time
+        tomorrow = self._make_state(
+            {"detailedForecast": [{"period_start": tomorrow_ts, "pv_estimate": 4.0}]}
+        )
+        today = self._make_state(
+            {"detailedForecast": [{"period_start": today_ts, "pv_estimate": 3.0}]}
+        )
+        result = extract_pv_forecast_series([tomorrow, today])
+        assert result == [(today_ts, 3.0), (tomorrow_ts, 4.0)]
+
+    def test_duplicate_timestamps_averaged(self):
+        ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        state = self._make_state(
+            {
+                "detailedForecast": [{"period_start": ts, "pv_estimate": 2.0}],
+                "detailedHourly": [{"period_start": ts, "pv_estimate": 4.0}],
+            }
+        )
+        result = extract_pv_forecast_series([state])
+        assert result == [(ts, pytest.approx(3.0))]
+
+    def test_unavailable_state_skipped(self):
+        ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        state = self._make_state(
+            {"detailedForecast": [{"period_start": ts, "pv_estimate": 3.0}]},
+            state_value="unavailable",
+        )
+        assert extract_pv_forecast_series([state]) == []
+
+    def test_generic_forecast_attribute_with_watts(self):
+        ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        state = self._make_state({"forecast": [{"datetime": ts, "watts": 1500}]})
+        result = extract_pv_forecast_series([state])
+        assert result == [(ts, pytest.approx(1.5))]
+
+    def test_forecast_solar_watts_dict(self):
+        state = self._make_state(
+            {
+                "watts": {
+                    "2024-06-15T12:00:00+00:00": 2000,
+                    "2024-06-15T13:00:00+00:00": 1000,
+                }
+            }
+        )
+        result = extract_pv_forecast_series([state])
+        assert result == [
+            (datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc), pytest.approx(2.0)),
+            (datetime(2024, 6, 15, 13, 0, tzinfo=timezone.utc), pytest.approx(1.0)),
+        ]
+
+    def test_negative_values_clamped_to_zero(self):
+        ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        state = self._make_state(
+            {"detailedForecast": [{"period_start": ts, "pv_estimate": -0.5}]}
+        )
+        assert extract_pv_forecast_series([state]) == [(ts, 0.0)]
+
+    def test_garbage_entries_ignored(self):
+        state = self._make_state(
+            {
+                "detailedForecast": [
+                    "not a dict",
+                    {"period_start": "not-a-date", "pv_estimate": 1.0},
+                    {"pv_estimate": 1.0},
+                    {"period_start": "2024-06-15T12:00:00+00:00"},
+                ]
+            }
+        )
+        assert extract_pv_forecast_series([state]) == []
+
+    def test_no_states_returns_empty(self):
+        assert extract_pv_forecast_series([]) == []

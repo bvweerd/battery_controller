@@ -39,6 +39,7 @@ from .const import (
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
     CONF_PV_DC_EFFICIENCY,
+    CONF_PV_FORECAST_SENSORS,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_MAX_GRID_POWER_KW,
     CONF_ZERO_GRID_DEADBAND_W,
@@ -254,6 +255,10 @@ def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Sch
                 default=d.get("dc_coupled", False),
                 description={"suggested_value": d.get("dc_coupled")},
             ): bool,
+            vol.Optional(
+                CONF_PV_FORECAST_SENSORS,
+                description={"suggested_value": d.get(CONF_PV_FORECAST_SENSORS)},
+            ): selector({"entity": {"domain": "sensor", "multiple": True}}),
         }
     )
 
@@ -519,6 +524,8 @@ def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
             "dc_coupled": bool(validated.get("dc_coupled", False)),
         }
     )
+    if validated.get(CONF_PV_FORECAST_SENSORS):
+        result[CONF_PV_FORECAST_SENSORS] = list(validated[CONF_PV_FORECAST_SENSORS])
     return result
 
 
