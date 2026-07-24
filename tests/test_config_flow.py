@@ -994,6 +994,43 @@ def test_validate_pv_subentry_whitespace_name_is_dropped():
     assert "name" not in result
 
 
+def test_validate_pv_subentry_with_forecast_sensors():
+    """_validate_pv_subentry stores pv_forecast_sensors when provided."""
+    from custom_components.battery_controller.config_flow import _validate_pv_subentry
+
+    data = {
+        "peak_power_kwp": 4.0,
+        "orientation": 180.0,
+        "tilt": 35.0,
+        "efficiency_factor": 0.85,
+        "dc_coupled": False,
+        "pv_forecast_sensors": [
+            "sensor.solcast_pv_forecast_forecast_today",
+            "sensor.solcast_pv_forecast_forecast_tomorrow",
+        ],
+    }
+    result = _validate_pv_subentry(data)
+    assert result["pv_forecast_sensors"] == [
+        "sensor.solcast_pv_forecast_forecast_today",
+        "sensor.solcast_pv_forecast_forecast_tomorrow",
+    ]
+
+
+def test_validate_pv_subentry_without_forecast_sensors():
+    """pv_forecast_sensors is omitted when not provided."""
+    from custom_components.battery_controller.config_flow import _validate_pv_subentry
+
+    data = {
+        "peak_power_kwp": 4.0,
+        "orientation": 180.0,
+        "tilt": 35.0,
+        "efficiency_factor": 0.85,
+        "dc_coupled": False,
+    }
+    result = _validate_pv_subentry(data)
+    assert "pv_forecast_sensors" not in result
+
+
 # ---------------------------------------------------------------------------
 # Options flow — missing_required error path (line 569)
 # ---------------------------------------------------------------------------
