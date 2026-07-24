@@ -1371,3 +1371,22 @@ class TestExtractPvForecastSeries:
 
     def test_no_states_returns_empty(self):
         assert extract_pv_forecast_series([]) == []
+
+    def test_volcast_power_kw_and_power_w_keys(self):
+        ts = datetime(2024, 6, 15, 12, 0, tzinfo=timezone.utc)
+        state = self._make_state(
+            {
+                "detailedHourly": [{"period_start": ts, "power_kw": 3.5}],
+                "detailedForecast": [
+                    {
+                        "period_start": ts + timedelta(hours=1),
+                        "power_w": 1500,
+                    }
+                ],
+            }
+        )
+        result = extract_pv_forecast_series([state])
+        assert result == [
+            (ts, pytest.approx(3.5)),
+            (ts + timedelta(hours=1), pytest.approx(1.5)),
+        ]

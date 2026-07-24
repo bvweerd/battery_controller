@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -176,12 +176,14 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         Reads the forecast series from the configured sensors (e.g. the
         Solcast integration's today/tomorrow sensors) at the source's native
-        resolution. Each forecast step takes the value of the sensor period
-        covering it — a period runs until the next entry's start, capped at
-        one hour — so 30-minute Solcast data maps directly onto two 15-minute
-        steps without averaging. Steps outside the sensor horizon keep the
-        internal model forecast. When the sensors yield no usable data at
-        all, the internal model forecast is returned unchanged.
+        resolution. Sources finer than the forecast step (e.g. Volcast's
+        5-minute data) are averaged within each step; coarser sources (30- or
+        60-minute periods) map each step onto the sensor period covering it —
+        a period runs until the next entry's start, capped at one hour — so
+        30-minute Solcast data lands on two 15-minute steps without loss.
+        Steps outside the sensor horizon keep the internal model forecast.
+        When the sensors yield no usable data at all, the internal model
+        forecast is returned unchanged.
         """
         if not forecast_sensors:
             return model_forecast
@@ -196,21 +198,36 @@ class ForecastCoordinator(DataUpdateCoordinator):
             return model_forecast
         starts = [entry_ts for entry_ts, _ in series]
         max_period = timedelta(hours=1)
+        step_delta = (
+            timestamps_utc[1] - timestamps_utc[0]
+            if len(timestamps_utc) > 1
+            else timedelta(minutes=FORECAST_INTERVAL_MINUTES)
+        )
         result: list[float] = []
         overridden = 0
         for i, ts in enumerate(timestamps_utc):
             value: float | None = None
-            idx = bisect_right(starts, ts) - 1
-            if idx >= 0:
-                period_start = starts[idx]
-                period_end = (
-                    starts[idx + 1]
-                    if idx + 1 < len(starts)
-                    else period_start + max_period
-                )
-                period_end = min(period_end, period_start + max_period)
-                if ts < period_end:
-                    value = series[idx][1]
+            # Sub-step source: average all entries starting within this step
+            lo = bisect_left(starts, ts)
+            hi = bisect_left(starts, ts + step_delta)
+            if hi - lo > 1:
+                value = sum(v for _, v in series[lo:hi]) / (hi - lo)
+            else:
+                # Step-or-coarser source: value of the period covering ts
+                idx = bisect_right(starts, ts) - 1
+                if idx >= 0:
+                    period_start = starts[idx]
+                    if idx + 1 < len(starts):
+                        period_end = starts[idx + 1]
+                    elif idx > 0:
+                        # Last entry: assume the same length as the previous
+                        # period so fine-grained sources don't extend an hour
+                        period_end = period_start + (starts[idx] - starts[idx - 1])
+                    else:
+                        period_end = period_start + max_period
+                    period_end = min(period_end, period_start + max_period)
+                    if ts < period_end:
+                        value = series[idx][1]
             if value is None:
                 value = model_forecast[i] if i < len(model_forecast) else 0.0
             else:
