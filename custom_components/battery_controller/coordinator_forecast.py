@@ -17,6 +17,7 @@ from .const import (
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
     DOMAIN,
+    FORECAST_INTERVAL_MINUTES,
     WEATHER_STALE_AFTER_MINUTES,
 )
 from .coordinator_weather import WeatherDataCoordinator
@@ -239,29 +240,65 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     hours_elapsed,
                 )
 
-        # Build UTC timestamps for each forecast hour (needed for solar geometry)
+        # Emit all forecasts at FORECAST_INTERVAL_MINUTES resolution, aligned
+        # to the current step boundary (quarter hour). Hourly weather series
+        # are expanded by repetition — mean-preserving, unlike interpolation —
+        # while solar geometry is evaluated per step, giving dawn/dusk ramps
+        # sub-hourly shape. Starting at the current step (not the current
+        # hour) keeps step k aligned with price period k for sub-hourly
+        # price intervals.
+        step_min = FORECAST_INTERVAL_MINUTES
+        steps_per_hour = 60 // step_min
+        now_utc = dt_util.utcnow()
+        current_step = now_utc.replace(
+            minute=(now_utc.minute // step_min) * step_min, second=0, microsecond=0
+        )
+        offset_steps = int(
+            (current_step - current_hour).total_seconds() // (step_min * 60)
+        )
+        n_hours = len(radiation_forecast)
+        n = max(0, n_hours * steps_per_hour - offset_steps)
+
+        # Build UTC timestamps for each forecast step (needed for solar geometry)
         lat = self.hass.config.latitude
         lon = self.hass.config.longitude
         timestamps_utc = [
-            current_hour + timedelta(hours=i) for i in range(len(radiation_forecast))
+            current_step + timedelta(minutes=step_min * k) for k in range(n)
         ]
 
-        # Consumption forecast via net_load_model (dummy PV so result = pure consumption)
-        _, consumption_forecast, _ = self.net_load_model.forecast(radiation_forecast)
-        n = len(consumption_forecast)
+        def _expand(hourly: list[float]) -> list[float]:
+            """Expand an hourly series (index 0 = current hour) to step values."""
+            if not hourly:
+                return []
+            out: list[float] = []
+            for ts in timestamps_utc:
+                idx = int((ts - current_hour).total_seconds() // 3600)
+                out.append(hourly[idx] if 0 <= idx < len(hourly) else 0.0)
+            return out
+
+        radiation_steps = _expand(radiation_forecast)
+        dni_steps = _expand(dni_forecast)
+        diffuse_steps = _expand(diffuse_forecast)
+        wind_speed_steps = _expand(wind_speed_forecast)
+        temperature_steps = _expand(temperature_forecast)
+
+        # Consumption forecast via net_load_model (dummy PV so result = pure
+        # consumption); the model works in hourly buckets, expanded to steps.
+        _, consumption_hourly, _ = self.net_load_model.forecast(radiation_forecast)
+        consumption_forecast = _expand(consumption_hourly)
 
         # Temperature forecast for PV derating (P2.2): pass if available
-        temp_for_pv = temperature_forecast if temperature_forecast else None
+        temp_for_pv = temperature_steps if temperature_steps else None
 
-        poa_dni: list[float] | None = dni_forecast or None
-        poa_diffuse: list[float] | None = diffuse_forecast or None
+        poa_dni: list[float] | None = dni_steps or None
+        poa_diffuse: list[float] | None = diffuse_steps or None
 
         # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
         per_pv_array_forecasts: dict[str, list[float]] = {}
         for sid, model in zip(self.pv_ac_subentry_ids, self.pv_ac_models):
             extra = model.forecast_from_radiation(
-                radiation_forecast,
+                radiation_steps,
                 temp_for_pv,
                 dni_forecast=poa_dni,
                 diffuse_forecast=poa_diffuse,
@@ -285,7 +322,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         pv_dc_forecast = [0.0] * n
         for sid, dc_model in zip(self.pv_dc_subentry_ids, self.pv_dc_models):
             extra_dc = dc_model.forecast_from_radiation(
-                radiation_forecast,
+                radiation_steps,
                 temp_for_pv,
                 dni_forecast=poa_dni,
                 diffuse_forecast=poa_diffuse,
@@ -302,7 +339,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Clamp DC PV values as well
         pv_dc_forecast = [max(0.0, v) for v in pv_dc_forecast]
 
-        # Derive current values from forecast (first element = current hour)
+        # Derive current values from forecast (first element = current step)
         current_pv = pv_forecast[0] if pv_forecast else 0.0
         current_dc_pv = pv_dc_forecast[0] if pv_dc_forecast else 0.0
         current_consumption = self.consumption_model.get_current_consumption()
@@ -317,13 +354,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
             "current_dc_pv_kw": round(current_dc_pv, 3),
             "current_consumption_kw": round(current_consumption, 3),
             "current_net_load_kw": round(current_consumption - current_pv, 3),
-            "current_ghi_wm2": round(radiation_forecast[0], 1)
-            if radiation_forecast
-            else 0.0,
-            "current_wind_speed_ms": round(wind_speed_forecast[0], 1)
-            if wind_speed_forecast
+            "current_ghi_wm2": round(radiation_steps[0], 1) if radiation_steps else 0.0,
+            "current_wind_speed_ms": round(wind_speed_steps[0], 1)
+            if wind_speed_steps
             else 0.0,
             "pv_dc_coupled": has_dc,
+            "forecast_interval_minutes": step_min,
+            "forecast_start_utc": current_step,
             "timestamp": dt_util.utcnow(),
         }
 
