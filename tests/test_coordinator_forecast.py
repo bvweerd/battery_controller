@@ -917,11 +917,11 @@ async def test_async_update_data_uses_solcast_sensor_forecast(hass):
     assert result["pv_forecast_kw"][1] == pytest.approx(2.0)  # 10:15
     assert result["pv_forecast_kw"][2] == pytest.approx(3.0)  # 10:30
     assert result["pv_forecast_kw"][3] == pytest.approx(3.0)  # 10:45
-    # Last entry (11:00) covers at most one hour: 11:00-11:45
+    # Last entry (11:00) covers one 30-min period (same as previous spacing)
     assert result["pv_forecast_kw"][4] == pytest.approx(1.0)  # 11:00
-    assert result["pv_forecast_kw"][7] == pytest.approx(1.0)  # 11:45
-    # 12:00+: not covered by sensor -> internal model (500 W/m2 -> > 0 kW)
-    assert result["pv_forecast_kw"][8] > 0.0
+    assert result["pv_forecast_kw"][5] == pytest.approx(1.0)  # 11:15
+    # 11:30+: past the sensor horizon -> internal model (500 W/m2 -> > 0 kW)
+    assert result["pv_forecast_kw"][6] > 0.0
     assert result["per_pv_array_forecasts"]["pv_ac_1"][0] == pytest.approx(2.0)
 
 
@@ -1029,3 +1029,64 @@ async def test_async_update_data_solcast_works_without_weather(hass):
     assert result["pv_forecast_kw"][0] == pytest.approx(2.0)
     assert result["pv_forecast_kw"][3] == pytest.approx(2.0)
     assert result["pv_forecast_kw"][4] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_async_update_data_volcast_5min_data_averaged_per_step(hass):
+    """Sub-step (5-min Volcast) entries are averaged within each 15-min step."""
+    pv_arrays = [
+        {
+            "subentry_id": "pv_ac_1",
+            "peak_power_kwp": 4.0,
+            "dc_coupled": False,
+            "pv_forecast_sensors": ["sensor.volcast_energy_today"],
+        }
+    ]
+    config = _minimal_config(pv_arrays=pv_arrays)
+
+    now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = None
+
+    # Volcast-style 5-min detailedForecast entries with power_w values:
+    # 10:00-10:10 -> 1000/2000/3000 W (mean 2.0 kW for step 0)
+    # 10:15-10:25 -> 4000 W each (mean 4.0 kW for step 1)
+    hass.states.async_set(
+        "sensor.volcast_energy_today",
+        "12.3",
+        {
+            "detailedForecast": [
+                {
+                    "period_start": (now + timedelta(minutes=5 * i)).isoformat(),
+                    "power_w": w,
+                }
+                for i, w in enumerate([1000, 2000, 3000, 4000, 4000, 4000])
+            ]
+        },
+    )
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=_make_mock_consumption(),
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 48, None))
+
+        result = await coord._async_update_data()
+
+    assert result["pv_forecast_kw"][0] == pytest.approx(2.0)
+    assert result["pv_forecast_kw"][1] == pytest.approx(4.0)
+    # Last 5-min entry (10:25) covers 5 minutes: step 10:30 is past the
+    # sensor horizon and falls back to the (zero-radiation) internal model
+    assert result["pv_forecast_kw"][2] == 0.0

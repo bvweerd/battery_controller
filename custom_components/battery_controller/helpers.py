@@ -614,10 +614,13 @@ def extract_pv_forecast_series(states: list[State]) -> list[tuple[datetime, floa
       ``{"period_start": <datetime|ISO string>, "pv_estimate": <kW>}``
       entries at 30-minute or hourly resolution. Pass both the *Forecast
       Today* and *Forecast Tomorrow* sensors to cover the full horizon.
+    - **Volcast** (HACS ``volcast``): ``detailedHourly`` /
+      ``detailedForecast`` attributes with ``period_start`` +
+      ``power_kw`` (hourly) or ``power_w`` (5-minute) entries.
     - **Generic**: a ``forecast`` attribute with the same entry layout;
       timestamp keys ``period_start``/``datetime``/``start``/``time`` and
-      value keys ``pv_estimate``/``pv_power``/``power`` (kW) or
-      ``watts`` (W) are accepted.
+      value keys ``pv_estimate``/``pv_power``/``power``/``power_kw`` (kW)
+      or ``watts``/``power_w`` (W) are accepted.
     - **Forecast.Solar**: a ``watts`` attribute mapping timestamp → W.
 
     The native resolution of the source data is preserved: each entry
@@ -645,13 +648,16 @@ def extract_pv_forecast_series(states: list[State]) -> list[tuple[datetime, floa
         return dt_util.as_utc(ts).replace(second=0, microsecond=0)
 
     def _entry_power_kw(entry: dict[str, Any]) -> float | None:
-        for key in ("pv_estimate", "pv_power", "power"):
+        # kW keys (Solcast pv_estimate, Volcast power_kw, generic)
+        for key in ("pv_estimate", "pv_power", "power", "power_kw"):
             if key in entry:
                 value = _normalize_price_value(entry[key])
                 return value if value is None else max(0.0, value)
-        if "watts" in entry:
-            value = _normalize_price_value(entry["watts"])
-            return value if value is None else max(0.0, value / 1000.0)
+        # W keys (Forecast.Solar watts, Volcast power_w)
+        for key in ("watts", "power_w"):
+            if key in entry:
+                value = _normalize_price_value(entry[key])
+                return value if value is None else max(0.0, value / 1000.0)
         return None
 
     def _add_entries(entries: Any) -> None:
