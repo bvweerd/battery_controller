@@ -10,7 +10,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .const import DEFAULT_PV_ORIENTATION_DEG, DEFAULT_PV_TILT_DEG
-from .helpers import calculate_pv_forecast, calculate_consumption_pattern
+from .helpers import (
+    calculate_consumption_pattern,
+    calculate_pv_forecast,
+    price_unit_scale_from_state,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -533,6 +537,19 @@ class PriceForecastModel:
                     list(price_stats.keys())[:5] if price_stats else "none",
                 )
                 return
+
+            # Recorder statistics are in the sensor's native unit. Sensors
+            # publishing €/MWh (e.g. OMIE) must be scaled to EUR/kWh so the
+            # learned pattern matches the live forecast fed to the optimizer.
+            unit_scale = price_unit_scale_from_state(
+                self.hass.states.get(self.price_sensor_id)
+            )
+            if unit_scale != 1.0:
+                price_hourly = [(dt, p * unit_scale) for dt, p in price_hourly]
+                _LOGGER.debug(
+                    "Price model: scaling recorder prices by %s (sensor unit per MWh)",
+                    unit_scale,
+                )
 
             # Query weather sensor statistics if GHI/wind sensors exist
             # Key: UTC datetime rounded to hour → value for bin lookup
