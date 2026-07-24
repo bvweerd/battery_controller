@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import math
 from collections import deque
@@ -303,6 +304,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._discharge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
             hass, 1, f"battery_controller_{entry_id}_discharge_eff"
         )
+
+        # Dedicated process-pool executor for the DP optimizer, to avoid disturbing HA main process. 
+
+        self._process_pool: concurrent.futures.ProcessPoolExecutor | None = None
 
     @property
     def control_mode(self) -> str:
@@ -1058,6 +1063,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
+        if self._process_pool:
+            self._process_pool.shutdown(wait=False)
+            self._process_pool = None
         await super().async_shutdown()
 
     def _read_battery_state(
@@ -1800,6 +1808,58 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if changed:
             self.hass.async_create_task(self._async_save_discharge_eff_calibration())
 
+    def _get_process_pool(self) -> concurrent.futures.ProcessPoolExecutor | None:
+        """Return (and lazily create) the dedicated process pool for the DP optimizer.
+
+        The pool is a single-worker ProcessPoolExecutor so the CPU-bound DP
+        runs in a completely separate Python interpreter, eliminating GIL
+        contention with the main event loop.
+
+        Uses 'fork' context (not 'spawn') because Home Assistant injects
+        custom_components onto sys.path dynamically — a spawned child would
+        not see it and fail with ModuleNotFoundError. Fork inherits the
+        parent's full interpreter state including sys.path.
+
+        Returns None when the pool cannot be created (e.g. restricted
+        container); callers must fall back to the default thread-pool
+        executor in that case.
+        """
+        if self._process_pool is None:
+            try:
+                import multiprocessing
+                # 'fork' is safe here because the worker only runs pure
+                # arithmetic (optimize_battery_schedule) and communicates
+                # results via a pipe — it never touches parent locks or
+                # shared state.
+                ctx = multiprocessing.get_context("fork")
+                self._process_pool = concurrent.futures.ProcessPoolExecutor(
+                    max_workers=1, mp_context=ctx
+                )
+                _LOGGER.info("Created process-pool executor for DP optimization")
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Could not create process-pool executor (%s); "
+                    "falling back to thread pool (GIL contention may occur)",
+                    exc,
+                )
+                self._process_pool = None
+        return self._process_pool
+
+    def _run_optimization_in_executor(
+        self,
+        *args: Any,
+    ) -> Any:
+        """Run optimize_battery_schedule in the best available executor.
+
+        Prefers the dedicated process pool (no GIL contention). Falls back
+        to the default thread-pool executor when the process pool is not
+        available.
+        """
+        pool = self._get_process_pool()
+        if pool is not None:
+            return self.hass.loop.run_in_executor(pool, *args)
+        return self.hass.async_add_executor_job(*args)
+
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
         # Re-read SoC limits and other hardware parameters from live options
@@ -1998,8 +2058,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # price_forecast is already at native price_interval resolution — no resample needed.
         resampled_prices = price_forecast
 
-        # Extend horizon with historical model if live forecast covers less than 36 hours
-        min_horizon_steps = 36 * 60 // price_interval
+        # Reducing horizon, perhaps as todo should it be an advanced parameter?
+        min_horizon_steps = 24 * 60 // price_interval
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
             hours_already = len(resampled_prices) * price_interval / 60
@@ -2033,6 +2093,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 original_steps,
                 len(resampled_prices),
             )
+
+        # Cap the maximum optimization horizon at 48 hours to bound the DP
+        # runtime. 
+        max_horizon_steps = 48 * 60 // price_interval
+        if len(resampled_prices) > max_horizon_steps:
+            _LOGGER.debug(
+                "Truncating price horizon from %d to %d steps (max 48 h)",
+                len(resampled_prices),
+                max_horizon_steps,
+            )
+            resampled_prices = resampled_prices[:max_horizon_steps]
+            price_start_times = price_start_times[:max_horizon_steps]
 
         # Generate model forecast for price accuracy comparison.
         # Always computed when live prices are used, so users can compare prediction vs actual.
@@ -2251,7 +2323,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             degradation_cost / (2 * usable_kwh) if usable_kwh > 0 else degradation_cost
         )
 
-        result = await self.hass.async_add_executor_job(
+        # Run the DP optimization in the best available executor.
+        # Prefers a dedicated process pool; falls back
+        # to the default thread-pool executor when necessary.
+        result = await self._run_optimization_in_executor(
             optimize_battery_schedule,
             battery_config,
             battery_state.soc_kwh,
