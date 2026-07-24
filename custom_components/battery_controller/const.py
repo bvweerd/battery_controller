@@ -66,6 +66,13 @@ CONF_LOW_SOC_MAX_DISCHARGE_KW = "low_soc_max_discharge_kw"
 PV_SUBENTRY_TYPE = "pv_array"
 BATTERY_SUBENTRY_TYPE = "battery"
 
+# Configuration keys - PV array (subentry): external PV forecast sensors.
+# When set, the PV forecast is read from these sensors (e.g. the Solcast
+# integration's "Forecast Today"/"Forecast Tomorrow" sensors) at their
+# native resolution instead of the internal radiation-based model. The
+# internal model remains the fallback for steps not covered by sensor data.
+CONF_PV_FORECAST_SENSORS = "pv_forecast_sensors"
+
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
 # battery without AC conversion. This is common with hybrid inverters

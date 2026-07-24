@@ -33,7 +33,7 @@ The analyzer runs entirely in your browser. It visualizes the current schedule, 
 This Home Assistant custom integration optimizes your home battery to minimize electricity costs. It uses **dynamic programming** (backward induction) to calculate the optimal charge/discharge schedule based on:
 
 - **Electricity price forecasts** (Nordpool, ENTSO-E, or any price sensor with forecast attributes like the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
-- **PV production forecasts** (from open-meteo.com solar radiation data)
+- **PV production forecasts** (from open-meteo.com solar radiation data, or from a PV forecast integration such as [Solcast](https://github.com/BJReplay/ha-solcast-solar))
 - **Household consumption patterns** (learned from historical energy meter data)
 - **Battery characteristics** (capacity, power limits, round-trip efficiency, degradation)
 - **Historical price model** (fallback and horizon extension when day-ahead prices are not yet published)
@@ -241,6 +241,9 @@ The main configuration covers global sensors and advanced settings, organised in
 | Tilt (°) | 35 | Panel tilt angle from horizontal |
 | Efficiency factor (opt) | 0.85 | Derating for shading, soiling, inverter losses (AC-coupled) |
 | DC-coupled | false | Enable if this array is on the battery inverter's DC bus |
+| PV forecast sensors (opt) | — | Forecast sensors from a PV forecast integration (e.g. Solcast); overrides the internal model for the hours they cover |
+
+**Using Solcast (or another PV forecast integration)**: instead of the built-in radiation-based model, each PV array can read its forecast from external forecast sensors. For the [Solcast integration](https://github.com/BJReplay/ha-solcast-solar), select both the **Forecast Today** and **Forecast Tomorrow** sensors so the full optimization horizon is covered. The integration reads the `detailedForecast` attribute (30-minute `pv_estimate` values in kW) at its native resolution: each 30-minute Solcast period maps directly onto the two 15-minute forecast steps it covers. [Volcast](https://volcast.app/) sensors (`detailedHourly`/`detailedForecast` with `power_kw`/`power_w` values, including its 5-minute data, which is averaged per step), sensors exposing a generic `forecast` attribute (`period_start`/`datetime` + `pv_estimate`/`watts`), and Forecast.Solar-style `watts` mappings also work. Steps not covered by the sensor data — and any update where the sensors are unavailable — automatically fall back to the internal radiation-based model, so geometry (orientation/tilt) and peak power should still be configured.
 
 ---
 
