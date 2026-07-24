@@ -398,6 +398,9 @@ class PVForecastSensor(BatteryForecastSensor):
             return {}
         attrs: dict[str, Any] = {
             "forecast_kw": self.coordinator.data.get("pv_forecast_kw", []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
         }
         dc_forecast = self.coordinator.data.get("pv_dc_forecast_kw", [])
         if dc_forecast and any(v > 0 for v in dc_forecast):
@@ -434,7 +437,12 @@ class ConsumptionForecastSensor(BatteryForecastSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        return {"forecast_kw": self.coordinator.data.get("consumption_forecast_kw", [])}
+        return {
+            "forecast_kw": self.coordinator.data.get("consumption_forecast_kw", []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class NetGridForecastSensor(BatteryForecastSensor):
@@ -461,7 +469,12 @@ class NetGridForecastSensor(BatteryForecastSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        return {"forecast_kw": self.coordinator.data.get("net_load_forecast_kw", [])}
+        return {
+            "forecast_kw": self.coordinator.data.get("net_load_forecast_kw", []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class SolarIrradianceSensor(BatteryForecastSensor):
@@ -801,7 +814,12 @@ class PVArrayForecastSensor(BatteryForecastSensor):
         if self.coordinator.data is None:
             return {}
         forecasts = self.coordinator.data.get("per_pv_array_forecasts", {})
-        return {"forecast_kw": forecasts.get(self._subentry_id, [])}
+        return {
+            "forecast_kw": forecasts.get(self._subentry_id, []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class BatteryControlModeSensor(BatteryControllerSensor):

@@ -2090,12 +2090,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 resampled_feed_in = [fixed_price] * len(resampled_prices)
 
-        # Resample hourly PV / consumption forecasts to the price sensor's native interval
+        # Resample PV / consumption forecasts from the forecast pipeline's
+        # native interval (15 min; 60 for data produced by older versions)
+        # to the price sensor's native interval.
+        fc_interval = int(forecast_data.get("forecast_interval_minutes", 60))
         pv_forecast = resample_forecast(
-            forecast_data.get("pv_forecast_kw", []), 60, price_interval
+            forecast_data.get("pv_forecast_kw", []), fc_interval, price_interval
         )
         consumption_forecast = resample_forecast(
-            forecast_data.get("consumption_forecast_kw", []), 60, price_interval
+            forecast_data.get("consumption_forecast_kw", []),
+            fc_interval,
+            price_interval,
         )
 
         # Horizon = length of price forecast (the binding constraint)
@@ -2106,7 +2111,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if forecast_data.get("pv_dc_coupled"):
             raw_dc = forecast_data.get("pv_dc_forecast_kw", [])
             if raw_dc and any(v > 0 for v in raw_dc):
-                pv_dc_forecast = resample_forecast(raw_dc, 60, price_interval)
+                pv_dc_forecast = resample_forecast(raw_dc, fc_interval, price_interval)
 
         # PV curtailment override: zero out all PV when the switch is active.
         # The optimizer then plans charging from the grid instead of relying on
