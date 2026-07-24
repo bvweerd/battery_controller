@@ -132,6 +132,10 @@ async def async_get_config_entry_diagnostics(
             "per_pv_array_forecasts": _remap_keys(
                 forecast_coord.data.get("per_pv_array_forecasts") or {}, name_map
             ),
+            "forecast_interval_minutes": forecast_coord.data.get(
+                "forecast_interval_minutes", 60
+            ),
+            "forecast_start_utc": str(forecast_coord.data.get("forecast_start_utc")),
             "timestamp": str(forecast_coord.data.get("timestamp")),
         }
         # Include learned consumption pattern

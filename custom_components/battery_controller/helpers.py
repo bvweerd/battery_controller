@@ -699,6 +699,97 @@ def get_sensor_value(
     return safe_float(state.state, default)
 
 
+def extract_pv_forecast_series(states: list[State]) -> list[tuple[datetime, float]]:
+    """Extract a PV power forecast series (kW) from PV forecast sensor states.
+
+    Supports the attribute formats of common PV forecast integrations:
+
+    - **Solcast** (HACS ``solcast_solar``): ``detailedForecast`` /
+      ``detailedHourly`` attributes — lists of
+      ``{"period_start": <datetime|ISO string>, "pv_estimate": <kW>}``
+      entries at 30-minute or hourly resolution. Pass both the *Forecast
+      Today* and *Forecast Tomorrow* sensors to cover the full horizon.
+    - **Volcast** (HACS ``volcast``): ``detailedHourly`` /
+      ``detailedForecast`` attributes with ``period_start`` +
+      ``power_kw`` (hourly) or ``power_w`` (5-minute) entries.
+    - **Generic**: a ``forecast`` attribute with the same entry layout;
+      timestamp keys ``period_start``/``datetime``/``start``/``time`` and
+      value keys ``pv_estimate``/``pv_power``/``power``/``power_kw`` (kW)
+      or ``watts``/``power_w`` (W) are accepted.
+    - **Forecast.Solar**: a ``watts`` attribute mapping timestamp → W.
+
+    The native resolution of the source data is preserved: each entry
+    becomes one point in the series. Entries sharing the same timestamp
+    (e.g. the same hour from both ``detailedForecast`` and
+    ``detailedHourly``) are averaged.
+
+    Returns:
+        List of (period start UTC, mean PV power in kW), sorted by time.
+    """
+    buckets: dict[datetime, list[float]] = {}
+
+    def _parse_ts(raw: Any) -> datetime | None:
+        if isinstance(raw, datetime):
+            ts = raw
+        elif isinstance(raw, str):
+            parsed = dt_util.parse_datetime(raw)
+            if parsed is None:
+                return None
+            ts = parsed
+        else:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt_util.UTC)
+        return dt_util.as_utc(ts).replace(second=0, microsecond=0)
+
+    def _entry_power_kw(entry: dict[str, Any]) -> float | None:
+        # kW keys (Solcast pv_estimate, Volcast power_kw, generic)
+        for key in ("pv_estimate", "pv_power", "power", "power_kw"):
+            if key in entry:
+                value = _normalize_price_value(entry[key])
+                return value if value is None else max(0.0, value)
+        # W keys (Forecast.Solar watts, Volcast power_w)
+        for key in ("watts", "power_w"):
+            if key in entry:
+                value = _normalize_price_value(entry[key])
+                return value if value is None else max(0.0, value / 1000.0)
+        return None
+
+    def _add_entries(entries: Any) -> None:
+        if not isinstance(entries, (list, tuple)):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_ts = (
+                entry.get("period_start")
+                or entry.get("datetime")
+                or entry.get("start")
+                or entry.get("time")
+            )
+            ts = _parse_ts(raw_ts)
+            power_kw = _entry_power_kw(entry)
+            if ts is not None and power_kw is not None:
+                buckets.setdefault(ts, []).append(power_kw)
+
+    for state in states:
+        if state is None or state.state in ("unknown", "unavailable"):
+            continue
+        attrs = state.attributes
+        for attr_key in ("detailedForecast", "detailedHourly", "forecast"):
+            _add_entries(attrs.get(attr_key))
+        # Forecast.Solar style: {"watts": {"<timestamp>": <W>, ...}}
+        watts = attrs.get("watts")
+        if isinstance(watts, dict):
+            for raw_ts, raw_w in watts.items():
+                ts = _parse_ts(raw_ts)
+                value = _normalize_price_value(raw_w)
+                if ts is not None and value is not None:
+                    buckets.setdefault(ts, []).append(max(0.0, value / 1000.0))
+
+    return sorted((ts, sum(vals) / len(vals)) for ts, vals in buckets.items())
+
+
 def _solar_position(
     dt_utc: datetime, latitude: float, longitude: float
 ) -> tuple[float, float]:
