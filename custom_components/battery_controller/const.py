@@ -66,6 +66,13 @@ CONF_LOW_SOC_MAX_DISCHARGE_KW = "low_soc_max_discharge_kw"
 PV_SUBENTRY_TYPE = "pv_array"
 BATTERY_SUBENTRY_TYPE = "battery"
 
+# Configuration keys - PV array (subentry): external PV forecast sensors.
+# When set, the PV forecast is read from these sensors (e.g. the Solcast
+# integration's "Forecast Today"/"Forecast Tomorrow" sensors) at their
+# native resolution instead of the internal radiation-based model. The
+# internal model remains the fallback for steps not covered by sensor data.
+CONF_PV_FORECAST_SENSORS = "pv_forecast_sensors"
+
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
 # battery without AC conversion. This is common with hybrid inverters
@@ -152,6 +159,15 @@ DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+
 
 # Default values - Control mode
 DEFAULT_CONTROL_MODE = "hybrid"
+
+# Base resolution of the PV/consumption forecast pipeline.
+# Weather input (open-meteo) is hourly, but forecasts are emitted at
+# 15-minute steps aligned to quarter-hour boundaries so they map 1:1 onto
+# 15-minute price intervals without the up-to-45-minute misalignment that
+# hourly series had at hour boundaries. Hourly inputs are expanded by
+# repetition (mean-preserving); solar geometry is evaluated per step, so
+# dawn/dusk ramps gain sub-hourly shape even from hourly radiation data.
+FORECAST_INTERVAL_MINUTES = 15
 
 # DP resolution constants
 # 10 Wh SoC states: fine enough that the post-discharge SoC maps accurately

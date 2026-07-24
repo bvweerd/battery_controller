@@ -259,11 +259,13 @@
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1, accounts for shading, wiring, soiling)",
-            "dc_coupled": "DC-coupled (directly on battery inverter)"
+            "dc_coupled": "DC-coupled (directly on battery inverter)",
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
           },
           "data_description": {
             "peak_power_kwp": "Total rated peak power of all panels in this array",
-            "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)"
+            "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)",
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
           }
         },
         "reconfigure": {
@@ -275,7 +277,11 @@
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1)",
-            "dc_coupled": "DC-coupled (directly on battery inverter)"
+            "dc_coupled": "DC-coupled (directly on battery inverter)",
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
           }
         }
       },

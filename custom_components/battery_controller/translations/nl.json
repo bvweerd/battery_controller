@@ -216,7 +216,11 @@
             "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
             "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
             "efficiency_factor": "Systeemrendement (0-1, rekening met schaduw, bedrading, vervuiling)",
-            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)",
+            "pv_forecast_sensors": "PV-voorspellingssensoren (optioneel, bijv. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Voorspellingssensoren van een PV-forecast-integratie zoals Solcast (selecteer zowel de 'Forecast Today' als 'Forecast Tomorrow' sensoren). Indien ingesteld vervangt deze data het interne stralingsmodel voor de periodes die ze dekken; het interne model blijft de terugval."
           }
         },
         "reconfigure": {
@@ -228,7 +232,11 @@
             "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
             "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
             "efficiency_factor": "Systeemrendement (0-1)",
-            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)",
+            "pv_forecast_sensors": "PV-voorspellingssensoren (optioneel, bijv. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Voorspellingssensoren van een PV-forecast-integratie zoals Solcast (selecteer zowel de 'Forecast Today' als 'Forecast Tomorrow' sensoren). Indien ingesteld vervangt deze data het interne stralingsmodel voor de periodes die ze dekken; het interne model blijft de terugval."
           }
         }
       },
