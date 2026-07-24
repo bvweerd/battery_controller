@@ -158,6 +158,16 @@ forecast:
 
 **Dynamic Energy Contract Calculator** — exposes `prices_today` and `prices_tomorrow` as plain lists of floats (one per hour), or a combined `price_forecast` list.
 
+**OMIE (Spain/Portugal)** — the [OMIE integration](https://github.com/luuuis/hass_omie) exposes `today_hours` and `tomorrow_hours` as dicts mapping period-start times to prices in **€/MWh**:
+```yaml
+today_hours:
+  "2026-03-16T00:00:00+00:00": 96.9
+  "2026-03-16T01:00:00+00:00": 85.2
+  ...
+tomorrow_hours: null   # published around 13:30 CET
+```
+Prices are converted to €/kWh automatically (based on the sensor's `unit_of_measurement`), provisional `null` entries are skipped, and the self-learning price model applies the same conversion to historical data. Quarter-hourly OMIE data is detected and used at its native 15-minute interval.
+
 If your sensor's state is the current price but its attributes contain no forecast list, the optimizer will run with a flat price forecast and cannot perform meaningful arbitrage. In that case use a different sensor or add the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator) on top of your existing sensor.
 
 ### Via HACS (Recommended)
