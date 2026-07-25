@@ -1845,7 +1845,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._process_pool = None
         return self._process_pool
 
-    def _run_optimization_in_executor(
+    async def _run_optimization_in_executor(
         self,
         *args: Any,
     ) -> Any:
@@ -1853,12 +1853,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         Prefers the dedicated process pool (no GIL contention). Falls back
         to the default thread-pool executor when the process pool is not
-        available.
+        available or breaks at submit time — worker start-up failures only
+        surface on first use, not at pool construction.
         """
         pool = self._get_process_pool()
         if pool is not None:
-            return self.hass.loop.run_in_executor(pool, *args)
-        return self.hass.async_add_executor_job(*args)
+            try:
+                return await self.hass.loop.run_in_executor(pool, *args)
+            except concurrent.futures.process.BrokenProcessPool as exc:
+                _LOGGER.warning(
+                    "Process-pool executor broke (%s); falling back to the "
+                    "thread pool for this run",
+                    exc,
+                )
+                pool.shutdown(wait=False)
+                self._process_pool = None
+        return await self.hass.async_add_executor_job(*args)
 
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
