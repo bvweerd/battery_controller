@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
+import os
+import subprocess
+import sys
 import math
 from collections import deque
 from datetime import datetime, timedelta
@@ -1824,16 +1828,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         waits for the subprocess to finish while the actual CPU work happens
         in a completely separate interpreter.
 
-        NO PICKLING — all data crossing the process boundary is plain JSON,
-        so the subprocess does not need ``custom_components`` on its import
-        path at startup.  ``PYTHONPATH`` is set in the subprocess environment
-        to guarantee that the worker script can import the optimizer.
+        NO PICKLING — all data crosses the process boundary as plain JSON.
+        The worker runs via ``python -m`` with cwd=config_dir so
+        ``custom_components`` is natively on the worker's sys.path.
         """
-        import json
-        import os
-        import subprocess
-        import sys
-
         # Build the JSON request payload — only Python primitives.
         request = {
             "battery_config": dataclasses.asdict(battery_config),
@@ -1851,28 +1849,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         }
         json_payload = json.dumps(request)
 
-        # Compute the paths needed in the subprocess.
-        _pkg_dir = os.path.dirname(os.path.abspath(__file__))  # …/battery_controller
-        _cc_dir = os.path.dirname(_pkg_dir)  # …/custom_components
-        _parent = os.path.dirname(_cc_dir)  # must be on sys.path
-        _worker_path = os.path.join(_pkg_dir, "_optimizer_worker.py")
-
-        # Inject _parent into PYTHONPATH for the subprocess.
-        env = os.environ.copy()
-        existing = env.get("PYTHONPATH", "")
-        entries = existing.split(os.pathsep) if existing else []
-        if _parent not in entries:
-            entries.insert(0, _parent)
-        env["PYTHONPATH"] = os.pathsep.join(entries)
+        # Run the worker as a module from the HA config directory.
+        # Python sets sys.path[0] = cwd, so custom_components is natively
+        # importable with no PYTHONPATH manipulation, and battery_controller/
+        # is never on sys.path so its files cannot shadow stdlib modules.
+        _config_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         def _run_in_subprocess() -> dict:
             """Launch the worker and return its JSON response dict."""
             proc = subprocess.run(
-                [sys.executable, "-u", _worker_path],
+                [sys.executable, "-m", "custom_components.battery_controller._optimizer_worker"],
                 input=json_payload,
                 capture_output=True,
                 text=True,
-                env=env,
+                cwd=_config_dir,
             )
             if proc.returncode != 0:
                 _LOGGER.error(
