@@ -2068,8 +2068,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # price_forecast is already at native price_interval resolution — no resample needed.
         resampled_prices = price_forecast
 
-        # Reducing horizon, perhaps as todo should it be an advanced parameter?
-        min_horizon_steps = 24 * 60 // price_interval
+        # Extend horizon with historical model if live forecast covers less than 36 hours
+        min_horizon_steps = 36 * 60 // price_interval
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
             hours_already = len(resampled_prices) * price_interval / 60
