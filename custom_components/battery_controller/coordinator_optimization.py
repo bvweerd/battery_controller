@@ -305,8 +305,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             hass, 1, f"battery_controller_{entry_id}_discharge_eff"
         )
 
-        # Dedicated process-pool executor for the DP optimizer, to avoid disturbing HA main process. 
-
+        # Dedicated process-pool executor for the DP optimizer, so the
+        # CPU-bound DP does not contend with the HA event loop.
         self._process_pool: concurrent.futures.ProcessPoolExecutor | None = None
 
     @property
