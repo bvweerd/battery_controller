@@ -2105,7 +2105,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
 
         # Cap the maximum optimization horizon at 48 hours to bound the DP
-        # runtime. 
+        # runtime on long price forecasts (e.g. 15-min prices spanning 2+ days).
         max_horizon_steps = 48 * 60 // price_interval
         if len(resampled_prices) > max_horizon_steps:
             _LOGGER.debug(
