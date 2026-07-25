@@ -1064,7 +1064,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._unsub_realtime()
             self._unsub_realtime = None
         if self._process_pool:
-            self._process_pool.shutdown(wait=False)
+            self._process_pool.shutdown(wait=False, cancel_futures=True)
             self._process_pool = None
         await super().async_shutdown()
 
