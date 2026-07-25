@@ -1815,10 +1815,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         runs in a completely separate Python interpreter, eliminating GIL
         contention with the main event loop.
 
-        Uses 'fork' context (not 'spawn') because Home Assistant injects
-        custom_components onto sys.path dynamically — a spawned child would
-        not see it and fail with ModuleNotFoundError. Fork inherits the
-        parent's full interpreter state including sys.path.
+        Uses the 'spawn' context: forking HA's heavily multi-threaded
+        process can clone locks held by other parent threads (logging,
+        SSL, malloc arenas) and deadlock the child before it reaches
+        user code — Python 3.12+ warns on fork-with-threads. Spawn
+        starts a fresh interpreter instead; multiprocessing passes the
+        parent's sys.path to the child, so the optimizer import
+        resolves there.
 
         Returns None when the pool cannot be created (e.g. restricted
         container); callers must fall back to the default thread-pool
@@ -1827,11 +1830,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._process_pool is None:
             try:
                 import multiprocessing
-                # 'fork' is safe here because the worker only runs pure
-                # arithmetic (optimize_battery_schedule) and communicates
-                # results via a pipe — it never touches parent locks or
-                # shared state.
-                ctx = multiprocessing.get_context("fork")
+
+                ctx = multiprocessing.get_context("spawn")
                 self._process_pool = concurrent.futures.ProcessPoolExecutor(
                     max_workers=1, mp_context=ctx
                 )
