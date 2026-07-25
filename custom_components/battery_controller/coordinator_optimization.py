@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
+import dataclasses
 import logging
 import math
 from collections import deque
@@ -72,7 +72,7 @@ from .helpers import (
     get_sensor_value,
     resample_forecast,
 )
-from .optimizer import optimize_battery_schedule, OptimizationResult
+from .optimizer import OptimizationResult
 from .zero_grid_controller import create_zero_grid_controller
 
 _LOGGER = logging.getLogger(__name__)
@@ -304,10 +304,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._discharge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
             hass, 1, f"battery_controller_{entry_id}_discharge_eff"
         )
-
-        # Dedicated process-pool executor for the DP optimizer, so the
-        # CPU-bound DP does not contend with the HA event loop.
-        self._process_pool: concurrent.futures.ProcessPoolExecutor | None = None
 
     @property
     def control_mode(self) -> str:
@@ -1063,9 +1059,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if self._unsub_realtime:
             self._unsub_realtime()
             self._unsub_realtime = None
-        if self._process_pool:
-            self._process_pool.shutdown(wait=False, cancel_futures=True)
-            self._process_pool = None
         await super().async_shutdown()
 
     def _read_battery_state(
@@ -1808,67 +1801,100 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if changed:
             self.hass.async_create_task(self._async_save_discharge_eff_calibration())
 
-    def _get_process_pool(self) -> concurrent.futures.ProcessPoolExecutor | None:
-        """Return (and lazily create) the dedicated process pool for the DP optimizer.
-
-        The pool is a single-worker ProcessPoolExecutor so the CPU-bound DP
-        runs in a completely separate Python interpreter, eliminating GIL
-        contention with the main event loop.
-
-        Uses the 'spawn' context: forking HA's heavily multi-threaded
-        process can clone locks held by other parent threads (logging,
-        SSL, malloc arenas) and deadlock the child before it reaches
-        user code — Python 3.12+ warns on fork-with-threads. Spawn
-        starts a fresh interpreter instead; multiprocessing passes the
-        parent's sys.path to the child, so the optimizer import
-        resolves there.
-
-        Returns None when the pool cannot be created (e.g. restricted
-        container); callers must fall back to the default thread-pool
-        executor in that case.
-        """
-        if self._process_pool is None:
-            try:
-                import multiprocessing
-
-                ctx = multiprocessing.get_context("spawn")
-                self._process_pool = concurrent.futures.ProcessPoolExecutor(
-                    max_workers=1, mp_context=ctx
-                )
-                _LOGGER.info("Created process-pool executor for DP optimization")
-            except Exception as exc:
-                _LOGGER.warning(
-                    "Could not create process-pool executor (%s); "
-                    "falling back to thread pool (GIL contention may occur)",
-                    exc,
-                )
-                self._process_pool = None
-        return self._process_pool
-
     async def _run_optimization_in_executor(
         self,
-        *args: Any,
-    ) -> Any:
-        """Run optimize_battery_schedule in the best available executor.
+        battery_config: BatteryConfig,
+        current_soc_kwh: float,
+        price_forecast: list[float],
+        feed_in_forecast: list[float] | None,
+        pv_forecast: list[float],
+        consumption_forecast: list[float],
+        step_durations_hours: list[float] | None,
+        degradation_cost_per_kwh: float,
+        min_price_spread: float,
+        pv_dc_forecast: list[float] | None,
+        charge_eff_override: float | None,
+        discharge_eff_override: float | None,
+    ) -> OptimizationResult:
+        """Run the DP optimizer in a subprocess to avoid GIL contention.
 
-        Prefers the dedicated process pool (no GIL contention). Falls back
-        to the default thread-pool executor when the process pool is not
-        available or breaks at submit time — worker start-up failures only
-        surface on first use, not at pool construction.
+        Launches ``_optimizer_worker.py`` as a standalone Python process with
+        JSON over stdin/stdout.  ``subprocess.run`` is offloaded to HA's
+        thread pool so the event loop is never blocked — the thread just
+        waits for the subprocess to finish while the actual CPU work happens
+        in a completely separate interpreter.
+
+        NO PICKLING — all data crossing the process boundary is plain JSON,
+        so the subprocess does not need ``custom_components`` on its import
+        path at startup.  ``PYTHONPATH`` is set in the subprocess environment
+        to guarantee that the worker script can import the optimizer.
         """
-        pool = self._get_process_pool()
-        if pool is not None:
-            try:
-                return await self.hass.loop.run_in_executor(pool, *args)
-            except concurrent.futures.process.BrokenProcessPool as exc:
-                _LOGGER.warning(
-                    "Process-pool executor broke (%s); falling back to the "
-                    "thread pool for this run",
-                    exc,
+        import json
+        import os
+        import subprocess
+        import sys
+
+        # Build the JSON request payload — only Python primitives.
+        request = {
+            "battery_config": dataclasses.asdict(battery_config),
+            "current_soc_kwh": current_soc_kwh,
+            "price_forecast": price_forecast,
+            "feed_in_forecast": feed_in_forecast,
+            "pv_forecast": pv_forecast,
+            "consumption_forecast": consumption_forecast,
+            "step_durations_hours": step_durations_hours,
+            "degradation_cost_per_kwh": degradation_cost_per_kwh,
+            "min_price_spread": min_price_spread,
+            "pv_dc_forecast": pv_dc_forecast,
+            "charge_eff_override": charge_eff_override,
+            "discharge_eff_override": discharge_eff_override,
+        }
+        json_payload = json.dumps(request)
+
+        # Compute the paths needed in the subprocess.
+        _pkg_dir = os.path.dirname(os.path.abspath(__file__))  # …/battery_controller
+        _cc_dir = os.path.dirname(_pkg_dir)  # …/custom_components
+        _parent = os.path.dirname(_cc_dir)  # must be on sys.path
+        _worker_path = os.path.join(_pkg_dir, "_optimizer_worker.py")
+
+        # Inject _parent into PYTHONPATH for the subprocess.
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        entries = existing.split(os.pathsep) if existing else []
+        if _parent not in entries:
+            entries.insert(0, _parent)
+        env["PYTHONPATH"] = os.pathsep.join(entries)
+
+        def _run_in_subprocess() -> dict:
+            """Launch the worker and return its JSON response dict."""
+            proc = subprocess.run(
+                [sys.executable, "-u", _worker_path],
+                input=json_payload,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if proc.returncode != 0:
+                _LOGGER.error(
+                    "Optimizer worker failed (rc=%d): %s",
+                    proc.returncode,
+                    proc.stderr.strip() if proc.stderr else "(no stderr)",
                 )
-                pool.shutdown(wait=False)
-                self._process_pool = None
-        return await self.hass.async_add_executor_job(*args)
+            result: dict = json.loads(proc.stdout)
+            if result.get("error"):
+                tb = result.get("traceback", "unknown error")
+                _LOGGER.error("Optimizer worker error:\n%s", tb)
+                raise RuntimeError(f"Optimizer worker failed: {tb[:200]}")
+            return result
+
+        # Offload subprocess.run to a thread so the event loop is never blocked.
+        # The thread waits on I/O (GIL is released); the CPU work is done in
+        # the subprocess interpreter.
+        result_dict = await self.hass.async_add_executor_job(_run_in_subprocess)
+
+        # Reconstruct OptimizationResult from the plain dict.
+        init_fields = {f.name for f in dataclasses.fields(OptimizationResult) if f.init}
+        return OptimizationResult(**{k: v for k, v in result_dict.items() if k in init_fields})
 
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
@@ -2333,11 +2359,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             degradation_cost / (2 * usable_kwh) if usable_kwh > 0 else degradation_cost
         )
 
-        # Run the DP optimization in the best available executor.
-        # Prefers a dedicated process pool; falls back
-        # to the default thread-pool executor when necessary.
+        # Run the DP optimizer in a subprocess to avoid GIL contention.
         result = await self._run_optimization_in_executor(
-            optimize_battery_schedule,
             battery_config,
             battery_state.soc_kwh,
             resampled_prices,
