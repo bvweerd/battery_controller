@@ -6,6 +6,7 @@
 // ── Constants (mirroring Python const.py) ──────────────────────────
 const SOC_RES_WH             = 10.0;
 const POWER_STEP_W           = 100;
+const MAX_SOC_STATES         = 1000;
 const DC_TO_AC_EFF           = 0.96;
 const MIN_PV_SURPLUS_KW      = 0.05;
 const POWER_IDLE_THRESHOLD_W = 1.0;
@@ -100,7 +101,9 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
   const minStepH  = Math.min(...stepDurations.slice(0, nSteps));
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
-  const socResWh  = SOC_RES_WH;
+  // Coarsen the SoC grid for large batteries so the state count stays
+  // bounded (mirrors optimizer.py).
+  const socResWh  = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
   const alignedStepW = socResWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 

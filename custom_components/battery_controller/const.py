@@ -178,6 +178,18 @@ FORECAST_INTERVAL_MINUTES = 15
 SOC_RESOLUTION_WH = 10.0  # Minimum SoC state size in Wh
 POWER_STEP_W = 100  # Minimum practical power action granularity in W
 
+# Upper bound on the number of discrete SoC states in the DP.
+# At a fixed 10 Wh resolution the state count grows linearly with usable
+# capacity, and DP cost grows with it: a 10 kWh battery needs ~800 states,
+# a 55 kWh battery ~4500, making the solve several times slower purely
+# because the battery is larger. Above this budget the resolution is
+# coarsened so the state count stays bounded.
+# 1000 states means the cap only engages above 10 kWh of usable range —
+# typical home batteries keep the exact 10 Wh resolution and are bit-for-bit
+# unaffected. At the cap the resolution is 0.1% of usable capacity (e.g.
+# 45 Wh on a 45 kWh range), far below SoC sensor accuracy (~1%).
+MAX_SOC_STATES = 1000
+
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96
 

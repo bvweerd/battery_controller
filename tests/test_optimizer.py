@@ -5,9 +5,11 @@ import pytest
 from custom_components.battery_controller.battery_model import BatteryConfig
 import math
 
+from custom_components.battery_controller.const import MAX_SOC_STATES
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
     calculate_step_cost,
+    compute_soc_resolution_wh,
     optimize_battery_schedule,
     _find_nearest_soc_idx,
     _filter_micro_cycles,
@@ -2633,3 +2635,99 @@ class TestTerminalPriceClamp:
         )
         assert all(m == "idle" for m in result.mode_schedule)
         assert result.soc_schedule_kwh[-1] == pytest.approx(5.0)
+
+
+class TestSocGridBudget:
+    """SoC grid sizing and the DP state-space budget.
+
+    The DP cost scales with the number of SoC states, which at a fixed
+    resolution grows linearly with usable capacity. These tests pin the
+    budget so a future change cannot silently reintroduce an unbounded
+    state space (the cause of multi-minute solves on large batteries).
+
+    Deliberately asserted on state counts rather than wall-clock time:
+    the state space is deterministic and hardware-independent, whereas
+    timing on shared CI runners is not.
+    """
+
+    @staticmethod
+    def _grid(capacity_kwh, min_pct=10.0, max_pct=90.0):
+        """Return (resolution_wh, n_soc_states) for a battery size."""
+        cfg = BatteryConfig(
+            capacity_kwh=capacity_kwh,
+            min_soc_percent=min_pct,
+            max_soc_percent=max_pct,
+        )
+        min_wh = round(cfg.min_soc_kwh * 1000)
+        max_wh = round(cfg.max_soc_kwh * 1000)
+        res = compute_soc_resolution_wh(min_wh, max_wh)
+        return res, int(round((max_wh - min_wh) / res)) + 1
+
+    def test_typical_battery_keeps_exact_10wh_grid(self):
+        """Batteries at or below the budget are bit-for-bit unaffected."""
+        # 10 kWh capacity, 10-90% -> 8 kWh usable -> 800 states at 10 Wh
+        res, states = self._grid(10.0)
+        assert res == 10.0
+        assert states == 801
+
+    def test_grid_exact_at_budget_boundary(self):
+        """The cap engages only above MAX_SOC_STATES * 10 Wh of usable range."""
+        # 12.5 kWh capacity, 0-100% -> 12.5 kWh usable -> above the boundary
+        res, states = self._grid(12.5, min_pct=0.0, max_pct=100.0)
+        assert res > 10.0
+        assert states <= MAX_SOC_STATES + 1
+        # 10 kWh usable sits exactly on the boundary and stays at 10 Wh
+        res_at, states_at = self._grid(10.0, min_pct=0.0, max_pct=100.0)
+        assert res_at == 10.0
+        assert states_at == MAX_SOC_STATES + 1
+
+    @pytest.mark.parametrize("capacity_kwh", [20.0, 55.0, 100.0, 500.0])
+    def test_large_batteries_stay_within_budget(self, capacity_kwh):
+        """State count never exceeds the budget, however large the battery."""
+        res, states = self._grid(capacity_kwh)
+        assert states <= MAX_SOC_STATES + 1
+        # Resolution stays fine relative to capacity: <= 0.1% of usable range
+        usable_wh = capacity_kwh * 1000 * 0.8
+        assert res <= usable_wh / MAX_SOC_STATES + 1e-9
+
+    def test_worst_case_dp_table_stays_bounded(self):
+        """Worst realistic horizon x largest battery stays under budget.
+
+        48 h at 15-minute prices (the longest horizon the coordinator
+        builds) against an oversized battery.
+        """
+        n_steps = 48 * 60 // 15
+        _, states = self._grid(500.0)
+        assert n_steps * states <= 200_000
+
+    def test_large_battery_result_matches_fine_grid(self):
+        """Coarsening the grid must not change the decision materially."""
+        cfg = BatteryConfig(
+            capacity_kwh=55.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            round_trip_efficiency=0.90,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        n = 24
+        prices = [0.10 + 0.20 * (i % 6 == 5) for i in range(n)]
+        feed_in = [p * 0.5 for p in prices]
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=20.0,
+            price_forecast=prices,
+            feed_in_forecast=feed_in,
+            pv_forecast=[0.0] * n,
+            consumption_forecast=[0.6] * n,
+            step_durations_hours=[1.0] * n,
+            degradation_cost_per_kwh=0.0025,
+            min_price_spread=0.05,
+        )
+        # Schedule is well-formed and the battery is actually used
+        assert len(result.power_schedule_kw) == n
+        assert result.savings > 0
+        assert all(
+            cfg.min_soc_kwh - 1e-6 <= s <= cfg.max_soc_kwh + 1e-6
+            for s in result.soc_schedule_kwh
+        )

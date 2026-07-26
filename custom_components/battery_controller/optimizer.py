@@ -12,6 +12,7 @@ from .const import (
     ACTION_DISCHARGING,
     ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
+    MAX_SOC_STATES,
     MIN_CYCLE_KWH,
     POWER_IDLE_THRESHOLD_KW,
     POWER_STEP_W,
@@ -19,6 +20,18 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def compute_soc_resolution_wh(min_soc_wh: float, max_soc_wh: float) -> float:
+    """Return the DP SoC grid resolution in Wh for a usable range.
+
+    SOC_RESOLUTION_WH, coarsened only when the range is large enough that the
+    state count would exceed MAX_SOC_STATES. DP cost scales with the state
+    count, so without this a large battery pays a proportionally longer solve
+    purely for being large. Kept as a module-level function so the state-space
+    budget can be asserted directly in tests.
+    """
+    return max(float(SOC_RESOLUTION_WH), (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
 
 
 @dataclass
@@ -477,16 +490,28 @@ def optimize_battery_schedule(
     # Discretize SoC space.
     min_step_hours = min(step_durations_hours[:n_steps])
 
-    # SoC resolution: use the constant directly.
-    # Previously inflated to max(SOC_RESOLUTION_WH, POWER_STEP_W * min_step_hours
-    # * sqrt_rte) to ensure the minimum power action always moved at least one
-    # state.  With hourly prices this inflated to ~87 Wh (only 22 states for a
-    # 2 kWh battery), causing the DP to coarsely map post-discharge SoC and
+    # Round to nearest Wh to avoid floating-point drift (e.g. 2.12 * 0.1 * 1000
+    # = 212.00000000000003).  Without rounding, soc_states[0] may be computed as
+    # 912.0 (losing the tiny fractional part) while min_soc_wh stays at
+    # 212.00000000000003, so the action that would exactly reach min_soc passes
+    # the boundary check (212.0 < 212.00000000000003) and gets skipped.
+    min_soc_wh = round(battery_config.min_soc_kwh * 1000)
+    max_soc_wh = round(battery_config.max_soc_kwh * 1000)
+
+    # SoC resolution: see compute_soc_resolution_wh().  Capping the state count
+    # keeps the resolution at or below 0.1% of usable capacity — well under SoC
+    # sensor accuracy — while leaving batteries up to 10 kWh of usable range on
+    # the exact 10 Wh grid.
+    #
+    # The resolution is deliberately NOT inflated by the power step.  It used to
+    # be max(SOC_RESOLUTION_WH, POWER_STEP_W * min_step_hours * sqrt_rte) to
+    # ensure the minimum power action always moved at least one state; with
+    # hourly prices that inflated to ~87 Wh (only 22 states for a 2 kWh
+    # battery), causing the DP to coarsely map post-discharge SoC and
     # systematically undervalue concentrating discharge at the peak-price hour.
     # The per-action sub-resolution guard (new_soc_idx == s_idx → skip) already
-    # handles steps where a small action cannot cross a state boundary, so the
-    # inflation is unnecessary.
-    soc_resolution_wh = float(SOC_RESOLUTION_WH)
+    # handles steps where a small action cannot cross a state boundary.
+    soc_resolution_wh = compute_soc_resolution_wh(min_soc_wh, max_soc_wh)
 
     # Power step: POWER_STEP_W as minimum practical granularity.  The aligned
     # step (SOC_RES / full_step_hours) ensures the smallest action crosses at
@@ -499,13 +524,6 @@ def optimize_battery_schedule(
     )
     aligned_step_w = soc_resolution_wh / full_step_hours
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
-    # Round to nearest Wh to avoid floating-point drift (e.g. 2.12 * 0.1 * 1000
-    # = 212.00000000000003).  Without rounding, soc_states[0] may be computed as
-    # 912.0 (losing the tiny fractional part) while min_soc_wh stays at
-    # 212.00000000000003, so the action that would exactly reach min_soc passes
-    # the boundary check (212.0 < 212.00000000000003) and gets skipped.
-    min_soc_wh = round(battery_config.min_soc_kwh * 1000)
-    max_soc_wh = round(battery_config.max_soc_kwh * 1000)
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
