@@ -81,6 +81,90 @@ def _skip_index_since_local_midnight(now_local: datetime, interval_minutes: int)
     return int(elapsed_min // interval_minutes)
 
 
+def price_unit_scale_from_state(state: State | None) -> float:
+    """Return the factor converting the sensor's prices to EUR/kWh.
+
+    Based on the sensor's unit_of_measurement: per-MWh units (e.g. the OMIE
+    integration's €/MWh) yield 0.001; per-kWh or unknown units yield 1.0.
+    """
+    if state is None:
+        return 1.0
+    unit = str(state.attributes.get("unit_of_measurement") or "").lower()
+    if "mwh" in unit:
+        return 0.001
+    return 1.0
+
+
+def _extract_hours_dict_forecast(
+    state: State, now: datetime
+) -> tuple[list[float], list[datetime], int] | None:
+    """Extract prices from OMIE-style hour-keyed dict attributes.
+
+    The OMIE integration (hass_omie) exposes ``today_hours`` and
+    ``tomorrow_hours``: dicts mapping period-start datetimes (or ISO strings)
+    to prices in €/MWh. ``tomorrow_hours`` is None before publication and
+    values are None while provisional — both are skipped.
+
+    Prices are converted to EUR/kWh using the sensor's unit_of_measurement;
+    when no unit is available, values with magnitude > 5 are assumed €/MWh
+    (kWh prices never reach that, MWh prices practically always do).
+
+    Returns:
+        (prices_eur_kwh, start_times_utc, interval_minutes), or None when the
+        sensor has no hour-dict attributes with usable data.
+    """
+    entries: dict[datetime, float] = {}
+    found_attr = False
+    for attr_key in ("today_hours", "tomorrow_hours"):
+        hours = state.attributes.get(attr_key)
+        if not isinstance(hours, dict):
+            continue
+        found_attr = True
+        for raw_ts, raw_price in hours.items():
+            price = _normalize_price_value(raw_price)
+            if price is None:
+                continue
+            if isinstance(raw_ts, datetime):
+                ts = raw_ts
+            elif isinstance(raw_ts, str):
+                parsed = dt_util.parse_datetime(raw_ts)
+                if parsed is None:
+                    continue
+                ts = parsed
+            else:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt_util.UTC)
+            entries[dt_util.as_utc(ts)] = price
+
+    if not found_attr or not entries:
+        return None
+
+    sorted_ts = sorted(entries)
+    interval = 60
+    if len(sorted_ts) >= 2:
+        minutes = int((sorted_ts[1] - sorted_ts[0]).total_seconds() / 60)
+        if minutes in (15, 30, 60):
+            interval = minutes
+
+    scale = price_unit_scale_from_state(state)
+    if scale == 1.0 and not state.attributes.get("unit_of_measurement"):
+        if any(abs(v) > 5.0 for v in entries.values()):
+            scale = 0.001
+
+    prices: list[float] = []
+    start_times: list[datetime] = []
+    for ts in sorted_ts:
+        if ts + timedelta(minutes=interval) <= now:
+            continue
+        prices.append(entries[ts] * scale)
+        start_times.append(ts)
+
+    if not prices:
+        return None
+    return prices, start_times, interval
+
+
 def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int]:
     """Extract price forecast and detected interval from a Home Assistant price state.
 
@@ -165,6 +249,12 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         _extend_interval_forecast(raw_tomorrow_list)
         if interval_forecast:
             return interval_forecast, detected_interval
+
+    # Priority 2.5: OMIE-style hour-keyed dicts (today_hours/tomorrow_hours)
+    hours_result = _extract_hours_dict_forecast(state, now)
+    if hours_result is not None:
+        hours_prices, _, hours_interval = hours_result
+        return hours_prices, hours_interval
 
     # Priority 3: forecast_prices (skip elapsed periods when entries carry
     # timestamps; plain value lists are taken as-is)
@@ -379,6 +469,11 @@ def extract_price_forecast_with_timestamps(
                 interval_timestamps, detected_interval, now
             )
             return interval_forecast, filled, detected_interval
+
+    # Priority 2.5: OMIE-style hour-keyed dicts (today_hours/tomorrow_hours)
+    hours_result = _extract_hours_dict_forecast(state, now)
+    if hours_result is not None:
+        return hours_result
 
     # Priority 3: forecast_prices — skip elapsed periods and keep real
     # timestamps when entries carry them; plain value lists are taken as-is

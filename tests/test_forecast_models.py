@@ -1228,3 +1228,56 @@ class TestNetLoadForecastConsumptionPadded:
         # Padded with base_consumption_kw
         assert consumption_fc[2] == pytest.approx(0.5)
         assert consumption_fc[3] == pytest.approx(0.5)
+
+
+class TestPriceForecastModelUnitScaling:
+    """Recorder prices in €/MWh (e.g. OMIE) are scaled to EUR/kWh."""
+
+    _TS = "2024-01-01T10:00:00+00:00"
+
+    async def test_mwh_unit_scales_learned_prices(self):
+        hass = MagicMock()
+        live_state = MagicMock()
+        live_state.attributes = {"unit_of_measurement": "€/MWh"}
+        hass.states.get = MagicMock(return_value=live_state)
+
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.omie_spot_price_pt", entry_id=None
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            return_value={
+                "sensor.omie_spot_price_pt": [{"start": self._TS, "mean": 85.0}]
+            }
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model.has_data() is True
+        assert model._overall_avg == pytest.approx(0.085)
+
+    async def test_kwh_unit_not_scaled(self):
+        hass = MagicMock()
+        live_state = MagicMock()
+        live_state.attributes = {"unit_of_measurement": "EUR/kWh"}
+        hass.states.get = MagicMock(return_value=live_state)
+
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.price", entry_id=None
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            return_value={"sensor.price": [{"start": self._TS, "mean": 0.25}]}
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model._overall_avg == pytest.approx(0.25)
