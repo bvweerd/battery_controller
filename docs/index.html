@@ -545,14 +545,24 @@ function resampleSeries(data, fromMin, toMin) {
 }
 
 function chartPv(id, pvFc, consumFc, pvDcFc, labels) {
-  const net = pvFc.map((v,i) => v - (consumFc[i]||0));
-  const datasets = [
-    { label:'PV AC (kW)',      data:pvFc,   borderColor:'#eab308', backgroundColor:'rgba(234,179,8,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 },
+  const hasDc = pvDcFc && pvDcFc.some(v => v > 0);
+  const hasAc = pvFc.some(v => v > 0);
+  // netPvSeries (analyzer.js) counts DC-coupled PV through the inverter, the
+  // same path the optimizer's baseline uses. Summing only the AC series showed
+  // a DC-coupled system as if it had no solar at all.
+  const net = netPvSeries(pvFc, pvDcFc, consumFc);
+  const datasets = [];
+  // A flat zero "PV AC" band is pure noise when every array is DC-coupled;
+  // keep it when there is no DC series either, so a system without any PV
+  // still renders the zero line for context.
+  if (hasAc || !hasDc)
+    datasets.push({ label:'PV AC (kW)', data:pvFc, borderColor:'#eab308', backgroundColor:'rgba(234,179,8,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 });
+  if (hasDc)
+    datasets.push({ label:'PV DC (kW)', data:pvDcFc, borderColor:'#f97316', backgroundColor:'rgba(249,115,22,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 });
+  datasets.push(
     { label:'Consumption (kW)',data:consumFc,borderColor:'#ef4444', borderWidth:2, pointRadius:0, tension:0.3 },
     { label:'Net (PV−consump)',data:net,    borderColor:'#3b82f6', borderWidth:1.5, pointRadius:0, borderDash:[4,2], tension:0.3 },
-  ];
-  if (pvDcFc && pvDcFc.some(v => v > 0))
-    datasets.push({ label:'PV DC (kW)', data:pvDcFc, borderColor:'#f97316', borderWidth:1.5, pointRadius:0, borderDash:[2,2], tension:0.3 });
+  );
   mkChart(id, {
     type:'line', data:{ labels, datasets },
     options:{ responsive:true, maintainAspectRatio:false,
