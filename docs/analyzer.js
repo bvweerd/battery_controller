@@ -74,6 +74,26 @@ function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
   return gridCost + degradCost;
 }
 
+// Total PV available on the AC side, per step. DC-coupled PV reaches the
+// house through the inverter at DC_TO_AC_EFF — the same path the optimizer's
+// baseline uses. Charts that only summed the AC series showed a DC-coupled
+// system as having no solar at all.
+function totalPvSeries(pvFc, pvDcFc) {
+  const ac = pvFc || [];
+  const dc = pvDcFc || [];
+  const n = Math.max(ac.length, dc.length);
+  const out = [];
+  for (let i = 0; i < n; i++) out.push((ac[i] || 0) + (dc[i] || 0) * DC_TO_AC_EFF);
+  return out;
+}
+
+// Net position per step: total PV minus consumption (positive = surplus).
+function netPvSeries(pvFc, pvDcFc, consumFc) {
+  const total = totalPvSeries(pvFc, pvDcFc);
+  const consum = consumFc || [];
+  return total.map((v, i) => v - (consum[i] || 0));
+}
+
 function findNearestSocIdx(socWh, socStates) {
   if (socStates.length <= 1) return 0;
   const step = socStates[1] - socStates[0];
@@ -841,6 +861,42 @@ function generateTips(d) {
     }
   }
 
+  // 8b. PV forecast volume. Reported explicitly because a DC-coupled system
+  // has pv_forecast_kw all zeros with everything in pv_dc_forecast_kw, which
+  // otherwise looks like "no PV forecast" in the charts.
+  const pvAcFcT  = fc.pv_forecast_kw    || [];
+  const pvDcFcT  = fc.pv_dc_forecast_kw || [];
+  if (pvAcFcT.length || pvDcFcT.length) {
+    const fcStepH = (fc.forecast_interval_minutes || 60) / 60;
+    const sum = arr => arr.reduce((a, b) => a + (b || 0), 0);
+    const acKwh = sum(pvAcFcT) * fcStepH;
+    const dcKwh = sum(pvDcFcT) * fcStepH;
+    const totKwh = acKwh + dcKwh;
+    if (totKwh <= 0.01) {
+      tips.push({ t:'warn', title:'PV forecast is zero over the whole horizon',
+        text:`Neither the AC nor the DC PV forecast contains any production.
+        If you have solar, check that a PV array subentry is configured with the right
+        peak power, orientation and tilt, and that the weather coordinator is reaching
+        open-meteo.com. The optimizer will plan as if there is no solar at all.`});
+    } else if (acKwh <= 0.01) {
+      tips.push({ t:'info', title:`PV forecast: ${dcKwh.toFixed(1)} kWh, all DC-coupled`,
+        text:`All forecast production is on the DC side (<code>pv_dc_forecast_kw</code>);
+        <code>pv_forecast_kw</code> is zero, which is expected when every array is
+        DC-coupled. The "PV AC" series in the chart is flat at zero by design — the
+        orange "PV DC" line carries your production, and the net line accounts for it
+        through the inverter at ${(DC_TO_AC_EFF*100).toFixed(0)}%.`});
+    } else {
+      const dcTxt = dcKwh > 0.01
+        ? ` (${acKwh.toFixed(1)} kWh AC + ${dcKwh.toFixed(1)} kWh DC-coupled)`
+        : '';
+      tips.push({ t:'info', title:`PV forecast: ${totKwh.toFixed(1)} kWh over the horizon`,
+        text:`Total forecast solar production over the planning horizon${dcTxt}.
+        Compare this with what your inverter actually produces on a comparable day —
+        a large mismatch points at the array configuration (peak power, orientation, tilt)
+        rather than at the optimizer.`});
+    }
+  }
+
   // 9. DC-coupled PV
   if (bc.pv_dc_coupled) {
     const dcEff = bc.pv_dc_efficiency || 0;
@@ -925,6 +981,8 @@ if (typeof module !== 'undefined') {
   module.exports = {
     SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
     calculateStepCost,
+    totalPvSeries,
+    netPvSeries,
     findNearestSocIdx,
     runDP,
     forwardPass,
