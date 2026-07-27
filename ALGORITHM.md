@@ -77,12 +77,16 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = SOC_RESOLUTION_WH
+soc_resolution_wh = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
 n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
 soc_states[i] = min_soc_wh + i × soc_resolution_wh
 ```
 
-- **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the only grid constant; the power step is derived from it.
+- **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the base grid constant; the power step is derived from it.
+- **`MAX_SOC_STATES`** (default: 1000) bounds the state count. DP cost scales with `n_steps × n_soc_states × n_actions`, so at a fixed 10 Wh the solve time grows linearly with usable capacity — a 44 kWh usable range needs 4401 states versus 801 for an 8 kWh one, and takes proportionally longer for no added decision quality. Above the budget the resolution is coarsened so the state count stays bounded.
+- The cap engages only above 10 kWh of usable range (`MAX_SOC_STATES × SOC_RESOLUTION_WH`). Typical home batteries keep the exact 10 Wh grid and are unaffected.
+- At the cap the resolution is 0.1% of usable capacity (e.g. 44 Wh on a 44 kWh range), well below SoC sensor accuracy (~1%). Changing the grid does shift which SoC levels are representable, so realized savings move by a few percent in either direction — this is discretization jitter, not a systematic loss, and is inherent to any grid choice.
+- Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
