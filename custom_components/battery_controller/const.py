@@ -218,6 +218,15 @@ STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
 WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
+# Plausibility ceiling for a learned hourly consumption sample, in kW.
+# An hourly statistics "change" equals the average power over that hour, so a
+# household hour above this is a meter artefact (a total_increasing sensor that
+# jumped or was replaced, a unit change, or a spurious reading), not real load:
+# even a 3x80 A connection at full load for a whole hour stays near 55 kW.
+# Such a sample is unbounded in magnitude — observed values reach 10^8 kW — and
+# a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
+MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
+
 SOC_UNCERTAINTY_RESERVE_FRACTION = (
     0.10  # max fraction of capacity reserved for solar forecast uncertainty
 )
