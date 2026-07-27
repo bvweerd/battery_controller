@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -199,34 +199,44 @@ class ConsumptionForecastModel:
 
             # Build per-hour net consumption: sum(consumption) - sum(production)
             # Each stat entry's "change" = kWh in that hour = avg kW
-            hourly_net: dict[str, float] = {}  # key: ISO timestamp -> net kWh
+            hourly_net: dict[datetime, float] = {}  # key: UTC hour -> net kWh
 
-            # Normalise a stat entry to (ts_key, value) regardless of whether
-            # the recorder returns the "start" field as a string or datetime.
-            def _ts_and_value(stat: Any, field: str) -> tuple[str, float] | None:
+            # Normalise a stat entry to (start_dt, value).  The recorder returns
+            # "start" as a Unix timestamp (float) on current Home Assistant
+            # versions, and as a datetime or ISO string on older ones — all
+            # three must be handled.  Keying on the datetime itself avoids a
+            # string round-trip: formatting a float as "1753617600.0" and
+            # parsing it back yields None, which silently dropped every bucket
+            # and left the learned pattern empty.
+            def _ts_and_value(stat: Any, field: str) -> tuple[datetime, float] | None:
                 value = stat.get(field)
                 if value is None:
                     return None
                 start = stat.get("start")
                 if isinstance(start, datetime):
-                    ts_key = start.isoformat()
+                    start_dt = start
+                elif isinstance(start, (int, float)):
+                    start_dt = datetime.fromtimestamp(start, tz=UTC)
                 else:
-                    ts_key = str(start or "")
-                return ts_key, float(value)
+                    parsed = dt_util.parse_datetime(str(start or ""))
+                    if parsed is None:
+                        return None
+                    start_dt = parsed
+                return start_dt, float(value)
 
             for sensor_id in self.consumption_sensors:
                 for stat in stats.get(sensor_id, []):
                     result = _ts_and_value(stat, "change")
                     if result:
-                        ts_key, val = result
-                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + val
+                        stat_dt, val = result
+                        hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + val
 
             for sensor_id in self.production_sensors:
                 for stat in stats.get(sensor_id, []):
                     result = _ts_and_value(stat, "change")
                     if result:
-                        ts_key, val = result
-                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) - val
+                        stat_dt, val = result
+                        hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - val
 
             # PV correction: add back historical PV production so that the
             # stored pattern represents gross household consumption.
@@ -248,8 +258,8 @@ class ConsumptionForecastModel:
                     for stat in pv_stats.get(sensor_id, []):
                         result = _ts_and_value(stat, "change")
                         if result:
-                            ts_key, val = result
-                            hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + max(
                                 0.0, val
                             )
                 pv_corrected = True
@@ -282,11 +292,11 @@ class ConsumptionForecastModel:
                         for stat in pv_stats.get(pv_entity_id, []):
                             result = _ts_and_value(stat, "mean")
                             if result:
-                                ts_key, val = result
+                                stat_dt, val = result
                                 # mean kW over 1 h = kWh for that hour
-                                hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
-                                    0.0, val
-                                )
+                                hourly_net[stat_dt] = hourly_net.get(
+                                    stat_dt, 0.0
+                                ) + max(0.0, val)
                         pv_corrected = True
                         _LOGGER.debug(
                             "PV correction applied from own pv_forecast sensor (%s)",
@@ -312,11 +322,8 @@ class ConsumptionForecastModel:
             # season: 0=winter(DJF), 1=spring(MAM), 2=summer(JJA), 3=autumn(SON)
             hourly_values: dict[tuple[int, int], list[float]] = {}
             seasonal_values: dict[tuple[int, int, int], list[float]] = {}
-            for ts_key, net_kwh in hourly_net.items():
-                dt = dt_util.parse_datetime(ts_key)
-                if dt is None:
-                    continue
-                dt_local = dt_util.as_local(dt)
+            for stat_dt, net_kwh in hourly_net.items():
+                dt_local = dt_util.as_local(stat_dt)
                 val = max(0.0, net_kwh)
                 key = (dt_local.hour, dt_local.weekday())
                 hourly_values.setdefault(key, []).append(val)
