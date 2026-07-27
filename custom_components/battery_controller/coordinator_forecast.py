@@ -18,6 +18,7 @@ from .const import (
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_FORECAST_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
+    DC_TO_AC_INVERTER_EFFICIENCY,
     DOMAIN,
     FORECAST_INTERVAL_MINUTES,
     WEATHER_STALE_AFTER_MINUTES,
@@ -404,8 +405,6 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Clamp PV values: a faulty sensor/model must not produce negative output (P1.3)
         pv_forecast = [max(0.0, v) for v in pv_forecast]
 
-        net_load_forecast = [c - p for c, p in zip(consumption_forecast, pv_forecast)]
-
         # Sum DC PV forecast across all DC subentry models, applying temperature derating
         has_dc = bool(self.pv_dc_models)
         pv_dc_forecast = [0.0] * n
@@ -431,9 +430,24 @@ class ForecastCoordinator(DataUpdateCoordinator):
         # Clamp DC PV values as well
         pv_dc_forecast = [max(0.0, v) for v in pv_dc_forecast]
 
+        # Net load = consumption minus all PV that reaches the AC side.
+        # DC-coupled PV gets there through the inverter, the same path the
+        # optimizer's baseline uses (_calculate_baseline_cost). Counting only
+        # the AC series reported a DC-coupled system as importing its entire
+        # household load while the sun was in fact covering it — the AC series
+        # is legitimately zero when every array is DC-coupled.
+        total_pv_forecast = [
+            p + dc * DC_TO_AC_INVERTER_EFFICIENCY
+            for p, dc in zip(pv_forecast, pv_dc_forecast)
+        ]
+        net_load_forecast = [
+            c - p for c, p in zip(consumption_forecast, total_pv_forecast)
+        ]
+
         # Derive current values from forecast (first element = current step)
         current_pv = pv_forecast[0] if pv_forecast else 0.0
         current_dc_pv = pv_dc_forecast[0] if pv_dc_forecast else 0.0
+        current_total_pv = current_pv + current_dc_pv * DC_TO_AC_INVERTER_EFFICIENCY
         current_consumption = self.consumption_model.get_current_consumption()
 
         result = {
@@ -445,7 +459,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             "current_pv_kw": round(current_pv, 3),
             "current_dc_pv_kw": round(current_dc_pv, 3),
             "current_consumption_kw": round(current_consumption, 3),
-            "current_net_load_kw": round(current_consumption - current_pv, 3),
+            "current_net_load_kw": round(current_consumption - current_total_pv, 3),
             "current_ghi_wm2": round(radiation_steps[0], 1) if radiation_steps else 0.0,
             "current_wind_speed_ms": round(wind_speed_steps[0], 1)
             if wind_speed_steps
