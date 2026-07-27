@@ -1090,3 +1090,110 @@ async def test_async_update_data_volcast_5min_data_averaged_per_step(hass):
     # Last 5-min entry (10:25) covers 5 minutes: step 10:30 is past the
     # sensor horizon and falls back to the (zero-radiation) internal model
     assert result["pv_forecast_kw"][2] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_net_load_accounts_for_dc_coupled_pv(hass):
+    """Net load must count DC PV, which reaches AC through the inverter.
+
+    A DC-coupled system has pv_forecast_kw legitimately at zero with all
+    production in pv_dc_forecast_kw. Subtracting only the AC series reported
+    the household as importing its full load while the sun was covering it.
+    """
+    from custom_components.battery_controller.const import (
+        DC_TO_AC_INVERTER_EFFICIENCY,
+    )
+
+    pv_arrays = [
+        {
+            "subentry_id": "pv_dc_1",
+            "peak_power_kwp": 10.0,
+            "dc_coupled": True,
+        }
+    ]
+    config = _minimal_config(pv_arrays=pv_arrays)
+
+    now = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = None  # zero-radiation fallback; DC comes from the mock
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=_make_mock_consumption(),
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(
+            return_value=(None, [4.0] * 192, None)
+        )
+        # 10 kW of DC production, no AC array at all
+        coord.pv_dc_models[0].forecast_from_radiation = MagicMock(
+            return_value=[10.0] * 192
+        )
+
+        result = await coord._async_update_data()
+
+    # The series uses the forecast (4.0 kW); the current_* values use
+    # get_current_consumption() (0.5 kW from the mock) — existing behaviour.
+    expected_series = 4.0 - 10.0 * DC_TO_AC_INVERTER_EFFICIENCY
+    expected_current = 0.5 - 10.0 * DC_TO_AC_INVERTER_EFFICIENCY
+    assert result["pv_forecast_kw"][0] == 0.0
+    assert result["pv_dc_forecast_kw"][0] == pytest.approx(10.0)
+    # A surplus, not a full-load import
+    assert result["net_load_forecast_kw"][0] == pytest.approx(expected_series, abs=1e-3)
+    assert result["current_net_load_kw"] == pytest.approx(expected_current, abs=1e-3)
+    assert result["current_net_load_kw"] < 0
+
+
+@pytest.mark.asyncio
+async def test_net_load_unchanged_for_ac_only_system(hass):
+    """AC-only systems keep the previous behaviour exactly."""
+    pv_arrays = [
+        {
+            "subentry_id": "pv_ac_1",
+            "peak_power_kwp": 4.0,
+            "dc_coupled": False,
+        }
+    ]
+    config = _minimal_config(pv_arrays=pv_arrays)
+
+    now = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
+    weather_coord = MagicMock()
+    weather_coord.data = None
+
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+            return_value=_make_mock_consumption(),
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.utcnow",
+            return_value=now,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_forecast.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        coord = ForecastCoordinator(hass, weather_coord, config)
+        coord.net_load_model = MagicMock()
+        coord.net_load_model.forecast = MagicMock(
+            return_value=(None, [2.0] * 192, None)
+        )
+        coord.pv_ac_models[0].forecast_from_radiation = MagicMock(
+            return_value=[3.0] * 192
+        )
+
+        result = await coord._async_update_data()
+
+    assert result["net_load_forecast_kw"][0] == pytest.approx(2.0 - 3.0)
