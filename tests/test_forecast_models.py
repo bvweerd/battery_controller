@@ -1,11 +1,12 @@
 """Tests for forecast_models.py."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from custom_components.battery_controller.const import MAX_PLAUSIBLE_CONSUMPTION_KW
 from custom_components.battery_controller.forecast_models import (
     PVForecastModel,
     ConsumptionForecastModel,
@@ -1341,3 +1342,73 @@ class TestAsyncUpdatePatternStartFormats:
         """Garbage timestamps are dropped without raising."""
         model = await self._run("not-a-timestamp")
         assert model._hourly_pattern == {}
+
+
+class TestConsumptionOutlierRejection:
+    """Meter artefacts must not poison the learned pattern.
+
+    A total_increasing sensor that jumps (device replaced, unit change,
+    spurious reading) yields an enormous hourly "change". With ~2 samples
+    per (hour, weekday) bucket over 14 days, one such sample dominates the
+    average and propagates into the DP cost function.
+    """
+
+    _DT = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _key():
+        from homeassistant.util import dt as dt_util
+
+        local = dt_util.as_local(TestConsumptionOutlierRejection._DT)
+        return (local.hour, local.weekday())
+
+    async def _run(self, changes):
+        """Run the learner over a list of (hour_offset, change_kwh)."""
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass, consumption_sensors=["sensor.consumption"]
+        )
+        rows = [
+            {"start": (self._DT + timedelta(days=7 * i)).timestamp(), "change": v}
+            for i, v in enumerate(changes)
+        ]
+        stats = {"sensor.consumption": rows}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+        return model
+
+    async def test_absurd_sample_is_rejected(self):
+        """A 94 GW 'hour' must not reach the pattern."""
+        model = await self._run([0.4, 93972250.55])
+        # Only the sane sample survives — not the average of the two
+        assert model._hourly_pattern[self._key()] == pytest.approx(0.4)
+
+    async def test_all_samples_absurd_leaves_bucket_empty(self):
+        model = await self._run([5816382.577, 28419810.183])
+        assert self._key() not in model._hourly_pattern
+
+    async def test_plausible_high_load_is_kept(self):
+        """A genuinely heavy hour (EV + heat pump) is still learned."""
+        model = await self._run([11.5, 12.5])
+        assert model._hourly_pattern[self._key()] == pytest.approx(12.0)
+
+    async def test_value_just_below_ceiling_is_kept(self):
+        model = await self._run([MAX_PLAUSIBLE_CONSUMPTION_KW - 0.1])
+        assert model._hourly_pattern[self._key()] == pytest.approx(
+            MAX_PLAUSIBLE_CONSUMPTION_KW - 0.1
+        )
+
+    async def test_value_just_above_ceiling_is_rejected(self):
+        model = await self._run([MAX_PLAUSIBLE_CONSUMPTION_KW + 0.1])
+        assert self._key() not in model._hourly_pattern
+
+    async def test_warning_names_the_dropped_count(self, caplog):
+        with caplog.at_level("WARNING"):
+            await self._run([0.4, 93972250.55])
+        assert "implausible" in caplog.text.lower()
+        assert "1 " in caplog.text
