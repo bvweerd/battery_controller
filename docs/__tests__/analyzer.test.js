@@ -473,6 +473,49 @@ describe('generateTips', () => {
     expect(tips.some(t => t.title.toLowerCase().includes('soc limit blocked'))).toBe(false);
   });
 
+  test('err tip when consumption pattern is empty', () => {
+    const d = makeDiag();
+    d.forecast.consumption_hourly_pattern = {};
+    d.forecast.current_consumption_kw = 0.5;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('no consumption pattern learned'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('err');
+    // Should tell the user that waiting does not help
+    expect(tip.text.toLowerCase()).toContain('not');
+    expect(tip.text).toContain('0.5 kW');
+  });
+
+  test('warn tip when consumption pattern is only partly learned', () => {
+    const d = makeDiag();
+    d.forecast.consumption_hourly_pattern = { '08_0': 0.4, '09_0': 0.5, '10_0': 0.6 };
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('partly learned'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+    expect(tip.title).toContain('3 of 168');
+  });
+
+  test('no consumption pattern tip when the pattern is well populated', () => {
+    const d = makeDiag();
+    const pattern = {};
+    for (let h = 0; h < 24; h++) {
+      for (let dow = 0; dow < 7; dow++) {
+        pattern[`${String(h).padStart(2, '0')}_${dow}`] = 1.2;
+      }
+    }
+    d.forecast.consumption_hourly_pattern = pattern;
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('consumption pattern'))).toBe(false);
+  });
+
+  test('no consumption pattern tip for diagnostics without the key', () => {
+    // Older diagnostics files have no consumption_hourly_pattern at all
+    const d = makeDiag();
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('consumption pattern'))).toBe(false);
+  });
+
   test('ok tip included in clean configuration', () => {
     // Only ok and info tips should result in a "well-tuned" message
     // Remove any triggers for warn/err
