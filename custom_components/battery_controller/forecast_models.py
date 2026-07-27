@@ -9,7 +9,11 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_PV_ORIENTATION_DEG, DEFAULT_PV_TILT_DEG
+from .const import (
+    DEFAULT_PV_ORIENTATION_DEG,
+    DEFAULT_PV_TILT_DEG,
+    MAX_PLAUSIBLE_CONSUMPTION_KW,
+)
 from .helpers import (
     calculate_consumption_pattern,
     calculate_pv_forecast,
@@ -322,15 +326,38 @@ class ConsumptionForecastModel:
             # season: 0=winter(DJF), 1=spring(MAM), 2=summer(JJA), 3=autumn(SON)
             hourly_values: dict[tuple[int, int], list[float]] = {}
             seasonal_values: dict[tuple[int, int, int], list[float]] = {}
+            dropped_outliers = 0
             for stat_dt, net_kwh in hourly_net.items():
                 dt_local = dt_util.as_local(stat_dt)
                 val = max(0.0, net_kwh)
+                # Reject meter artefacts. An hourly "change" equals the average
+                # power over that hour, so a value above the plausibility
+                # ceiling cannot be household load — it is a sensor that jumped,
+                # was replaced, or briefly reported nonsense. Such a sample is
+                # unbounded, and with only ~2 samples per (hour, weekday) bucket
+                # over 14 days a single one dominates the average and propagates
+                # into the DP cost.
+                if val > MAX_PLAUSIBLE_CONSUMPTION_KW:
+                    dropped_outliers += 1
+                    continue
                 key = (dt_local.hour, dt_local.weekday())
                 hourly_values.setdefault(key, []).append(val)
                 season = _get_season(dt_local.month)
                 seasonal_values.setdefault(
                     (dt_local.hour, dt_local.weekday(), season), []
                 ).append(val)
+
+            if dropped_outliers:
+                _LOGGER.warning(
+                    "Ignored %d implausible hourly sample(s) above %.0f kW while "
+                    "learning the consumption pattern. This points at a meter "
+                    "artefact in one of the configured energy sensors (a "
+                    "total_increasing sensor that jumped or was replaced). Check "
+                    "the statistics of your consumption/production/PV sensors "
+                    "around the affected hours in Developer Tools -> Statistics.",
+                    dropped_outliers,
+                    MAX_PLAUSIBLE_CONSUMPTION_KW,
+                )
 
             for h_key, values in hourly_values.items():
                 if values:
