@@ -160,6 +160,26 @@ forecast:
 
 If your sensor's state is the current price but its attributes contain no forecast list, the optimizer will run with a flat price forecast and cannot perform meaningful arbitrage. In that case use a different sensor or add the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator) on top of your existing sensor.
 
+### Verifying your consumption sensors
+
+The consumption forecast is **learned from long-term statistics** of the energy sensors you configure under *Electricity consumption sensors*. These are cumulative **kWh** sensors (DSMR-style), not power sensors — the integration reads the hourly `change` in each sensor to reconstruct your consumption pattern.
+
+For that to work, the sensor must produce **sum-type statistics**, which requires:
+
+| Attribute | Required value |
+|-----------|----------------|
+| `state_class` | `total_increasing` (or `total`) |
+| `device_class` | `energy` |
+| `unit_of_measurement` | `kWh` |
+
+> **A `state_class` of `measurement` is the most common mistake.** It produces mean/min/max statistics instead of sum statistics, so the hourly `change` the learner needs does not exist. The integration then silently falls back to a built-in default pattern (see below). This is easy to get wrong when you build the sensor yourself with a template or a Riemann-sum helper — and note that a *price* sensor is the opposite case, where `measurement` is correct.
+
+**How to check:** go to **Developer Tools → Statistics** and search for your sensor. If it does not appear in the list, or Home Assistant reports an issue for it, it is not generating the statistics the learner needs.
+
+**Until a pattern is learned**, the consumption forecast uses a built-in cold-start curve for a typical household (≈3500 kWh/year, ~0.4 kW average, with a morning and evening peak). If your home uses substantially more, the forecast will look far too low until real statistics are available. The learner reads the **past 14 days** from the recorder, so a correctly configured sensor that already has history populates the pattern on the very first refresh — you do not have to wait for the integration itself to accumulate data.
+
+**PV double counting:** only configure *Electricity production sensors* if your consumption sensor measures **net grid import** (i.e. it goes down when PV produces). If it already measures gross household load — as with a sensor between the inverter and the house — leave the production field empty. Filling both fields activates a correction that adds PV production back on top, which would inflate the learned pattern.
+
 ### Via HACS (Recommended)
 
 1. Navigate to HACS -> Integrations -> Three dots -> Custom repositories.
@@ -454,6 +474,30 @@ If entities remain after deletion, go to **Settings → Devices & Services → E
 
 - The integration marks entities unavailable when a coordinator fails to update. Check the logs for HTTP errors from open-meteo.com.
 - If the SoC sensor is unavailable, the optimizer falls back to the last known SoC. Check that the SoC sensor entity is working correctly.
+
+### Consumption forecast is far too low (or does not match my house)
+
+Almost always this means **no consumption pattern has been learned yet**, so the forecast is still the built-in cold-start curve (≈0.4–0.6 kW, shaped for a typical household). It is not a scaling problem.
+
+1. Enable debug logging and look for this line after a reload:
+
+   ```yaml
+   logger:
+     logs:
+       custom_components.battery_controller: debug
+   ```
+
+   ```
+   Updated consumption pattern from 1 energy sensors, 0 hourly buckets, 0 seasonal buckets
+   ```
+
+   **0 hourly buckets** means nothing was learned. The same is visible in the diagnostics file as an empty `consumption_hourly_pattern`.
+
+2. If the log instead says `No statistics found for energy sensors`, the sensor has no long-term statistics at all. If it reports 0 buckets while statistics *do* exist, the sensor is producing the wrong statistics **type** — see [Verifying your consumption sensors](#verifying-your-consumption-sensors); a `state_class` of `measurement` instead of `total_increasing` is the usual cause.
+
+3. Waiting does not help in either case. Once the sensor is configured correctly the learner picks up the **existing** 14 days of recorder history at the next refresh (within 15 minutes).
+
+A learned pattern that is consistently too *high* points the other way: an *Electricity production sensors* entry combined with *PV inverter production sensors* adds PV back into the pattern, which is only correct when your consumption sensor measures net grid import.
 
 ### PV forecast is always zero
 
