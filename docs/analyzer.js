@@ -703,6 +703,38 @@ function generateTips(d) {
       This is normal for day-ahead prices before they publish (usually afternoon).`});
   }
 
+  // 0c. Consumption pattern learning. An empty pattern means the consumption
+  // forecast is the built-in cold-start curve (~0.4 kW average) rather than
+  // the actual household — the usual cause of "my forecast is far too low".
+  // Absent key = diagnostics from an older version: stay silent.
+  const consumPattern = fc.consumption_hourly_pattern;
+  if (consumPattern && typeof consumPattern === 'object') {
+    const nBuckets  = Object.keys(consumPattern).length;
+    const curConsum = fc.current_consumption_kw;
+    const curTxt = curConsum != null
+      ? ` Right now it forecasts <b>${curConsum} kW</b> — compare that with your actual household load.`
+      : '';
+    if (nBuckets === 0) {
+      tips.push({ t:'err', title:'No consumption pattern learned — forecast is a built-in default',
+        text:`The learned consumption pattern is empty, so the forecast is the built-in cold-start curve
+        for a typical household (≈3500 kWh/year, ~0.4 kW average).${curTxt}<br>
+        This is <b>not</b> fixed by waiting: the pattern is learned from the last 14 days of
+        <i>your own</i> kWh sensors in the recorder, not from how long the integration has run.
+        A correctly configured sensor fills the pattern on the next refresh.<br>
+        Most common cause: the sensor under <i>Electricity consumption sensors</i> has
+        <code>state_class: measurement</code> instead of <code>total_increasing</code>, so it produces
+        mean statistics and the hourly <code>change</code> the learner needs does not exist.
+        Check it under <b>Developer Tools → Statistics</b>.`});
+    } else if (nBuckets < 24) {
+      tips.push({ t:'warn', title:`Consumption pattern only partly learned (${nBuckets} of 168 slots)`,
+        text:`Only ${nBuckets} hour/weekday slots have been learned so far, so many hours still fall back
+        to the built-in default curve.${curTxt}<br>
+        This is normal in the first days after adding a new consumption sensor and resolves as the
+        recorder accumulates history. If it does not improve, verify the sensor produces sum-type
+        statistics (<code>state_class: total_increasing</code>).`});
+    }
+  }
+
   // 1. RTE
   if (rte < 0.82) {
     tips.push({ t:'err', title:'Very low round-trip efficiency (RTE)',
