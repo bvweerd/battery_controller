@@ -2,7 +2,10 @@
 
 const {
   SOC_RES_WH,
+  DC_TO_AC_EFF,
   calculateStepCost,
+  totalPvSeries,
+  netPvSeries,
   findNearestSocIdx,
   runDP,
   forwardPass,
@@ -306,6 +309,43 @@ describe('computeShadowPrice', () => {
   });
 });
 
+// ─── totalPvSeries / netPvSeries ────────────────────────────────────────────
+
+describe('totalPvSeries / netPvSeries', () => {
+  test('AC-only system is unchanged', () => {
+    expect(totalPvSeries([1, 2, 3], [])).toEqual([1, 2, 3]);
+  });
+
+  test('DC PV is counted through the inverter', () => {
+    const out = totalPvSeries([0, 0], [2, 4]);
+    expect(out[0]).toBeCloseTo(2 * DC_TO_AC_EFF);
+    expect(out[1]).toBeCloseTo(4 * DC_TO_AC_EFF);
+  });
+
+  test('AC and DC are summed', () => {
+    const out = totalPvSeries([1, 1], [2, 0]);
+    expect(out[0]).toBeCloseTo(1 + 2 * DC_TO_AC_EFF);
+    expect(out[1]).toBeCloseTo(1);
+  });
+
+  test('handles missing/undefined series and unequal lengths', () => {
+    expect(totalPvSeries(undefined, undefined)).toEqual([]);
+    expect(totalPvSeries([1], [1, 1]).length).toBe(2);
+  });
+
+  test('net line reflects DC PV instead of showing no solar', () => {
+    // DC-coupled system: AC series all zeros, DC carries production
+    const net = netPvSeries([0, 0], [4, 4], [1, 1]);
+    expect(net[0]).toBeCloseTo(4 * DC_TO_AC_EFF - 1);
+    expect(net[0]).toBeGreaterThan(0); // surplus, not a deficit
+  });
+
+  test('net line is a deficit when consumption exceeds PV', () => {
+    const net = netPvSeries([0], [1], [3]);
+    expect(net[0]).toBeLessThan(0);
+  });
+});
+
 // ─── generateTips ───────────────────────────────────────────────────────────
 
 describe('generateTips', () => {
@@ -514,6 +554,46 @@ describe('generateTips', () => {
     const d = makeDiag();
     const tips = generateTips(d);
     expect(tips.some(t => t.title.toLowerCase().includes('consumption pattern'))).toBe(false);
+  });
+
+  test('info tip reports an all-DC PV forecast', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [0, 0, 0, 0];
+    d.forecast.pv_dc_forecast_kw = [2, 2, 2, 2];
+    d.forecast.forecast_interval_minutes = 15;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.includes('all DC-coupled'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('info');
+    // 4 steps x 2 kW x 0.25 h = 2.0 kWh
+    expect(tip.title).toContain('2.0 kWh');
+  });
+
+  test('warn tip when the PV forecast is zero everywhere', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [0, 0];
+    d.forecast.pv_dc_forecast_kw = [0, 0];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('pv forecast is zero'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+  });
+
+  test('info tip reports the AC/DC split when both produce', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [1, 1];
+    d.forecast.pv_dc_forecast_kw = [1, 1];
+    d.forecast.forecast_interval_minutes = 60;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.includes('over the horizon'));
+    expect(tip).toBeDefined();
+    expect(tip.text).toContain('DC-coupled');
+  });
+
+  test('no PV forecast tip when the arrays are absent', () => {
+    const d = makeDiag();
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('pv forecast'))).toBe(false);
   });
 
   test('ok tip included in clean configuration', () => {
