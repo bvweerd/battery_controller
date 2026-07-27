@@ -1281,3 +1281,63 @@ class TestPriceForecastModelUnitScaling:
             await model.async_update_pattern()
 
         assert model._overall_avg == pytest.approx(0.25)
+
+
+class TestAsyncUpdatePatternStartFormats:
+    """The recorder's "start" field must be handled in every form it takes.
+
+    Current Home Assistant returns statistics rows with "start" as a Unix
+    timestamp (float); older versions used a datetime or an ISO string.
+    A float used to be stringified to "1704106800.0" and parsed back with
+    parse_datetime(), which returns None — silently dropping every bucket
+    and leaving the learned pattern empty while statistics were present.
+    """
+
+    # 2024-01-01 10:00 UTC (a Monday)
+    _DT = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _expected_key():
+        from homeassistant.util import dt as dt_util
+
+        local = dt_util.as_local(TestAsyncUpdatePatternStartFormats._DT)
+        return (local.hour, local.weekday())
+
+    async def _run(self, start_value):
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass, consumption_sensors=["sensor.consumption"]
+        )
+        stats = {"sensor.consumption": [{"start": start_value, "change": 2.5}]}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+        return model
+
+    async def test_float_unix_timestamp_start(self):
+        """Regression: float timestamps must not be dropped."""
+        model = await self._run(self._DT.timestamp())
+        assert model._hourly_pattern, "pattern must not be empty for float timestamps"
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_int_unix_timestamp_start(self):
+        model = await self._run(int(self._DT.timestamp()))
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_datetime_start(self):
+        model = await self._run(self._DT)
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_iso_string_start(self):
+        model = await self._run(self._DT.isoformat())
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_unparseable_start_is_skipped(self):
+        """Garbage timestamps are dropped without raising."""
+        model = await self._run("not-a-timestamp")
+        assert model._hourly_pattern == {}
