@@ -2586,6 +2586,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "dp_mode": result.optimal_mode,
                 "dp_power_kw": round(result.optimal_power_kw, 3),
                 "effective_mode": effective_mode,
+                # The mode the real-time controller actually ran in. This can
+                # differ from effective_mode: idle is upgraded to zero_grid on
+                # PV surplus (see _resolve_controller_mode). In that case
+                # effective_power_kw stays 0 by design while the controller
+                # publishes a real setpoint, so consumers must not read the
+                # difference as the battery having hit a limit.
+                "controller_mode": controller_mode,
                 "effective_power_kw": round(effective_power, 3),
                 "setpoint_kw": round(control_action["target_power_kw"], 3),
                 "raw_target_kw": round(control_action["raw_target_w"] / 1000, 3),
