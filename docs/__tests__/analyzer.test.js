@@ -596,6 +596,53 @@ describe('generateTips', () => {
     expect(tips.some(t => t.title.toLowerCase().includes('pv forecast'))).toBe(false);
   });
 
+  test('no soc_limited tip when the controller ran zero_grid', () => {
+    const d = makeDiag();
+    // idle upgraded to zero_grid on PV surplus: effective_power is 0 by
+    // design while the real-time controller publishes a real setpoint
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T10:37:00', effective_mode: 'idle',
+        controller_mode: 'zero_grid', effective_power_kw: 0, setpoint_kw: -2.18,
+        soc_kwh: 20.68, grid_kw: -3.8 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(false);
+  });
+
+  test('legacy run log without controller_mode is not flagged either', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T10:37:00', effective_mode: 'idle',
+        effective_power_kw: 0, setpoint_kw: -2.18, soc_kwh: 20.68, grid_kw: -3.8 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(false);
+  });
+
+  test('a genuine limit is still reported', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T18:00:00', effective_mode: 'discharging',
+        controller_mode: 'follow_schedule', effective_power_kw: 2.4,
+        setpoint_kw: 0.4, soc_kwh: 1.05, grid_kw: 1.2 },
+    ];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('limited'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+  });
+
+  test('idle without a grid surplus is still compared', () => {
+    // No surplus means no zero_grid upgrade, so a mismatch is real
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T18:00:00', effective_mode: 'idle',
+        effective_power_kw: 0, setpoint_kw: -2.0, soc_kwh: 20.0, grid_kw: 1.5 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(true);
+  });
+
   test('ok tip included in clean configuration', () => {
     // Only ok and info tips should result in a "well-tuned" message
     // Remove any triggers for warn/err
