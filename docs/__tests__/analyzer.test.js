@@ -596,6 +596,34 @@ describe('generateTips', () => {
     expect(tips.some(t => t.title.toLowerCase().includes('pv forecast'))).toBe(false);
   });
 
+  test('SoC boundary tips name the planned horizon, not history', () => {
+    const d = makeDiag();
+    // Battery pinned at max for the whole planned schedule
+    d.battery_config.max_soc_kwh = 9.0;
+    d.battery_config.min_soc_kwh = 1.0;
+    d.optimization.schedule.soc_schedule_kwh = [9, 9, 9, 9, 9];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('max soc'));
+    expect(tip).toBeDefined();
+    // Must not read as a claim about measured history
+    expect(tip.title.toLowerCase()).toContain('planned');
+    expect(tip.title.toLowerCase()).toContain('horizon');
+    expect(tip.title.toLowerCase()).not.toContain('of the time');
+    expect(tip.text.toLowerCase()).toContain('not what the battery did in the past');
+  });
+
+  test('minimum SoC tip is worded the same way', () => {
+    const d = makeDiag();
+    d.battery_config.max_soc_kwh = 9.0;
+    d.battery_config.min_soc_kwh = 1.0;
+    d.optimization.schedule.soc_schedule_kwh = [1, 1, 1, 1, 1];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('minimum soc'));
+    expect(tip).toBeDefined();
+    expect(tip.title.toLowerCase()).toContain('planned');
+    expect(tip.text.toLowerCase()).toContain('not what the battery did in the past');
+  });
+
   test('ok tip included in clean configuration', () => {
     // Only ok and info tips should result in a "well-tuned" message
     // Remove any triggers for warn/err
