@@ -822,7 +822,11 @@ function generateTips(d) {
       connecting a sensor improves PV and export timing decisions.`});
   }
 
-  // 6. SoC boundary hits
+  // 6. SoC boundary hits.
+  // soc_schedule_kwh is the schedule the optimizer just produced for the
+  // horizon ahead — not measured history. The wording has to say so, or the
+  // percentage reads as a claim about what the battery actually did, which
+  // sends people looking for a fault in the past.
   const socVals = sched.soc_schedule_kwh || [];
   const maxSoc  = bc.max_soc_kwh || Infinity;
   const minSoc  = bc.min_soc_kwh || 0;
@@ -830,14 +834,19 @@ function generateTips(d) {
     const atMax = socVals.filter(s => s >= maxSoc - 0.15).length / socVals.length;
     const atMin = socVals.filter(s => s <= minSoc + 0.15).length / socVals.length;
     if (atMax > 0.4) {
-      tips.push({ t:'info', title:`Battery at max SoC ${(atMax*100).toFixed(0)}% of the time`,
-        text:`Frequent saturation may indicate: (1) PV production exceeds battery capacity,
+      tips.push({ t:'info', title:`Planned schedule sits at max SoC for ${(atMax*100).toFixed(0)}% of the horizon`,
+        text:`This describes the schedule the optimizer just produced for the hours ahead,
+        not what the battery did in the past.<br>
+        Planned saturation may indicate: (1) PV production exceeds battery capacity,
         (2) max_soc_percent too conservative, or (3) not enough discharge windows to make room.`});
     }
     if (atMin > 0.35) {
-      tips.push({ t:'info', title:`Battery at minimum SoC ${(atMin*100).toFixed(0)}% of the time`,
-        text:`Battery is frequently depleted. Could indicate undersized capacity vs discharge demand,
-        or min_soc_percent too high. Consider whether this is intentional (backup reserve) or not.`});
+      tips.push({ t:'info', title:`Planned schedule sits at minimum SoC for ${(atMin*100).toFixed(0)}% of the horizon`,
+        text:`This describes the schedule the optimizer just produced for the hours ahead,
+        not what the battery did in the past.<br>
+        The plan leaves the battery depleted for much of the horizon. Could indicate undersized
+        capacity vs discharge demand, or min_soc_percent too high. Consider whether this is
+        intentional (backup reserve) or not.`});
     }
   }
 
