@@ -929,9 +929,24 @@ function generateTips(d) {
     // effective_power_kw is always 0 in zero_grid mode by design (the real-time
     // controller determines power dynamically, not the DP schedule), so comparing
     // it to setpoint_kw there would always look "limited" even under normal
-    // zero_grid charging/discharging. Only compare when effective_mode isn't zero_grid.
+    // zero_grid charging/discharging.
+    //
+    // That also covers idle: on PV surplus the coordinator upgrades an idle
+    // effective_mode to a zero_grid controller mode, leaving effective_power_kw
+    // at 0 while the controller publishes a real setpoint. Checking
+    // effective_mode alone flagged every such run as "SoC/power limited" even
+    // with the SoC sitting mid-range. controller_mode records what actually
+    // ran; older diagnostics predate it, so fall back to the shape of that
+    // situation (idle, no effective power, and a grid surplus).
+    const ranZeroGrid = e => {
+      if (e.effective_mode === 'zero_grid' || e.controller_mode === 'zero_grid') return true;
+      if (e.controller_mode !== undefined) return false;
+      return e.effective_mode === 'idle'
+        && (e.effective_power_kw ?? 0) === 0
+        && (e.grid_kw ?? 0) < 0;
+    };
     const socLimitedRuns = runLog2.filter(e =>
-      e.effective_mode !== 'zero_grid'
+      !ranZeroGrid(e)
       && Math.abs((e.setpoint_kw ?? 0) - (e.effective_power_kw ?? 0)) > 0.05
     );
     const commitLocked = runLog2.filter(e => e.commitment_locked);
