@@ -50,3 +50,23 @@
 - name: "breaking change"
   color: "e11d48"
   description: "Contains a breaking change"
+
+- name: "never-stale"
+  color: "1d76db"
+  description: "Never mark as stale or auto-close"
+
+- name: pinned
+  color: "1d76db"
+  description: "Kept open regardless of inactivity"
+
+- name: security
+  color: "b60205"
+  description: "Security related, exempt from auto-close"
+
+- name: backlog
+  color: "c5def5"
+  description: "Planned for later, exempt from auto-close"
+
+- name: "work-in-progress"
+  color: "fbca04"
+  description: "Still being worked on, exempt from auto-close"
