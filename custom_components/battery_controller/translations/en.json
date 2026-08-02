@@ -191,8 +191,8 @@
           },
           "data_description": {
             "capacity_kwh": "Total nameplate capacity of the battery.",
-            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See docs/EFFICIENCY_CURVES.md for measured curves.",
-            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See docs/EFFICIENCY_CURVES.md for measured curves.",
+            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
+            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
             "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
@@ -226,8 +226,8 @@
           },
           "data_description": {
             "capacity_kwh": "Total nameplate capacity of the battery.",
-            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See docs/EFFICIENCY_CURVES.md for measured curves.",
-            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See docs/EFFICIENCY_CURVES.md for measured curves.",
+            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
+            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
             "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
