@@ -129,6 +129,8 @@ Each direction (charge / discharge) has its own **power-dependent efficiency cur
 
 **Configuration format**: a plain scalar (e.g. `0.95`) produces a flat curve valid at all power levels. A colon-separated list (e.g. `0:0.95, 5:0.92`) defines breakpoints that are linearly interpolated; efficiency is clamped flat outside the specified range.
 
+**Measured curves for real hardware**: see [`docs/EFFICIENCY_CURVES.md`](docs/EFFICIENCY_CURVES.md) for ready-to-paste curves for named home battery systems, based on the HTW Berlin "Stromspeicher-Inspektion 2026" lab measurements, plus guidance on deriving a curve for hardware that is not listed.
+
 **Scalar round-trip efficiency (RTE)**: The optimizer derives a scalar `round_trip_efficiency = charge_eff(0) × discharge_eff(0)` (zero-power values) for use in the oscillation filter threshold and hybrid-mode shadow price thresholds. For a symmetric flat curve at 0.9487: RTE ≈ 0.90.
 
 **Per-action interpolation**: inside the DP backward pass, each candidate action uses:
