@@ -418,9 +418,35 @@ accounted for. That agreement is the reason to trust the fit.
 > A metered whole-system figure is the right number for "is this battery worth owning".
 > It is the wrong number for "should the optimizer take this trade".
 
-To separate the two on your own unit: charge full, immediately discharge full at a fixed
-power, and compare that single cycle against your long-run meter figure. The difference is
-standby plus partial-cycle overhead. Repeat at a second power and you have a curve.
+### Settling it on your own unit
+
+If you are working from the battery's own counters, the first thing to establish is
+whether they tick while the unit is doing nothing. That single fact decides whether your
+figure is conversion efficiency or whole-system efficiency, and the two can differ by six
+points or more.
+
+**The idle test — two hours, no effort.** Park the battery in idle (no charge, no
+discharge, no PV) and read the "charged" counter before and after.
+
+| Counter after two idle hours | Verdict | What to do |
+| --- | --- | --- |
+| Unchanged | Standby is **excluded**; your figure is conversion efficiency | Use it to anchor the curve directly |
+| Grew | Standby is **included**; your figure is whole-system efficiency | Subtract it before anchoring — see below |
+
+If it grew, the increase over two hours gives you the standby power directly. Combine it
+with the period your throughput accumulated over:
+
+```
+conversion_RTE = metered_RTE × energy_in / (energy_in − standby_W × 24 × days / 1000)
+```
+
+The correction is not small. At 300 kWh throughput, 6 W of standby moves the answer from
+82 % over two months to 87 % over six — so the elapsed time matters as much as the
+standby figure.
+
+**For the shape rather than the endpoint**, run a full charge followed immediately by a
+full discharge at a fixed power, and repeat at a second power. Two points at different
+powers is all it takes; that is exactly what pins the Venus A curve above.
 
 ### Cross-check against owner reports
 
