@@ -3,6 +3,8 @@
 const {
   SOC_RES_WH,
   DC_TO_AC_EFF,
+  interpolateEfficiency,
+  flatCurve,
   calculateStepCost,
   totalPvSeries,
   netPvSeries,
@@ -19,8 +21,12 @@ const {
 
 /** Minimal battery config for runDP / runOptimizer. */
 function makeCfg(overrides = {}) {
+  const rte = overrides.rte ?? 0.9;
+  const sqrtRte = Math.sqrt(rte);
   return {
-    rte: 0.9,
+    rte,
+    chargeCurve:    flatCurve(sqrtRte, 10),
+    dischargeCurve: flatCurve(sqrtRte, 10),
     minSocKwh: 1.0,
     maxSocKwh: 10.0,
     maxChargeKw: 5.0,
@@ -51,21 +57,26 @@ function runSimple(prices, feedIn, pv, consump, socKwh = 5, cfg = makeCfg(), deg
 // ─── calculateStepCost ──────────────────────────────────────────────────────
 
 describe('calculateStepCost', () => {
+  const sqrtRte09 = Math.sqrt(0.9);
+  const CHG = flatCurve(sqrtRte09, 10);
+  const DIS = flatCurve(sqrtRte09, 10);
+
   const baseArgs = (actionW) => [
-    0.25,          // stepH
-    5000,          // socWh
-    actionW,       // actionW
-    0.15,          // gridPrice
-    0.07,          // feedInPrice
-    0,             // pvW
-    1000,          // consumW  (1 kW load)
-    0.9,           // rte
-    0.004,         // degradCostPerKwh
-    false,         // pvDcCoupled
-    0,             // pvDcW
-    0.97,          // pvDcEfficiency
-    0,             // maxGridPowerKw
-    10000,         // maxSocWh
+    0.25,   // stepH
+    5000,   // socWh
+    actionW,// actionW
+    0.15,   // gridPrice
+    0.07,   // feedInPrice
+    0,      // pvW
+    1000,   // consumW  (1 kW load)
+    CHG,    // chargeCurve
+    DIS,    // dischargeCurve
+    0.004,  // degradCostPerKwh
+    false,  // pvDcCoupled
+    0,      // pvDcW
+    0.97,   // pvDcEfficiency
+    0,      // maxGridPowerKw
+    10000,  // maxSocWh
   ];
 
   test('idle: cost = consumption × price × stepH', () => {
@@ -91,16 +102,16 @@ describe('calculateStepCost', () => {
   test('charging adds degradation cost', () => {
     // With degradation > 0, charging costs more than without
     const args = baseArgs(2000);
-    const withDeg    = calculateStepCost(...args);
-    const noDeg      = calculateStepCost(args[0], args[1], args[2], args[3], args[4],
-      args[5], args[6], args[7], 0, ...args.slice(9));
+    const withDeg = calculateStepCost(...args);
+    // Replace degradCostPerKwh (index 9) with 0
+    const noDeg   = calculateStepCost(...args.slice(0, 9), 0, ...args.slice(10));
     expect(withDeg).toBeGreaterThan(noDeg);
   });
 
   test('PV surplus (feed-in > consumption) produces negative cost', () => {
     // 5 kW PV, 1 kW load → 4 kW net export at feed-in price €0.07
     const cost = calculateStepCost(
-      0.25, 5000, 0, 0.15, 0.07, 5000, 1000, 0.9, 0.004,
+      0.25, 5000, 0, 0.15, 0.07, 5000, 1000, CHG, DIS, 0.004,
       false, 0, 0.97, 0, 10000
     );
     expect(cost).toBeLessThan(0);
@@ -108,15 +119,15 @@ describe('calculateStepCost', () => {
 
   test('maxGridPowerKw caps grid export income', () => {
     // Huge PV surplus, cap at 3 kW → less revenue than uncapped
-    const uncapped = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, 0.9, 0, false, 0, 0.97, 0, 10000);
-    const capped   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, 0.9, 0, false, 0, 0.97, 3, 10000);
+    const uncapped = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, CHG, DIS, 0, false, 0, 0.97, 0, 10000);
+    const capped   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, CHG, DIS, 0, false, 0, 0.97, 3, 10000);
     expect(capped).toBeGreaterThan(uncapped);
   });
 
   test('DC-coupled idle passive charging: throughputKwh > 0 adds degradation', () => {
     // DC PV 2 kW, idle → passive charging → degradation cost added
-    const noDc = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, 0.9, 0.004, false, 2000, 0.97, 0, 10000);
-    const dcIdle = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, 0.9, 0.004, true, 2000, 0.97, 0, 10000);
+    const noDc   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, CHG, DIS, 0.004, false, 2000, 0.97, 0, 10000);
+    const dcIdle = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, CHG, DIS, 0.004, true,  2000, 0.97, 0, 10000);
     // DC passive charging reduces grid draw (pvExcess → AC) and adds degradation
     // Net should differ from non-DC case
     expect(dcIdle).not.toBeCloseTo(noDc, 4);

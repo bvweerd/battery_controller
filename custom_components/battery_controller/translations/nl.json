@@ -5,15 +5,6 @@
         "title": "Battery Controller",
         "description": "Configureer je thuisbatterij voor kostenoptimalisatie.",
         "sections": {
-          "battery": {
-            "name": "Batterij Specificaties",
-            "data": {
-              "capacity_kwh": "Capaciteit (kWh)",
-              "max_charge_power_kw": "Max laadvermogen (kW)",
-              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)"
-            }
-          },
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
@@ -84,15 +75,6 @@
         "title": "Battery Controller",
         "description": "Herconfigureer je battery controller instellingen.",
         "sections": {
-          "battery": {
-            "name": "Batterij Specificaties",
-            "data": {
-              "capacity_kwh": "Capaciteit (kWh)",
-              "max_charge_power_kw": "Max laadvermogen (kW)",
-              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)"
-            }
-          },
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
@@ -169,12 +151,17 @@
             "capacity_kwh": "Capaciteit (kWh)",
             "max_charge_power_kw": "Max laadvermogen (kW)",
             "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "charge_efficiency_curve": "Laadrendementscurve",
+            "discharge_efficiency_curve": "Ontlaadrendementscurve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
+          },
+          "data_description": {
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie docs/EFFICIENCY_CURVES.md voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie docs/EFFICIENCY_CURVES.md voor gemeten curves."
           }
         },
         "reconfigure": {
@@ -185,12 +172,17 @@
             "capacity_kwh": "Capaciteit (kWh)",
             "max_charge_power_kw": "Max laadvermogen (kW)",
             "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "charge_efficiency_curve": "Laadrendementscurve",
+            "discharge_efficiency_curve": "Ontlaadrendementscurve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
+          },
+          "data_description": {
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie docs/EFFICIENCY_CURVES.md voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie docs/EFFICIENCY_CURVES.md voor gemeten curves."
           }
         }
       },

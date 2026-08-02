@@ -1,6 +1,5 @@
 """Tests for battery_model.py."""
 
-import math
 import pytest
 
 from custom_components.battery_controller.battery_model import (
@@ -18,7 +17,11 @@ class TestBatteryConfig:
         config = BatteryConfig()
         assert config.capacity_kwh == 10.0
         assert config.max_charge_power_kw == 5.0
-        assert config.round_trip_efficiency == 0.90
+        # Default curve is "0.9487" (= sqrt 0.90) per direction → RTE ≈ 0.90,
+        # matching the pre-curve scalar default.
+        assert config.charge_efficiency == pytest.approx(0.9487)
+        assert config.discharge_efficiency == pytest.approx(0.9487)
+        assert config.round_trip_efficiency == pytest.approx(0.90, abs=1e-3)
 
     def test_derived_values(self):
         config = BatteryConfig(
@@ -26,8 +29,9 @@ class TestBatteryConfig:
         )
         assert config.min_soc_kwh == pytest.approx(1.0)
         assert config.max_soc_kwh == pytest.approx(9.0)
-        assert config.charge_efficiency == pytest.approx(math.sqrt(0.90))
-        assert config.discharge_efficiency == pytest.approx(math.sqrt(0.90))
+        # Default curve "0.9487" → scalar at zero power = 0.9487
+        assert config.charge_efficiency == pytest.approx(0.9487)
+        assert config.discharge_efficiency == pytest.approx(0.9487)
 
     def test_usable_capacity_auto(self):
         config = BatteryConfig(
@@ -70,7 +74,7 @@ class TestBatteryConfig:
         config = BatteryConfig.from_config(ha_config)
         assert config.capacity_kwh == 15.0
         assert config.max_charge_power_kw == 7.5
-        assert config.round_trip_efficiency == 0.92
+        assert config.round_trip_efficiency == pytest.approx(0.92, abs=1e-4)
         assert config.min_soc_kwh == pytest.approx(0.75)
         assert config.max_soc_kwh == pytest.approx(14.25)
         assert config.pv_dc_coupled is True
@@ -79,7 +83,7 @@ class TestBatteryConfig:
     def test_from_config_defaults(self):
         config = BatteryConfig.from_config({})
         assert config.capacity_kwh == 10.0
-        assert config.round_trip_efficiency == 0.90
+        assert config.round_trip_efficiency == pytest.approx(0.90, abs=1e-4)
 
     def test_derating_defaults_disabled(self):
         """Default config has no derating (thresholds at 100% / 0%)."""

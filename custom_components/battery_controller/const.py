@@ -49,6 +49,8 @@ CONF_USABLE_CAPACITY_KWH = "usable_capacity_kwh"
 CONF_MAX_CHARGE_POWER_KW = "max_charge_power_kw"
 CONF_MAX_DISCHARGE_POWER_KW = "max_discharge_power_kw"
 CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
+CONF_CHARGE_EFFICIENCY_CURVE = "charge_efficiency_curve"
+CONF_DISCHARGE_EFFICIENCY_CURVE = "discharge_efficiency_curve"
 CONF_MIN_SOC_PERCENT = "min_soc_percent"
 CONF_MAX_SOC_PERCENT = "max_soc_percent"
 
@@ -118,6 +120,11 @@ DEFAULT_CAPACITY_KWH = 10.0
 DEFAULT_MAX_CHARGE_POWER_KW = 5.0
 DEFAULT_MAX_DISCHARGE_POWER_KW = 5.0
 DEFAULT_ROUND_TRIP_EFFICIENCY = 0.90
+# Per-direction default = sqrt(DEFAULT_ROUND_TRIP_EFFICIENCY) so the default
+# round-trip efficiency stays 0.90 (0.9487 × 0.9487 ≈ 0.90), matching both the
+# pre-curve scalar default and what migrated entries get.
+DEFAULT_CHARGE_EFFICIENCY_CURVE = "0.9487"
+DEFAULT_DISCHARGE_EFFICIENCY_CURVE = "0.9487"
 DEFAULT_MIN_SOC_PERCENT = 10.0
 DEFAULT_MAX_SOC_PERCENT = 90.0
 

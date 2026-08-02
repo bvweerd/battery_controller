@@ -40,6 +40,11 @@ from .coordinator import (
     OptimizationCoordinator,
 )
 
+# Home Assistant looks up async_migrate_entry on the integration package
+# (this module), not on config_flow — without this re-export, entries from
+# older config versions fail setup with "Migration handler not found".
+from .config_flow import async_migrate_entry  # noqa: F401
+
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)

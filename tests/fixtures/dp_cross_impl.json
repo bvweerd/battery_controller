@@ -1,0 +1,378 @@
+[
+  {
+    "name": "flat_curve_arbitrage",
+    "description": "Flat sqrt(0.90) curves; charge in valley, discharge at peak.",
+    "config": {
+      "capacity_kwh": 10.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 2.0,
+      "max_discharge_power_kw": 2.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          2.0,
+          0.9487
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          2.0,
+          0.9487
+        ]
+      ],
+      "pv_dc_coupled": false,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 0.0
+    },
+    "inputs": {
+      "soc_kwh": 5.0,
+      "prices": [
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.1,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "feed_in": [
+        0.08,
+        0.08,
+        0.08,
+        0.08,
+        0.35,
+        0.35,
+        0.35,
+        0.35,
+        0.08,
+        0.08,
+        0.08,
+        0.08
+      ],
+      "pv": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "pv_dc": null,
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.01,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        1.6,
+        1.6,
+        0.5999999999999996,
+        0.4162959839780753,
+        -1.9,
+        -1.9999999999999998,
+        -1.9,
+        -1.7896000000000003,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "soc_schedule_kwh": [
+        5.0,
+        6.51792,
+        8.03584,
+        8.60506,
+        9.0,
+        6.997259407610414,
+        4.889111415621377,
+        2.8863708232317915,
+        1.0000000000000002,
+        1.0000000000000002,
+        1.0000000000000002,
+        1.0000000000000002,
+        1.0000000000000002
+      ],
+      "total_cost": -1.014730401602192,
+      "baseline_cost": 1.2000000000000002
+    }
+  },
+  {
+    "name": "sloped_curves",
+    "description": "Power-dependent curves: high power is less efficient. Battery is large relative to the discharge window so SoC boundaries stay out of reach (boundary actions are rebuild-corrected and would differ from the filter-less simulator).",
+    "config": {
+      "capacity_kwh": 20.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 4.0,
+      "max_discharge_power_kw": 4.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          2.0,
+          0.9
+        ],
+        [
+          4.0,
+          0.8
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          2.0,
+          0.92
+        ],
+        [
+          4.0,
+          0.75
+        ]
+      ],
+      "pv_dc_coupled": false,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 0.0
+    },
+    "inputs": {
+      "soc_kwh": 14.0,
+      "prices": [
+        0.5,
+        0.5,
+        0.05,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "feed_in": [
+        0.45,
+        0.45,
+        0.02,
+        0.02,
+        0.02,
+        0.02
+      ],
+      "pv": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3
+      ],
+      "pv_dc": null,
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.03,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        -3.999999999999999,
+        -4.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "soc_schedule_kwh": [
+        14.0,
+        8.666666666666668,
+        3.333333333333335,
+        3.333333333333335,
+        3.333333333333335,
+        3.333333333333335,
+        3.333333333333335
+      ],
+      "total_cost": -2.976666666666666,
+      "baseline_cost": 0.36000000000000004
+    }
+  },
+  {
+    "name": "dc_pv_grid_cap",
+    "description": "DC-coupled PV absorbed passively under a tight grid cap; low feed-in keeps the battery idle so the case stays free of post-processing (exercises the DC-PV and grid-cap cost paths).",
+    "config": {
+      "capacity_kwh": 20.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 3.0,
+      "max_discharge_power_kw": 3.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.96
+        ],
+        [
+          3.0,
+          0.88
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.96
+        ],
+        [
+          3.0,
+          0.9
+        ]
+      ],
+      "pv_dc_coupled": true,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 2.0
+    },
+    "inputs": {
+      "soc_kwh": 6.0,
+      "prices": [
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3
+      ],
+      "feed_in": [
+        0.05,
+        0.05,
+        0.05,
+        0.05,
+        0.05,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "pv": [
+        0.0,
+        0.5,
+        1.0,
+        1.0,
+        0.5,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.4,
+        0.4
+      ],
+      "pv_dc": [
+        0.0,
+        1.5,
+        2.5,
+        2.5,
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.02,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        -0.40000000000000024,
+        -0.10000000000000005,
+        0.0,
+        0.0,
+        -0.0999999999999992,
+        -0.40000000000000024,
+        -0.40000000000000024,
+        -0.40000000000000024
+      ],
+      "soc_schedule_kwh": [
+        6.0,
+        5.579831932773109,
+        5.475447799161418,
+        7.900447799161418,
+        10.325447799161417,
+        10.221063665549726,
+        9.800895598322835,
+        9.380727531095944,
+        8.960559463869053
+      ],
+      "total_cost": -0.4132391624708338,
+      "baseline_cost": 0.14999999999999997
+    }
+  }
+]
