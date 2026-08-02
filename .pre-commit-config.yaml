@@ -15,8 +15,11 @@ repos:
       - id: debug-statements
       - id: detect-private-key
 
+  # v3.20.0 crashes on Python 3.14: it calls tokenize.cookie_re, which CPython
+  # 3.14 turned into a bytes pattern, giving "cannot use a bytes pattern on a
+  # string-like object". v3.21.2 carries its own string-based _cookie_re.
   - repo: https://github.com/asottile/pyupgrade
-    rev: v3.20.0
+    rev: v3.21.2
     hooks:
       - id: pyupgrade
         args: [--py313-plus]
