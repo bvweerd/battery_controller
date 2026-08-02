@@ -160,8 +160,8 @@
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
           },
           "data_description": {
-            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie https://bvweerd.github.io/battery_controller/efficiency-curves/ voor gemeten curves.",
-            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie https://bvweerd.github.io/battery_controller/efficiency-curves/ voor gemeten curves."
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
           }
         },
         "reconfigure": {
@@ -181,8 +181,8 @@
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
           },
           "data_description": {
-            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie https://bvweerd.github.io/battery_controller/efficiency-curves/ voor gemeten curves.",
-            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie https://bvweerd.github.io/battery_controller/efficiency-curves/ voor gemeten curves."
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
           }
         }
       },
