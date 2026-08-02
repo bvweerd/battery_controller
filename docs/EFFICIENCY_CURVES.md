@@ -282,7 +282,8 @@ the quadratic term take over and pull efficiency back down above ~1500 W.
 
 ### The Marstek Venus A — measured at two discharge powers
 
-The Venus A (2120 Wh nominal, 1800 W charge / 1200 W discharge) was tested by
+The Venus A (2120 Wh nominal, **1500 W bidirectional** inverter, 2.4 kW of PV input) was
+tested by
 [smartzone.de](https://www.smartzone.de/marstek-venus-a-im-test-das-budget-modell-mit-grossartiger-leistung/)
 in a way that isolates the curve, because they ran the same full cycle at two discharge
 powers:
@@ -323,17 +324,18 @@ over 90 days ≈ 300 kWh).
 
 > **The Venus A peaks around 500–800 W, not at its rated power.**
 >
-> | Power | Round trip | Full discharge takes |
+> | Power | Round trip | Full discharge takes (3.52 kWh) |
 > | ---: | ---: | ---: |
 > | 300 W | 79 % | 11.7 h |
 > | **500 W** | **83 %** | 7.0 h |
 > | **800 W** | **83 %** | 4.4 h |
 > | 1200 W | 80 % | 2.9 h |
-> | 1800 W | 74 % | 2.0 h |
+> | 1500 W | 77 % | 2.3 h |
 >
 > The plateau is wide and flat: 500 W and 800 W are worth the same, so **800 W is the
 > better default** — identical efficiency in half the time. Above that the quadratic term
-> takes over, and charging at the full 1800 W costs **4.6 points one-way** against 800 W.
+> takes over, and running at the full 1500 W costs **3 points one-way**, 5 points round
+> trip, against 800 W.
 >
 > This is exactly the trade-off the DP exploits once the curve is loaded, and it is not
 > a free choice: a slower discharge needs a longer window. Overnight there is usually
@@ -341,13 +343,15 @@ over 90 days ≈ 300 kWh).
 > which is why the optimizer, not a fixed setpoint, should be making the call.
 
 Note the curve mixes variants: the low-power points come from a 2.12 kWh unit and the
-1200 W point from 4.24 kWh units. The inverter is the same in both (1800 W charge /
-1200 W discharge); only the pack differs, so the larger unit runs at a lower C-rate and
-should if anything be marginally better.
+1200 W point from 4.24 kWh units. The inverter is the same 1500 W bidirectional stage in
+both; only the pack differs, so the larger unit runs at a lower C-rate and should if
+anything be marginally better.
 
-> **The Venus A beats the Venus E where it counts.** Its operating overhead is **31 W
-> against the Venus E's 55 W**, so at every power below rated it is the more efficient
-> unit — 58 % round-trip at 100 W where the Venus E manages 41 %.
+> **The Venus A beats the Venus E where it counts.** Its operating overhead is **30 W
+> against the Venus E's 55 W**, so through the whole part-load region it is the more
+> efficient unit — 58 % round-trip at 100 W where the Venus E manages 41 %. Only near
+> rated power does the Venus E pull ahead, because its 2500 W stage is not yet fighting
+> its own resistive losses where the Venus A's 1500 W stage already is.
 >
 > The headline numbers say the opposite (78.5 % for the A, 82–83 % for the E) purely
 > because they were measured at different powers: the A at a realistic 200 W, the E near
@@ -356,7 +360,7 @@ should if anything be marginally better.
 
 It also settles the standby question. The Venus A draws **0.1 W** standby against the
 Venus E's 7 W — seventy times less — yet its operating overhead is only 1.8× lower
-(31 W vs 55 W). Standby tells you almost nothing about the curve.
+(30 W vs 55 W). Standby tells you almost nothing about the curve.
 
 ### Curves
 
@@ -366,15 +370,22 @@ Venus E's 7 W — seventy times less — yet its operating overhead is only 1.8�
 | Marstek Venus E | **User-measured** charge curve; discharge scaled to the measured full-power RTE |
 | Zendure, HomeWizard | RTE anchor is measured; the *shape* is borrowed from the Marstek fit |
 
-**Marstek Venus A** — 1800 W charge / 1200 W discharge, overhead 30 W, peak ~500 W
+**Marstek Venus A** — 1500 W bidirectional, overhead 30 W, plateau 500–800 W
 ```
-charge:    0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.8:0.862
-discharge: 0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892
+charge:    0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878
+discharge: 0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878
 ```
+Set both power limits to 1.5 kW. The derived `round_trip_efficiency` the integration
+reports from this curve is 0.765 — the mean over 5–95 % of rated power, which sits below
+the 0.83 plateau because it includes the poor bottom end.
 The two directions share one loss function: a full-cycle RTE plus a discharge-power ratio
-constrains the shape but cannot separate charge from discharge. Note the different power
-ranges — charging goes to 1800 W, discharging stops at 1200 W (and is often capped at
-800 W in balcony configurations, which is close to this unit's best operating point).
+constrains the shape but cannot separate charge from discharge.
+
+> **Watch the review figures on this unit.** smartzone lists an 1800 W maximum charge rate;
+> Marstek's own specification is a **1500 W bidirectional** inverter, and owners confirm
+> 1500 W. Other sources quote 1200 W continuous / 1440 W peak, but those are the *backup*
+> (off-grid) ratings, which are a different thing from the grid-tied limit. Only the
+> endpoint of the curve depends on this — the fit is anchored at 100, 200 and 1200 W.
 
 **Marstek Venus E 3.0 / 4.0** — 2500 W, overhead 55 W, measured RTE 82–83 %
 ```
