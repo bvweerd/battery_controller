@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: codespell
         args:
-          - --ignore-words-list=hass,alot,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,marge,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing,thirdparty
+          - --ignore-words-list=hass,alot,als,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,marge,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing,thirdparty
           - --skip="./.*,*.csv,*.json,*.ambr"
           - --quiet-level=2
         exclude_types: [csv, json]
