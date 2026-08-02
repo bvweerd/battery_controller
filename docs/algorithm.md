@@ -2,6 +2,30 @@
 
 This document explains step by step how the dynamic programming (DP) engine in Battery Controller calculates the optimal charge/discharge schedule for your battery.
 
+For the operational side — coordinators, intervals, and why the schedule changes between runs — see [How it works](how-it-works.md).
+
+```mermaid
+flowchart TD
+    IN["<b>Inputs</b><br/>prices, PV forecast, consumption forecast,<br/>battery specs, current SoC"] --> DISC
+
+    DISC["<b>1. Discretize</b><br/>time steps x SoC states (10 Wh)<br/>x power actions (100 W)"] --> TERM
+
+    TERM["<b>2. Terminal condition</b><br/>V[T][s] = -(soc_kwh x feed_in_price_T)"] --> BACK
+
+    BACK["<b>3. Backward pass</b><br/>V[t][s] = min over actions of<br/>(step_cost + V[t+1][s'])"] --> FWD
+
+    FWD["<b>4. Forward pass</b><br/>follow best_action[t][soc]<br/>from the current SoC"] --> FILT
+
+    FILT["<b>5. Oscillation filter</b><br/>drop charge/discharge pairs whose<br/>spread cannot cover wear + losses"] --> OUT
+
+    BACK -.->|"lambda = -dV[0]/dSoC"| SHADOW["<b>Shadow price</b><br/>marginal value of storage"]
+
+    OUT["<b>Schedule</b><br/>power target per 15-min step"]
+
+    style BACK fill:#0f766e22,stroke:#0f766e
+    style SHADOW fill:#b4530922,stroke:#b45309
+```
+
 ---
 
 ## Table of Contents
@@ -131,7 +155,7 @@ Two physical effects act in opposite directions. Cell I²R (resistive) losses gr
 
 **Configuration format**: a plain scalar (e.g. `0.95`) produces a flat curve valid at all power levels. A colon-separated list (e.g. `0:0.95, 5:0.92`) defines breakpoints that are linearly interpolated; efficiency is clamped flat outside the specified range.
 
-**Measured curves for real hardware**: see [`docs/EFFICIENCY_CURVES.md`](docs/EFFICIENCY_CURVES.md) for ready-to-paste curves for named home battery systems, based on the HTW Berlin "Stromspeicher-Inspektion 2026" lab measurements, plus guidance on deriving a curve for hardware that is not listed.
+**Measured curves for real hardware**: see [`efficiency-curves.md`](efficiency-curves.md) for ready-to-paste curves for named home battery systems, based on the HTW Berlin "Stromspeicher-Inspektion 2026" lab measurements, plus guidance on deriving a curve for hardware that is not listed.
 
 **Representative scalar efficiency**: some consumers need one number instead of the full curve — the oscillation filter threshold, the hybrid-mode shadow price thresholds and diagnostics. That scalar is the arithmetic mean of the curve sampled at 10 points from 5 % to 95 % of nominal power (the sampling used by the HTW Berlin efficiency guideline, so it is comparable to published mean path efficiencies), and `round_trip_efficiency = charge_eff_repr × discharge_eff_repr`. For a symmetric flat curve at 0.9487: RTE ≈ 0.90, identical to the pre-curve implementation.
 

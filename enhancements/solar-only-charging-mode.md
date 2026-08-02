@@ -219,7 +219,7 @@ without any explicit error-correction logic needed.
 | `select.py` | Add mode to control mode selector entity |
 | `translations/en.json` + `nl.json` | Add mode label and description |
 | `strings.json` | Keep in sync with `en.json` |
-| `docs/analyzer.js` | Sync DP changes (solar_only_charging flag, cost formula) |
+| `docs/analyzer/analyzer.js` | Sync DP changes (solar_only_charging flag, cost formula) |
 | `simulate/simulate_diagnostics.py` | Sync DP changes |
 
 ---
