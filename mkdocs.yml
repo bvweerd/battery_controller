@@ -1,0 +1,106 @@
+site_name: Battery Controller
+site_description: >-
+  Home battery cost optimization for Home Assistant — dynamic-programming
+  scheduling for price arbitrage, PV self-consumption and zero-grid control.
+site_url: https://bvweerd.github.io/battery_controller/
+repo_url: https://github.com/bvweerd/battery_controller
+repo_name: bvweerd/battery_controller
+edit_uri: edit/dev/docs/
+copyright: Battery Controller — Apache License 2.0
+
+# The analyzer is a hand-written static app, not a MkDocs page. It is copied
+# verbatim from docs/analyzer/ to /analyzer/. __tests__ holds its Jest suite and
+# must never be published.
+exclude_docs: |
+  __tests__/
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - Configuration reference: configuration.md
+  - Running it:
+      - Control modes: control-modes.md
+      - Connecting your inverter: inverter-control.md
+      - Entity reference: entities.md
+  - Understanding it:
+      - How it works: how-it-works.md
+      - Optimization algorithm: algorithm.md
+      - Efficiency curves: efficiency-curves.md
+  - Getting help:
+      - FAQ: faq.md
+      - Troubleshooting: troubleshooting.md
+      - Glossary: glossary.md
+  - Diagnostics Analyzer: /battery_controller/analyzer/
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/bvweerd/battery_controller
+      name: Battery Controller on GitHub
