@@ -8,7 +8,7 @@ systems and turns it into ready-to-paste values for the **Charge efficiency curv
   ENERGY DEPOT, BYD), based on **published lab measurements** of the curve itself.
 - **§6** covers the plug-in batteries common on the Dutch market (Marstek, Zendure,
   HomeWizard). No lab publishes curves for these, but **owners measure them**: the
-  Marstek Venus curve comes from community measurements, and the other two borrow its
+  Marstek Venus A and E curves come from community measurements, and the other two borrow its
   shape anchored on their own measured round-trip efficiency.
 
 Each curve says where it came from. Lab-measured, user-measured and modelled are not the
@@ -67,7 +67,7 @@ Three classes of source appear in this document, in descending order of confiden
 | Class | Used for | Confidence |
 | --- | --- | --- |
 | **Lab-measured curve** | §3–§5, installed hybrids | High — the curve itself was measured |
-| **User-measured curve** | §6, Marstek Venus | Good — several power points, but one owner's unit |
+| **User-measured curve** | §6, Marstek Venus A and E | Good — several power points, but one owner's unit |
 | **RTE-anchored model** | §6, Zendure and HomeWizard | Indicative — endpoint measured, shape borrowed |
 
 The lab data below is from the **HTW Berlin / aquu "Stromspeicher-Inspektion 2026"**,
@@ -280,12 +280,58 @@ the quadratic term take over and pull efficiency back down above ~1500 W.
 > a standby-based model predicts 86 % at 100 W; users measure **64 %**. Anchor on
 > operating overhead, not standby.
 
+### The Marstek Venus A — measured at two discharge powers
+
+The Venus A (2120 Wh nominal, 1800 W charge / 1200 W discharge) was tested by
+[smartzone.de](https://www.smartzone.de/marstek-venus-a-im-test-das-budget-modell-mit-grossartiger-leistung/)
+in a way that isolates the curve, because they ran the same full cycle at two discharge
+powers:
+
+| Measurement | Value |
+| --- | ---: |
+| Grid energy for a full charge | 2230 Wh |
+| Discharged at **200 W** | 1750 Wh → RTE **78.5 %** |
+| Discharged at **100 W** | 1550 Wh → RTE **69.5 %** |
+| Usable capacity (measured) | 1750 Wh of 2120 Wh nominal (83 %) |
+| Standby draw | ~0.1 W from the mains |
+
+Halving the discharge power costs **9 percentage points of round-trip efficiency**. Those
+two points plus the charge energy pin the loss model exactly:
+
+```
+loss(P) = 31 W + 4.35e-5 · P²      → reproduces all three measurements exactly
+```
+
+> **The Venus A beats the Venus E where it counts.** Its operating overhead is **31 W
+> against the Venus E's 55 W**, so at every power below rated it is the more efficient
+> unit — 58 % round-trip at 100 W where the Venus E manages 41 %.
+>
+> The headline numbers say the opposite (78.5 % for the A, 82–83 % for the E) purely
+> because they were measured at different powers: the A at a realistic 200 W, the E near
+> full power. **Two RTE figures from two reviews are not comparable unless you know the
+> power each was taken at.** This is the single most useful thing the curve model buys you.
+
+It also settles the standby question. The Venus A draws **0.1 W** standby against the
+Venus E's 7 W — seventy times less — yet its operating overhead is only 1.8× lower
+(31 W vs 55 W). Standby tells you almost nothing about the curve.
+
 ### Curves
 
 | System | Provenance |
 | --- | --- |
+| Marstek Venus A | **User-measured** at two discharge powers — the best-constrained curve here |
 | Marstek Venus E | **User-measured** charge curve; discharge scaled to the measured full-power RTE |
 | Zendure, HomeWizard | RTE anchor is measured; the *shape* is borrowed from the Marstek fit |
+
+**Marstek Venus A** — 1800 W charge / 1200 W discharge, overhead 31 W, measured RTE 78.5 % at 200 W
+```
+charge:    0.05:0.617, 0.1:0.761, 0.2:0.860, 0.3:0.896, 0.5:0.923, 0.8:0.932, 1.2:0.928, 1.8:0.913
+discharge: 0.05:0.617, 0.1:0.761, 0.2:0.860, 0.3:0.896, 0.5:0.923, 0.8:0.932, 1.2:0.928
+```
+The two directions share one loss function: a full-cycle RTE plus a discharge-power ratio
+constrains the shape but cannot separate charge from discharge. Note the different power
+ranges — charging goes to 1800 W, discharging stops at 1200 W (and is often capped at
+800 W in balcony configurations, which is close to this unit's best operating point).
 
 **Marstek Venus E 3.0 / 4.0** — 2500 W, overhead 55 W, measured RTE 82–83 %
 ```
@@ -309,12 +355,16 @@ discharge: 0.05:0.501, 0.1:0.665, 0.2:0.791, 0.3:0.840, 0.5:0.876, 0.8:0.885
 
 This is the number that decides whether a trade is profitable:
 
-| AC power | Marstek Venus E | Zendure 2400 | HomeWizard |
-| ---: | ---: | ---: | ---: |
-| 100 W | **41 %** | 49 % | 44 % |
-| 300 W | 69 % | 76 % | 71 % |
-| 500 W | 78 % | 83 % | 77 % |
-| rated | 83 % | 85 % | 78 % |
+| AC power | Marstek Venus A | Marstek Venus E | Zendure 2400 | HomeWizard |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 W | 58 % | **41 %** | 49 % | 44 % |
+| 300 W | 80 % | 69 % | 76 % | 71 % |
+| 500 W | 85 % | 78 % | 83 % | 77 % |
+| 800 W | 87 % | 84 % | 87 % | 78 % |
+| rated | 86 % | 83 % | 85 % | 78 % |
+
+Read down the 100 W column, not the "rated" row. That column is where these units spend
+most of their life, and it is where they differ most.
 
 ### Cross-check against owner reports
 
@@ -422,7 +472,8 @@ efficiency.
 
 **User measurements (§6)**
 
-- [MARSTEK VENUS C/E AC-Speicher — Photovoltaikforum](https://www.photovoltaikforum.com/thread/241171-marstek-venus-c-e-ac-speicher-5-12-kwh-erfahrungen-installation-leistung-im-allt/) — the charge-efficiency points (64 % @ 100 W, 90 % @ 500 W, 93 % @ ~1500 W, 92 % @ 2000–2200 W) that §6 is fitted to
+- [MARSTEK VENUS C/E AC-Speicher — Photovoltaikforum](https://www.photovoltaikforum.com/thread/241171-marstek-venus-c-e-ac-speicher-5-12-kwh-erfahrungen-installation-leistung-im-allt/) — the Venus E charge-efficiency points (64 % @ 100 W, 90 % @ 500 W, 93 % @ ~1500 W, 92 % @ 2000–2200 W) that §6 is fitted to
+- [Marstek Venus A im Test — smartzone.de](https://www.smartzone.de/marstek-venus-a-im-test-das-budget-modell-mit-grossartiger-leistung/) — the Venus A full cycle at two discharge powers (2230 Wh in; 1750 Wh out at 200 W, 1550 Wh out at 100 W) plus the 0.1 W standby figure
 - [Marstek Venus E 3.0 Roundtrip Effizienz gemessen — Photovoltaikforum](https://www.photovoltaikforum.com/thread/258512-marstek-venus-e-3-0-roundtrip-effizienz-gemessen/)
 - [Wirkungsgrad nur 74 % — Photovoltaikforum](https://www.photovoltaikforum.com/thread/261419-wirkungsgrad-nur-74/)
 - [Marstek VENUS-E 5.12 kWh Erfahrungen — Akkudoktor Forum](https://akkudoktor.net/t/marstek-venus-e-5-12-kwh-erfahrungen/27846)
