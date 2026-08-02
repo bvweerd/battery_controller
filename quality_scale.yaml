@@ -34,13 +34,13 @@ rules:
     comment: No service actions.
   docs-high-level-description:
     status: done
-    comment: README "What is Battery Controller?" section.
+    comment: README "What is Battery Controller?" section and the docs site home page.
   docs-installation-instructions:
     status: done
-    comment: README "Installation" section with Prerequisites, HACS steps and manual installation.
+    comment: docs/installation.md — prerequisites, sensor verification, HACS and manual installation.
   docs-removal-instructions:
     status: done
-    comment: README "Removal" section with step-by-step removal instructions including manual entity cleanup.
+    comment: docs/installation.md "Removal" — step-by-step removal including manual entity cleanup.
   entity-event-setup:
     status: done
     comment: CoordinatorEntity pattern; subscriptions via async_on_remove in async_added_to_hass.
@@ -78,10 +78,10 @@ rules:
       and delegates platform unload to async_unload_platforms.
   docs-configuration-parameters:
     status: done
-    comment: README "Configuration" section describes all parameters for Main, Battery and PV Array.
+    comment: docs/configuration.md describes all parameters for the main entry, Battery and PV Array subentries.
   docs-installation-parameters:
     status: done
-    comment: README "Prerequisites" section describes HA version, price sensor and HACS requirements.
+    comment: docs/installation.md "Prerequisites" describes HA version, price sensor and HACS requirements.
   entity-unavailable:
     status: done
     comment: |
@@ -124,14 +124,14 @@ rules:
     comment: No device discovery applicable; integration reads HA sensors and open-meteo.
   docs-data-update:
     status: done
-    comment: README "How It Works" + "Architecture" describes the coordinator cascade with intervals.
+    comment: docs/how-it-works.md "Architecture" describes the coordinator cascade with intervals.
   docs-examples:
     status: done
-    comment: README "Example Automation" section with complete YAML.
+    comment: docs/inverter-control.md "Example automation" with complete YAML.
   docs-known-limitations:
     status: done
     comment: |
-      README "Known Limitations" section covers horizon limitations, day-ahead gap,
+      docs/how-it-works.md "Known limitations" covers horizon limitations, day-ahead gap,
       LFP assumptions, multi-battery aggregation and consumption pattern learning period.
   docs-supported-devices:
     status: exempt
@@ -140,15 +140,16 @@ rules:
       No specific devices to list.
   docs-supported-functions:
     status: done
-    comment: README "Entities Created" section describes all platforms, entities and attributes.
+    comment: docs/entities.md describes all platforms, entities and attributes.
   docs-troubleshooting:
     status: done
     comment: |
-      README "Troubleshooting" section covers common problems and solutions:
-      no schedule, no arbitrage, unavailable entities, zero PV forecast, diagnostics analyzer.
+      docs/troubleshooting.md covers common problems and solutions: no schedule,
+      no arbitrage, unavailable entities, zero PV forecast, diagnostics analyzer.
+      docs/faq.md answers recurring questions from the issue tracker.
   docs-use-cases:
     status: done
-    comment: README "Control Modes" section + automation examples.
+    comment: docs/control-modes.md + the automation examples in docs/inverter-control.md.
   dynamic-devices:
     status: done
     comment: Battery and PV subentries can be added and removed after initial setup.
@@ -207,5 +208,5 @@ rules:
   strict-typing:
     status: done
     comment: |
-      mypy --strict passes with 0 errors across all 18 source files.
+      mypy --strict passes with 0 errors across all 19 source files.
       strict = true set in setup.cfg.
