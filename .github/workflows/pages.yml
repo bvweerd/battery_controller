@@ -5,6 +5,8 @@ on:
     branches: [dev]
     paths:
       - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,8 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Prepare static site
-        run: rsync -a --exclude='__tests__' docs/ _site/
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns a broken internal link into a build failure, so a renamed
+      # page cannot silently ship a dead link. The analyzer under docs/analyzer/
+      # is copied verbatim; docs/__tests__/ is dropped via exclude_docs.
+      - name: Build site
+        run: mkdocs build --strict --site-dir _site
 
       - uses: actions/configure-pages@v6
 
