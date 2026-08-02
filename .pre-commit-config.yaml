@@ -40,11 +40,13 @@ repos:
     hooks:
       - id: mypy
         # Pin the interpreter: without this, pre-commit builds the hook env
-        # with whatever Python it happens to run under. On 3.11 or 3.12 pip
-        # silently resolves homeassistant-stubs down to 2024.3.3 (the last
-        # release allowing <3.13), which predates ConfigEntry.runtime_data and
-        # subentries and reports ~70 false positives. CI already uses 3.13.
-        language_version: python3.13
+        # with whatever Python it happens to run under, and pip then silently
+        # resolves homeassistant-stubs down to the newest release that old
+        # interpreter allows. On 3.11 that is 2024.3.3, which predates
+        # ConfigEntry.runtime_data and subentries and reports ~70 false
+        # positives; on 3.13 it is 2026.2.x. Home Assistant 2026.3 onwards
+        # requires Python 3.14.2, so 3.14 is what types against current Core.
+        language_version: python3.14
         args: [--ignore-missing-imports]
         additional_dependencies:
           # Floor, so an environment that cannot satisfy it fails loudly
