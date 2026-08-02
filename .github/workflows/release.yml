@@ -50,10 +50,21 @@ jobs:
           fi
           echo "from_tag=$FROM_TAG" >> $GITHUB_OUTPUT
 
-      - name: Update version in manifest.json
+      # manifest.json is not rewritten here. bump-my-version already updates it
+      # (see .bumpversion.toml) in the very commit this tag points at, so a sed
+      # would only rewrite the value to itself — while reading as though the
+      # release process depends on it.
+      - name: Verify the tag matches the manifest version
         run: |
-          sed -i 's/"version": "[^"]*"/"version": "${{ steps.version.outputs.version }}"/' \
-            custom_components/battery_controller/manifest.json
+          MANIFEST_VERSION=$(python3 -c \
+            "import json; print(json.load(open('custom_components/battery_controller/manifest.json'))['version'])")
+          if [ "$MANIFEST_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::Tag ${{ github.event.release.tag_name }} does not match" \
+                 "manifest.json version $MANIFEST_VERSION. The tag was probably" \
+                 "created by hand instead of through the Bump Version workflow."
+            exit 1
+          fi
+          echo "manifest.json version $MANIFEST_VERSION matches the tag."
 
       - name: Create release ZIP
         run: |
