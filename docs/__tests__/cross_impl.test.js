@@ -14,7 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { runOptimizer } = require('../analyzer.js');
+const { runOptimizer } = require('../analyzer/analyzer.js');
 
 const FIXTURE = path.join(__dirname, '..', '..', 'tests', 'fixtures', 'dp_cross_impl.json');
 const cases = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));

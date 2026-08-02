@@ -15,7 +15,7 @@
     ],
     "coverageDirectory": "coverage-js",
     "collectCoverageFrom": [
-      "docs/analyzer.js"
+      "docs/analyzer/analyzer.js"
     ]
   }
 }

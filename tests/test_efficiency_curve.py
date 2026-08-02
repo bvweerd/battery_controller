@@ -111,7 +111,7 @@ class TestInterpolateEfficiency:
         assert interpolate_efficiency(curve, 10.0) == pytest.approx(0.95)
 
     def test_empty_curve_returns_one(self):
-        # Must match docs/analyzer.js and simulate/simulate_diagnostics.py,
+        # Must match docs/analyzer/analyzer.js and simulate/simulate_diagnostics.py,
         # which both return 1.0 (no losses) for an empty curve.
         assert interpolate_efficiency([], 2.0) == 1.0
 
