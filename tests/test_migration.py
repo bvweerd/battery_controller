@@ -96,8 +96,8 @@ async def test_v4_entry_migrates_through_ha_setup(hass: HomeAssistant) -> None:
     sub = next(iter(entry.subentries.values()))
     assert CONF_ROUND_TRIP_EFFICIENCY not in sub.data
     # sqrt(0.81) = 0.9 per direction
-    assert sub.data[CONF_CHARGE_EFFICIENCY_CURVE] == "0.9000"
-    assert sub.data[CONF_DISCHARGE_EFFICIENCY_CURVE] == "0.9000"
+    assert sub.data[CONF_CHARGE_EFFICIENCY_CURVE] == "0.900000"
+    assert sub.data[CONF_DISCHARGE_EFFICIENCY_CURVE] == "0.900000"
 
 
 @pytest.mark.parametrize("rte", [0.81, 0.90, 1.0])
@@ -129,7 +129,7 @@ async def test_v4_migration_preserves_round_trip_efficiency(
     charge = parse_efficiency_curve(sub.data[CONF_CHARGE_EFFICIENCY_CURVE], 5.0)
     discharge = parse_efficiency_curve(sub.data[CONF_DISCHARGE_EFFICIENCY_CURVE], 5.0)
     assert charge[0][1] * discharge[0][1] == pytest.approx(rte, abs=1e-3)
-    assert charge[0][1] == pytest.approx(math.sqrt(rte), abs=1e-4)
+    assert charge[0][1] == pytest.approx(math.sqrt(rte), abs=1e-6)
 
 
 async def test_v4_entry_with_curve_keys_is_left_alone(hass: HomeAssistant) -> None:
@@ -190,7 +190,7 @@ async def test_v3_entry_battery_moves_to_subentry(hass: HomeAssistant) -> None:
     assert sub.data[CONF_CAPACITY_KWH] == 8.0
     assert sub.data[CONF_BATTERY_SOC_SENSOR] == "sensor.soc"
     assert CONF_ROUND_TRIP_EFFICIENCY not in sub.data
-    assert sub.data[CONF_CHARGE_EFFICIENCY_CURVE] == "0.9487"
+    assert sub.data[CONF_CHARGE_EFFICIENCY_CURVE] == "0.948683"
 
 
 async def test_migration_is_idempotent(hass: HomeAssistant) -> None:

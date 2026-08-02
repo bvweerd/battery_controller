@@ -15,9 +15,15 @@ from __future__ import annotations
 import pytest
 
 from custom_components.battery_controller.battery_model import BatteryConfig
+from custom_components.battery_controller.efficiency_curve import (
+    interpolate_efficiency,
+    representative_efficiency,
+)
 from custom_components.battery_controller.optimizer import (
     calculate_step_cost,
     optimize_battery_schedule,
+    solve_boundary_drain_w,
+    solve_boundary_fill_w,
 )
 
 
@@ -176,3 +182,62 @@ def test_calculate_step_cost_precomputed_efficiency_is_equivalent() -> None:
             ),
         )
         assert precomputed == pytest.approx(on_the_fly, abs=0.0)
+
+
+class TestBoundaryActionFixedPoint:
+    """Boundary actions must land on the SoC boundary they claim to reach.
+
+    The boundary power and the efficiency at that power are mutually dependent,
+    so they are solved by fixed-point iteration.  These tests check the solved
+    power actually satisfies the SoC transition on a steep curve, where a single
+    zero-power scalar is badly wrong.
+    """
+
+    # Rising part-load curve: efficiency is poor at low power, good at high.
+    STEEP = [(0.05, 0.50), (0.2, 0.75), (0.5, 0.88), (1.0, 0.93), (5.0, 0.95)]
+
+    def test_fill_stores_exactly_the_requested_energy(self):
+        seed = representative_efficiency(self.STEEP, 5.0)
+        for delta_wh in (25.0, 60.0, 115.0, 400.0):
+            power_w = solve_boundary_fill_w(delta_wh, 0.25, self.STEEP, seed)
+            eff = interpolate_efficiency(self.STEEP, power_w / 1000.0)
+            stored_wh = power_w * 0.25 * eff
+            assert stored_wh == pytest.approx(delta_wh, rel=1e-3)
+
+    def test_drain_draws_exactly_the_requested_energy(self):
+        seed = representative_efficiency(self.STEEP, 5.0)
+        for delta_wh in (25.0, 60.0, 115.0, 400.0):
+            power_w = solve_boundary_drain_w(delta_wh, 0.25, self.STEEP, seed)
+            eff = interpolate_efficiency(self.STEEP, power_w / 1000.0)
+            drawn_wh = power_w * 0.25 / eff
+            assert drawn_wh == pytest.approx(delta_wh, rel=1e-3)
+
+    def test_zero_power_scalar_would_be_wrong(self):
+        """Guard the reason this solver exists."""
+        delta_wh = 115.0
+        zero_power_eff = interpolate_efficiency(self.STEEP, 0.0)
+        naive_fill_w = delta_wh / (0.25 * zero_power_eff)
+        naive_stored = (
+            naive_fill_w
+            * 0.25
+            * interpolate_efficiency(self.STEEP, naive_fill_w / 1000.0)
+        )
+        # The naive estimate overshoots the boundary by more than 30 %
+        assert naive_stored > delta_wh * 1.3
+
+        seed = representative_efficiency(self.STEEP, 5.0)
+        solved_w = solve_boundary_fill_w(delta_wh, 0.25, self.STEEP, seed)
+        solved_stored = (
+            solved_w * 0.25 * interpolate_efficiency(self.STEEP, solved_w / 1000.0)
+        )
+        assert solved_stored == pytest.approx(delta_wh, rel=1e-3)
+
+    def test_flat_curve_matches_closed_form(self):
+        """Flat curves must reproduce the pre-curve arithmetic exactly."""
+        flat = [(0.0, 0.9487), (5.0, 0.9487)]
+        assert solve_boundary_fill_w(100.0, 0.25, flat, 0.9487) == pytest.approx(
+            100.0 / (0.25 * 0.9487)
+        )
+        assert solve_boundary_drain_w(100.0, 0.25, flat, 0.9487) == pytest.approx(
+            100.0 * 0.9487 / 0.25
+        )
