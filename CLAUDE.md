@@ -36,14 +36,14 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
 Always do the following after modifying any source file:
 1. **Run tests**: `python -m pytest tests/ -v` — fix any failures before proceeding
 2. **Run pre-commit**: `pre-commit run --all-files` — fix any issues (ruff may auto-format)
-3. **Update `ALGORITHM.md`** — if algorithm logic, efficiency model, or DP behaviour changed
+3. **Update `docs/algorithm.md`** — if algorithm logic, efficiency model, or DP behaviour changed
 4. **Update `simulate_diagnostics.py`** — if inputs, outputs, or data structures changed
-5. **Update `docs/index.html`** — if the simulator UI or displayed parameters changed
+5. **Update `docs/analyzer/index.html`** — if the simulator UI or displayed parameters changed
 
 ## Keeping DP implementations in sync
 There are three DP implementations that **must always be kept identical** in algorithm, constants, and cost semantics:
 - `custom_components/battery_controller/optimizer.py` — the integration (source of truth)
-- `docs/analyzer.js` — JS re-implementation used by the diagnostic simulator
+- `docs/analyzer/analyzer.js` — JS re-implementation used by the diagnostic simulator
 - `simulate/simulate_diagnostics.py` — Python script for local diagnostics testing
 
 When changing **any** of the following in `optimizer.py`, apply the same change to `analyzer.js` and `simulate_diagnostics.py`:

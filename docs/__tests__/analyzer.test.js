@@ -15,7 +15,7 @@ const {
   computeTotalCost,
   runOptimizer,
   generateTips,
-} = require('../analyzer');
+} = require('../analyzer/analyzer');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
