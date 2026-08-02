@@ -644,7 +644,7 @@ async def async_migrate_entry(
                 and CONF_CHARGE_EFFICIENCY_CURVE not in data
             ):
                 rte = float(data.pop(CONF_ROUND_TRIP_EFFICIENCY))
-                sqrt_rte_str = f"{_math.sqrt(rte):.4f}"
+                sqrt_rte_str = f"{_math.sqrt(rte):.6f}"
                 data[CONF_CHARGE_EFFICIENCY_CURVE] = sqrt_rte_str
                 data[CONF_DISCHARGE_EFFICIENCY_CURVE] = sqrt_rte_str
                 hass.config_entries.async_update_subentry(

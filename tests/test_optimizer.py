@@ -1904,9 +1904,17 @@ class TestOptimizeWithMultiplePacks:
         )
         combined = aggregate_battery_configs([low_rte, high_rte])
 
-        # Weighted average per-direction efficiency: (sqrt(0.80) + sqrt(0.95)) / 2
-        # derived RTE = avg_eff^2
-        expected_rte = ((math.sqrt(0.80) + math.sqrt(0.95)) / 2) ** 2
+        # Equal power ratings → each pack carries half the aggregate power.
+        # Charging stores P * eff, so the shares combine arithmetically;
+        # discharging draws P / eff, so they combine harmonically.
+        eff_low, eff_high = math.sqrt(0.80), math.sqrt(0.95)
+        expected_charge = 0.5 * eff_low + 0.5 * eff_high
+        expected_discharge = 1.0 / (0.5 / eff_low + 0.5 / eff_high)
+        assert combined.charge_efficiency == pytest.approx(expected_charge, abs=1e-4)
+        assert combined.discharge_efficiency == pytest.approx(
+            expected_discharge, abs=1e-4
+        )
+        expected_rte = expected_charge * expected_discharge
         assert combined.round_trip_efficiency == pytest.approx(expected_rte, abs=1e-4)
 
         result = self._run(combined, current_soc_kwh=5.0)

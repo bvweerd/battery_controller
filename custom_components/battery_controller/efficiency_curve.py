@@ -95,47 +95,112 @@ def interpolate_efficiency(curve: EfficiencyCurve, power_kw: float) -> float:
     return curve[-1][1]
 
 
-def aggregate_curves(
-    curves: list[EfficiencyCurve], weights: list[float]
-) -> EfficiencyCurve:
-    """Combine multiple efficiency curves using capacity-weighted averaging.
+# Load points used to reduce a curve to a single representative scalar.
+# 10 points from 5 % to 95 % of nominal power in 10 % steps — the same sampling
+# the HTW Berlin "Stromspeicher-Inspektion" efficiency guideline uses for its
+# mean path efficiencies, so the scalar is comparable to published figures.
+_REPRESENTATIVE_LOAD_POINTS = tuple(0.05 + 0.10 * i for i in range(10))
 
-    Resamples all curves at the union of their power breakpoints (plus 0 and
-    the maximum power across all curves), then computes a weighted-average
-    efficiency at each point.
+
+def representative_efficiency(curve: EfficiencyCurve, max_power_kw: float) -> float:
+    """Reduce a curve to one scalar describing its typical operating efficiency.
+
+    Used wherever a single efficiency number is needed instead of the full
+    curve: the oscillation-filter arbitrage threshold, the hybrid-mode shadow
+    price comparisons and the derived ``round_trip_efficiency``.
+
+    The value is the arithmetic mean of the curve sampled at 5 %..95 % of
+    nominal power.  Sampling at zero power instead would pick the single worst
+    point of a realistic curve: a home battery system's efficiency is dominated
+    by the inverter's fixed idle loss at low power, so curves rise steeply from
+    near-zero power and then flatten.  A zero-power scalar therefore understates
+    round-trip efficiency badly (0.64 instead of 0.93 for a measured curve),
+    which inflates every arbitrage threshold derived from it.
+
+    A flat curve yields exactly its own value, so scalar-configured batteries
+    behave identically to the pre-curve implementation.
+    """
+    if not curve:
+        return 1.0
+    if max_power_kw <= 0:
+        return interpolate_efficiency(curve, 0.0)
+    return sum(
+        interpolate_efficiency(curve, f * max_power_kw)
+        for f in _REPRESENTATIVE_LOAD_POINTS
+    ) / len(_REPRESENTATIVE_LOAD_POINTS)
+
+
+def aggregate_curves(
+    curves: list[EfficiencyCurve],
+    max_powers: list[float],
+    *,
+    direction: str = "charge",
+) -> EfficiencyCurve:
+    """Combine per-battery efficiency curves into one curve for the fleet.
+
+    The curves are indexed by *power*, so they cannot simply be averaged at the
+    same absolute power: when the aggregate runs at P kW, each battery only
+    carries its own share of that power.  Power is assumed to be split in
+    proportion to each battery's power rating, so battery *i* operates at
+    ``share_i * P`` and is evaluated there.
+
+    The two directions combine differently because efficiency enters the SoC
+    transition differently (``stored = P * eff`` when charging, ``drawn =
+    P / eff`` when discharging):
+
+    - ``charge``:    ``eff(P) = sum(share_i * eff_i(share_i * P))``
+    - ``discharge``: ``eff(P) = 1 / sum(share_i / eff_i(share_i * P))``
 
     Args:
         curves: Per-battery efficiency curves.
-        weights: Capacity weights (e.g. capacity_kwh), one per curve.
+        max_powers: Per-battery power rating in kW, one per curve. Determines
+            both the power split and the range of the aggregated curve.
+        direction: ``"charge"`` or ``"discharge"``.
 
     Returns:
-        A single aggregated EfficiencyCurve sorted by power.
+        A single aggregated EfficiencyCurve sorted by power, spanning
+        0..sum(max_powers).
     """
     if not curves:
         raise ValueError("At least one curve is required")
-    if len(curves) != len(weights):
-        raise ValueError("curves and weights must have the same length")
+    if len(curves) != len(max_powers):
+        raise ValueError("curves and max_powers must have the same length")
+    if direction not in ("charge", "discharge"):
+        raise ValueError(
+            f"direction must be 'charge' or 'discharge', got {direction!r}"
+        )
 
-    total_weight = sum(weights)
-    if total_weight <= 0:
-        raise ValueError("Total weight must be positive")
+    total_power = sum(max_powers)
+    if total_power <= 0:
+        # No pack can move any power, so there is no power axis to split along.
+        # Fall back to an equal-weight average so the caller still gets a valid
+        # curve (the optimizer will only ever evaluate it at zero power).
+        shares = [1.0 / len(curves)] * len(curves)
+        total_power = 0.0
+    else:
+        shares = [p / total_power for p in max_powers]
 
-    # Collect all power breakpoints
-    power_points: set[float] = {0.0}
-    for curve in curves:
+    # Breakpoints: a breakpoint at power p of battery i is reached when the
+    # aggregate runs at p / share_i, so map each curve's points onto that axis.
+    power_points: set[float] = {0.0, total_power}
+    for curve, share in zip(curves, shares):
+        if share <= 0:
+            continue
         for p, _ in curve:
-            power_points.add(p)
-        power_points.add(curve[-1][0])  # max of this curve
+            aggregate_p = p / share
+            if 0.0 < aggregate_p < total_power:
+                power_points.add(aggregate_p)
 
     combined: EfficiencyCurve = []
     for p in sorted(power_points):
-        avg_eff = (
-            sum(
-                interpolate_efficiency(curve, p) * w
-                for curve, w in zip(curves, weights)
-            )
-            / total_weight
-        )
-        combined.append((p, avg_eff))
+        effs = [
+            interpolate_efficiency(curve, share * p)
+            for curve, share in zip(curves, shares)
+        ]
+        if direction == "charge":
+            eff = sum(share * e for share, e in zip(shares, effs))
+        else:
+            eff = 1.0 / sum(share / e for share, e in zip(shares, effs) if e > 0)
+        combined.append((p, min(1.0, eff)))
 
     return combined

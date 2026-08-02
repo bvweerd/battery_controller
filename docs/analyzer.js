@@ -33,15 +33,74 @@ function interpolateEfficiency(curve, powerKw) {
 /** Build a flat (power-independent) efficiency curve. */
 function flatCurve(eff, maxKw) { return [[0, eff], [maxKw, eff]]; }
 
+// Load points used to reduce a curve to a single representative scalar: 10
+// points from 5% to 95% of nominal power (mirrors efficiency_curve.py).
+const REPRESENTATIVE_LOAD_POINTS =
+  Array.from({ length: 10 }, (_, i) => 0.05 + 0.10 * i);
+
+/**
+ * Reduce a curve to one scalar describing its typical operating efficiency.
+ * Sampling at zero power instead would pick the single worst point of a
+ * realistic curve, inflating every threshold derived from it.
+ */
+function representativeEfficiency(curve, maxPowerKw) {
+  if (!curve || curve.length === 0) return 1.0;
+  if (maxPowerKw <= 0) return interpolateEfficiency(curve, 0);
+  let sum = 0;
+  for (const f of REPRESENTATIVE_LOAD_POINTS) {
+    sum += interpolateEfficiency(curve, f * maxPowerKw);
+  }
+  return sum / REPRESENTATIVE_LOAD_POINTS.length;
+}
+
+/**
+ * AC discharge power that draws exactly deltaWh from the battery, and the AC
+ * charge power that stores exactly deltaWh.  The power appears on both sides
+ * (efficiency depends on the power being solved for), so iterate from a seed.
+ */
+// Iterate until the efficiency stops moving. A flat curve converges on the
+// first pass; a steep part-load curve needs a handful.
+const BOUNDARY_SOLVER_MAX_ITER = 12;
+const BOUNDARY_SOLVER_TOL = 1e-9;
+
+function solveDrainW(deltaWh, stepH, curve, seedEff) {
+  let eff = seedEff;
+  for (let i = 0; i < BOUNDARY_SOLVER_MAX_ITER; i++) {
+    const nextEff = interpolateEfficiency(curve, (deltaWh * eff) / stepH / 1000);
+    const done = Math.abs(nextEff - eff) < BOUNDARY_SOLVER_TOL;
+    eff = nextEff;
+    if (done) break;
+  }
+  return (deltaWh * eff) / stepH;
+}
+
+function solveFillW(deltaWh, stepH, curve, seedEff) {
+  let eff = seedEff;
+  for (let i = 0; i < BOUNDARY_SOLVER_MAX_ITER; i++) {
+    const nextEff = interpolateEfficiency(curve, deltaWh / (stepH * eff) / 1000);
+    const done = Math.abs(nextEff - eff) < BOUNDARY_SOLVER_TOL;
+    eff = nextEff;
+    if (done) break;
+  }
+  return deltaWh / (stepH * eff);
+}
+
 function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
     pvW, consumW, chargeCurve, dischargeCurve, degradCostPerKwh, pvDcCoupled, pvDcW, pvDcEfficiency, maxGridPowerKw, maxSocWh,
     chargeEffPre = null, dischargeEffPre = null) {
   // chargeEffPre / dischargeEffPre may be supplied pre-interpolated (hot-path
   // optimisation); they MUST come from the same curves passed above.
-  const actionKw    = Math.abs(actionW) / 1000;
-  const chargeEff   = chargeEffPre    ?? interpolateEfficiency(chargeCurve, actionKw);
-  const dischargeEff= dischargeEffPre ?? interpolateEfficiency(dischargeCurve, actionKw);
-  const dcEff       = pvDcCoupled ? pvDcEfficiency : chargeEff;
+  // Interpolate only when the caller did not pre-compute (mirrors optimizer.py).
+  let chargeEff = chargeEffPre;
+  let dischargeEff = dischargeEffPre;
+  if (chargeEff == null || dischargeEff == null) {
+    const actionKw = Math.abs(actionW) / 1000;
+    if (chargeEff == null) chargeEff = interpolateEfficiency(chargeCurve, actionKw);
+    if (dischargeEff == null) dischargeEff = interpolateEfficiency(dischargeCurve, actionKw);
+  }
+  // Only read on the DC-coupled paths below; the MPPT path never goes through
+  // the AC charger, so it does not use the charge curve.
+  const dcEff       = pvDcEfficiency;
 
   pvW   = Math.max(0, pvW);
   pvDcW = Math.max(0, pvDcW || 0);
@@ -132,9 +191,9 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const dischargeCurve = dischargeEffCurveOverride ?? cfg.dischargeCurve;
   const costChargeCurve    = cfg.chargeCurve;
   const costDischargeCurve = cfg.dischargeCurve;
-  // Scalar at zero power — used only for boundary action estimation
-  const chgEffScalar = interpolateEfficiency(chargeCurve, 0);
-  const disEffScalar = interpolateEfficiency(dischargeCurve, 0);
+  // Seed for the boundary-action fixed point (see solveFillW / solveDrainW)
+  const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
+  const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
   const minSocWh = Math.round(cfg.minSocKwh * 1000);
   const maxSocWh = Math.round(cfg.maxSocKwh * 1000);
 
@@ -276,7 +335,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
       // Boundary actions: exact power to reach min/max SoC.
       // new_soc_idx is known directly — no floating-point round-trip needed.
       if (socWh > minSocWh) {
-        const drainW = (socWh - minSocWh) * disEffScalar / stepH;
+        const drainW = solveDrainW(socWh - minSocWh, stepH, dischargeCurve, disEffSeed);
         if (drainW > 0 && drainW <= maxDisW) {
           const stepCost = calculateStepCost(
             stepH, socWh, -drainW, gridPrice, feedIn,
@@ -288,7 +347,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         }
       }
       if (socWh < maxSocWh) {
-        const fillW = (maxSocWh - socWh) / (stepH * chgEffScalar);
+        const fillW = solveFillW(maxSocWh - socWh, stepH, chargeCurve, chgEffSeed);
         if (fillW > 0 && fillW <= maxChgW) {
           const stepCost = calculateStepCost(
             stepH, socWh, fillW, gridPrice, feedIn,
@@ -316,8 +375,8 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
   const dischargeCurve = dischargeEffCurveOverride ?? cfg.dischargeCurve;
   const costChargeCurve    = cfg.chargeCurve;
   const costDischargeCurve = cfg.dischargeCurve;
-  const chgEffScalar = interpolateEfficiency(chargeCurve, 0);
-  const disEffScalar = interpolateEfficiency(dischargeCurve, 0);
+  const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
+  const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
   const nSocStates   = socStates.length;
   const INF          = Infinity;
 
@@ -398,7 +457,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
 
     // Boundary actions: exact power to drain to min or fill to max SoC
     if (curSocWh > minSocWh) {
-      const drainW = (curSocWh - minSocWh) * disEffScalar / stepH;
+      const drainW = solveDrainW(curSocWh - minSocWh, stepH, dischargeCurve, disEffSeed);
       if (drainW > 0 && drainW <= maxDisW) {
         const stepCost = calculateStepCost(
           stepH, curSocWh, -drainW, gridPrice, feedIn,
@@ -410,7 +469,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
       }
     }
     if (curSocWh < maxSocWh) {
-      const fillW = (maxSocWh - curSocWh) / (stepH * chgEffScalar);
+      const fillW = solveFillW(maxSocWh - curSocWh, stepH, chargeCurve, chgEffSeed);
       if (fillW > 0 && fillW <= maxChgW) {
         const stepCost = calculateStepCost(
           stepH, curSocWh, fillW, gridPrice, feedIn,
@@ -491,9 +550,11 @@ function filterOscillations(powerKw, modes, cfg, priceFc, feedInFc, pvFc,
   // The profitability threshold is economic and always uses the NOMINAL
   // curves (mirrors optimizer.py); calibration overrides only affect SoC
   // transitions, which are rebuilt by the caller via rebuildSoc.
-  const chgEff0  = interpolateEfficiency(cfg.chargeCurve, 0);
-  const disEff0  = interpolateEfficiency(cfg.dischargeCurve, 0);
-  const _rte     = chgEff0 * disEff0;
+  // Representative operating efficiency, not the zero-power value: the latter
+  // is the worst point of a realistic curve and inflates the threshold.
+  const chgEffR  = representativeEfficiency(cfg.chargeCurve, cfg.maxChargeKw);
+  const disEffR  = representativeEfficiency(cfg.dischargeCurve, cfg.maxDischargeKw);
+  const _rte     = chgEffR * disEffR;
   const sqrtRte  = Math.sqrt(_rte);
   const minArb   = (2 * degradCost + minPriceSpread) / sqrtRte;
 
@@ -1063,6 +1124,9 @@ if (typeof module !== 'undefined') {
   module.exports = {
     SOC_RES_WH, POWER_STEP_W, DC_TO_AC_EFF, MIN_PV_SURPLUS_KW, MIN_CYCLE_KWH,
     interpolateEfficiency,
+    representativeEfficiency,
+    solveDrainW,
+    solveFillW,
     flatCurve,
     calculateStepCost,
     totalPvSeries,

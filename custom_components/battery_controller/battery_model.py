@@ -9,8 +9,8 @@ from typing import Any
 from .efficiency_curve import (
     EfficiencyCurve,
     aggregate_curves,
-    interpolate_efficiency,
     parse_efficiency_curve,
+    representative_efficiency,
 )
 
 
@@ -69,12 +69,15 @@ class BatteryConfig:
         self.discharge_efficiency_curve_parsed = parse_efficiency_curve(
             self.discharge_efficiency_curve, self.max_discharge_power_kw
         )
-        # Scalar efficiency at zero power — used by the oscillation filter and diagnostics
-        self.charge_efficiency = interpolate_efficiency(
-            self.charge_efficiency_curve_parsed, 0.0
+        # Representative scalar efficiency (mean over 5..95 % of nominal power) —
+        # used by the oscillation filter, the hybrid-mode thresholds and
+        # diagnostics.  See representative_efficiency() for why this is not
+        # sampled at zero power.
+        self.charge_efficiency = representative_efficiency(
+            self.charge_efficiency_curve_parsed, self.max_charge_power_kw
         )
-        self.discharge_efficiency = interpolate_efficiency(
-            self.discharge_efficiency_curve_parsed, 0.0
+        self.discharge_efficiency = representative_efficiency(
+            self.discharge_efficiency_curve_parsed, self.max_discharge_power_kw
         )
         # Derived scalar RTE for diagnostics / backward-compat consumers
         self.round_trip_efficiency = self.charge_efficiency * self.discharge_efficiency
@@ -152,7 +155,7 @@ class BatteryConfig:
 
         # Backward compat: if new curve keys absent, derive flat curves from scalar RTE
         rte = float(data.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY))
-        sqrt_rte_str = f"{math.sqrt(rte):.4f}"
+        sqrt_rte_str = f"{math.sqrt(rte):.6f}"
         charge_curve_str = data.get(CONF_CHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
         discharge_curve_str = data.get(CONF_DISCHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
 
@@ -238,7 +241,7 @@ class BatteryConfig:
         rte = float(
             config.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
         )
-        sqrt_rte_str = f"{math.sqrt(rte):.4f}"
+        sqrt_rte_str = f"{math.sqrt(rte):.6f}"
         charge_curve_str = config.get(CONF_CHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
         discharge_curve_str = config.get(CONF_DISCHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
 
@@ -313,9 +316,11 @@ class BatteryConfig:
     ) -> BatteryConfig:
         """Create BatteryConfig from pre-parsed aggregated curves."""
 
-        # Serialize the curves to strings so the normal constructor path works
+        # Serialize the curves to strings so the normal constructor path works.
+        # Fixed-point formatting: repr() would emit scientific notation for very
+        # small values, which parse_efficiency_curve does not accept.
         def _curve_to_str(curve: EfficiencyCurve) -> str:
-            return ", ".join(f"{p}:{e}" for p, e in curve)
+            return ", ".join(f"{p:.6f}:{e:.6f}" for p, e in curve)
 
         return cls(
             capacity_kwh=capacity_kwh,
@@ -349,14 +354,19 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         return configs[0]
 
     total_cap = sum(c.capacity_kwh for c in configs)
-    weights = [c.capacity_kwh for c in configs]
 
-    # Capacity-weighted efficiency curves
+    # Efficiency curves are indexed by power, so they are combined on the power
+    # axis: each battery carries a share of the aggregate power proportional to
+    # its own rating and is evaluated at that share, not at the fleet total.
     combined_charge_curve = aggregate_curves(
-        [c.charge_efficiency_curve_parsed for c in configs], weights
+        [c.charge_efficiency_curve_parsed for c in configs],
+        [c.max_charge_power_kw for c in configs],
+        direction="charge",
     )
     combined_discharge_curve = aggregate_curves(
-        [c.discharge_efficiency_curve_parsed for c in configs], weights
+        [c.discharge_efficiency_curve_parsed for c in configs],
+        [c.max_discharge_power_kw for c in configs],
+        direction="discharge",
     )
 
     # SoC limits: sum of kWh limits, expressed back as % of combined capacity
