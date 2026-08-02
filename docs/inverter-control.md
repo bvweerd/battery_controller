@@ -47,16 +47,16 @@ This trips up almost everyone, because the input and output conventions are **op
 flowchart LR
     subgraph OUT["Integration OUTPUT — Battery Setpoint, Optimal Power"]
         direction LR
-        ON["negative<br/><b>−1000 W</b>"] --- OZ["0"] --- OP["positive<br/><b>+1000 W</b>"]
-        ONL["CHARGE"] -.- ON
-        OPL["DISCHARGE"] -.- OP
+        out_neg["negative<br/><b>−1000 W</b>"] --- out_zero["0"] --- out_pos["positive<br/><b>+1000 W</b>"]
+        out_neg_label["CHARGE"] -.- out_neg
+        out_pos_label["DISCHARGE"] -.- out_pos
     end
 
     subgraph INP["Your INPUT sensor — battery_power_sensor"]
         direction LR
-        IN["negative<br/><b>−1000 W</b>"] --- IZ["0"] --- IP["positive<br/><b>+1000 W</b>"]
-        INL["DISCHARGE"] -.- IN
-        IPL["CHARGE"] -.- IP
+        in_neg["negative<br/><b>−1000 W</b>"] --- in_zero["0"] --- in_pos["positive<br/><b>+1000 W</b>"]
+        in_neg_label["DISCHARGE"] -.- in_neg
+        in_pos_label["CHARGE"] -.- in_pos
     end
 
     style OUT fill:#0f766e22,stroke:#0f766e
