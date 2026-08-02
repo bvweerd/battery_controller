@@ -62,7 +62,7 @@ def _integration_config(cfg: dict) -> BatteryConfig:
     )
 
 
-def _sim_config(cfg: dict) -> "sim.BatteryConfig":
+def _sim_config(cfg: dict) -> sim.BatteryConfig:
     min_soc_kwh = cfg["capacity_kwh"] * cfg["min_soc_percent"] / 100.0
     max_soc_kwh = cfg["capacity_kwh"] * cfg["max_soc_percent"] / 100.0
     return sim.BatteryConfig(
