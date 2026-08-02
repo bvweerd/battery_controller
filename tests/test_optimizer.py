@@ -2796,7 +2796,8 @@ class TestSocGridBudget:
             capacity_kwh=55.0,
             max_charge_power_kw=5.0,
             max_discharge_power_kw=5.0,
-            round_trip_efficiency=0.90,
+            charge_efficiency_curve="0.9487",
+            discharge_efficiency_curve="0.9487",
             min_soc_percent=10.0,
             max_soc_percent=90.0,
         )
