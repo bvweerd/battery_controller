@@ -82,7 +82,9 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          # Node 20 left maintenance in April 2026, so the analyzer tests were
+          # running on an unsupported runtime. 22 is the current LTS.
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
