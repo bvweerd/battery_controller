@@ -32,6 +32,12 @@ rules:
   docs-actions:
     status: exempt
     comment: No service actions.
+  docs-conditions:
+    status: exempt
+    comment: No condition platform; the integration provides no conditions.
+  docs-triggers:
+    status: exempt
+    comment: No trigger platform; the integration provides no triggers.
   docs-high-level-description:
     status: done
     comment: README "What is Battery Controller?" section.
