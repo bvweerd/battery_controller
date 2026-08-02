@@ -334,9 +334,9 @@ scheduling purposes while using the aggregate for real-time dispatch.
 | `const.py` | New config keys for all new fields |
 | `translations/en.json` + `nl.json` | New strings for all new fields and sensors |
 | `strings.json` | Keep in sync with `en.json` |
-| `docs/analyzer.js` | Sync: discontinuous action space, time-varying SoC floor, charge-only terminal condition |
+| `docs/analyzer/analyzer.js` | Sync: discontinuous action space, time-varying SoC floor, charge-only terminal condition |
 | `simulate/simulate_diagnostics.py` | Sync: same algorithm changes |
-| `ALGORITHM.md` | Document deadline-constraint mechanism and charge-only terminal condition |
+| `docs/algorithm.md` | Document deadline-constraint mechanism and charge-only terminal condition |
 
 ---
 

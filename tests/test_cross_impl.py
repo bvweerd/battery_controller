@@ -1,6 +1,6 @@
 """Cross-implementation DP fixtures: optimizer.py vs simulate_diagnostics.py.
 
-The three DP implementations (optimizer.py, docs/analyzer.js,
+The three DP implementations (optimizer.py, docs/analyzer/analyzer.js,
 simulate/simulate_diagnostics.py) must stay algorithmically identical.  The
 shared fixtures in tests/fixtures/dp_cross_impl.json pin the integration's
 output; this module checks the integration against the fixture (staleness
