@@ -1,10 +1,16 @@
 # Efficiency curve examples for known home batteries
 
-This document collects **measured** part-load efficiency data for commercially available
-home battery systems and turns it into ready-to-paste values for the
-**Charge efficiency curve** and **Discharge efficiency curve** fields of this integration.
+This document collects part-load efficiency data for commercially available home battery
+systems and turns it into ready-to-paste values for the **Charge efficiency curve** and
+**Discharge efficiency curve** fields of this integration.
 
-If your system is not listed, jump to [Deriving your own curve](#deriving-your-own-curve).
+- **§3–§5** cover installed hybrid systems (KOSTAL, FRONIUS, SMA, FOX ESS, RCT, SAX,
+  ENERGY DEPOT, BYD) and are based on **published lab measurements** of the curve itself.
+- **§6** covers the plug-in batteries common on the Dutch market (Marstek, Zendure,
+  HomeWizard). No part-load curves are published for these, so the curves there are
+  **modelled** from measured round-trip efficiency and measured idle draw.
+
+If your system is not listed, jump to [§7 Deriving your own curve](#7-deriving-your-own-curve).
 
 ---
 
@@ -222,7 +228,95 @@ For a system that is not listed, pick the class that matches your hardware:
 
 ---
 
-## 6. Deriving your own curve
+## 6. Dutch-market plug-in batteries (Marstek, Zendure, HomeWizard)
+
+The HTW study covers permanently installed hybrid systems. The plug-in ("stekker")
+batteries that dominate the Dutch market are a different class, and **nobody publishes
+part-load curves for them**. What independent reviewers do measure is a round-trip
+efficiency at a stated power plus an idle consumption — which is enough to reconstruct
+a curve.
+
+> ⚠️ Unlike §3–§5, **the curves in this section are modelled, not measured.** They are
+> anchored on measured endpoints (see the table) but the shape between them comes from
+> the loss model below. Treat them as informed starting points.
+
+### Measured anchors
+
+| System | Usable | Rated power | Idle draw | Measured RTE | Measured at |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Marstek Venus E 3.0 / 4.0 | 5.12 kWh | 2500 W | ~7 W | **82–83 %** | full power |
+| Zendure SolarFlow 2400 PRO / AC+ | — | 2400 W | < 5 W | **87–88 %** | 1200 W (its best point) |
+| HomeWizard Plug-In Battery | 2.47 kWh | 800 W | 6 W (0.5 W in API standby) | **78.4 %** | 800 W constant, 4 full cycles |
+
+Note how far these sit below the ~90 % of the installed hybrid systems in §4, and how far
+below the manufacturers' own claims — Marstek quotes 92–95 % against ~82 % measured.
+
+### The model
+
+Per direction, with `P_idle` the idle draw and `a` the load-proportional loss fraction:
+
+```
+loss(P) = P_idle + a·P
+η(P)    = P / (P + P_idle + a·P)
+```
+
+`a` is solved from the measured RTE anchor, since `η(P_ref) = √RTE`. That splits the
+total loss into the part that scales with power and the part that does not — the whole
+reason the curve has a shape at all.
+
+### Derived curves
+
+Ready to paste. The charge side is taken as symmetric, which is what the per-direction
+measurements that exist (Zendure: ~93–94 % both ways) support.
+
+**Marstek Venus E 3.0 / 4.0** — `a` = 0.098
+```
+charge:    0.05:0.808, 0.1:0.856, 0.2:0.882, 0.3:0.892, 0.5:0.899, 0.8:0.903, 1.2:0.906, 2.5:0.908
+discharge: 0.05:0.808, 0.1:0.856, 0.2:0.882, 0.3:0.892, 0.5:0.899, 0.8:0.903, 1.2:0.906, 2.5:0.908
+```
+
+**Zendure SolarFlow 2400 PRO / AC+** — `a` = 0.065
+```
+charge:    0.05:0.858, 0.1:0.897, 0.2:0.918, 0.3:0.925, 0.5:0.930, 0.8:0.934, 1.2:0.935, 2.4:0.937
+discharge: 0.05:0.858, 0.1:0.897, 0.2:0.918, 0.3:0.925, 0.5:0.930, 0.8:0.934, 1.2:0.935, 2.4:0.937
+```
+Reviewers note efficiency dips slightly above ~2000 W as the unit heats up. The linear
+model does not capture that; if you routinely run near 2400 W, shade the last point down
+by a point or two.
+
+**HomeWizard Plug-In Battery** — `a` = 0.122
+```
+charge:    0.05:0.805, 0.1:0.846, 0.2:0.868, 0.3:0.876, 0.5:0.882, 0.8:0.885
+discharge: 0.05:0.805, 0.1:0.846, 0.2:0.868, 0.3:0.876, 0.5:0.882, 0.8:0.885
+```
+
+### Sanity check on the model
+
+For the HomeWizard the model predicts a round-trip efficiency of **71.6 % at 100 W**
+against 78.4 % at its rated 800 W. Owners running it in Nul-op-de-Meter mode — which
+holds the battery at low power for hours — report efficiency sagging to **~74 %**. The
+model lands in the right place, and the effect it predicts is exactly the one those
+owners are seeing.
+
+### What this means for scheduling
+
+Plug-in batteries have a **flatter but lower** curve than the installed hybrids:
+
+- Their idle draw is small in absolute terms (5–7 W against 30–60 W for a 10 kW hybrid),
+  so the part-load cliff at 100 W is much less dramatic.
+- But their load-proportional loss is far larger (`a` ≈ 0.07–0.12 against ~0.02 for a good
+  hybrid). That is a floor no operating point escapes, and it is why their RTE tops out
+  around 78–88 %.
+
+The practical consequence for this integration: with a 2500 W unit the optimizer gains
+little from choosing a lower power, because the curve is nearly flat above ~500 W. What
+it does gain is an honest round-trip efficiency, which sets the arbitrage threshold. A
+Marstek entered as a flat `0.9487` (RTE 0.90) will look ~9 percentage points more
+profitable than it is, and the optimizer will take trades that lose money.
+
+---
+
+## 7. Deriving your own curve
 
 ### From an idle-loss figure
 
@@ -266,7 +360,17 @@ efficiency.
 
 ## Sources
 
+**Installed hybrid systems (§3–§5)**
+
 - [Stromspeicher-Inspektion 2026 — HTW Berlin](https://solar.htw-berlin.de/studien/stromspeicher-inspektion-2026/)
 - [Stromspeicher-Inspektion 2026 (full PDF)](https://solar.htw-berlin.de/wp-content/uploads/HTW-aquu-Stromspeicher-Inspektion-2026.pdf)
 - [Stromspeicher-Inspektion overview — HTW Berlin](https://solar.htw-berlin.de/themen/stromspeicher-inspektion/)
 - [Battery Storage Inspection 2026 — heise online](https://www.heise.de/en/news/Battery-Storage-Inspection-2026-Large-differences-in-efficiency-and-warranty-11200179.html)
+
+**Dutch-market plug-in batteries (§6)**
+
+- [HomeWizard Plug-in Battery review — energienerds.nl](https://energienerds.nl/index.php/2026/03/26/homewizard-plug-in-battery-review) (RTE 78.4 % over four cycles at 800 W; idle draw)
+- [Waarom RTE niet hetzelfde is als efficiency — HomeWizard](https://www.homewizard.com/nl/blog/rte-efficiency-thuisbatterij/) (manufacturer's own 70–80 % real-world range)
+- [Marstek Venus E 3.0 review — energienerds.nl](https://energienerds.nl/index.php/2025/11/06/review-stekkerbatterij-marstek-venus-e-3-0-ac-thuisbatterij)
+- [Marstek Venus E — jeroen.nl](https://jeroen.nl/energie/opslaan/thuisbatterij/stekkerbatterij/marstek-venus-e) (standby draw ~7 W)
+- [Zendure SolarFlow 2400 PRO & AC+ technical deep-dive — Jay's Desk](https://www.jaysdesk.com/en/energie/zendure-2400-pro-ac-plus-review) (RTE ~87–88 %, ~93–94 % per direction, standby < 5 W)
