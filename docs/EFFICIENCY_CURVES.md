@@ -295,12 +295,31 @@ powers:
 | Usable capacity (measured) | 1750 Wh of 2120 Wh nominal (83 %) |
 | Standby draw | ~0.1 W from the mains |
 
-Halving the discharge power costs **9 percentage points of round-trip efficiency**. Those
-two points plus the charge energy pin the loss model exactly:
+Halving the discharge power costs **9 percentage points of round-trip efficiency**.
+
+Those points only constrain the curve up to 200 W, though. The high-power end comes from
+an owner running **Venus A units at 1200 W**, who reports **79–80 %** round-trip from the
+batteries' own energy counters over roughly **300 kWh** of throughput. Fitting both
+sources together:
 
 ```
-loss(P) = 31 W + 4.35e-5 · P²      → reproduces all three measurements exactly
+loss(P) = 30 W + 7.95e-5 · P²
 ```
+
+| Constraint | Source | Target | Fit |
+| --- | --- | ---: | ---: |
+| discharge 100 W vs 200 W | smartzone | 0.886 | 0.891 |
+| round trip at 1200 W | owner, ~300 kWh | 0.795 | 0.797 |
+| full cycle at 200 W discharge | smartzone | 0.785 | 0.781 |
+
+All three land within half a percentage point, and the fit implies smartzone charged at
+roughly 600 W — plausible, and a figure they never stated.
+
+> **The Venus A peaks around 500 W, not at its rated power.** Round trip is **83 % at
+> 500 W against 80 % at 1200 W**. Running one flat out is not its best operating point;
+> the quadratic term has already overtaken the fixed overhead by then. This is precisely
+> the trade-off the DP can exploit once the curve is loaded — it will spread a discharge
+> over more time at lower power when the horizon allows.
 
 > **The Venus A beats the Venus E where it counts.** Its operating overhead is **31 W
 > against the Venus E's 55 W**, so at every power below rated it is the more efficient
@@ -319,14 +338,14 @@ Venus E's 7 W — seventy times less — yet its operating overhead is only 1.8�
 
 | System | Provenance |
 | --- | --- |
-| Marstek Venus A | **User-measured** at two discharge powers — the best-constrained curve here |
+| Marstek Venus A | **User-measured**, two independent owners: a wall-meter test at 100/200 W plus ~300 kWh of counter data at 1200 W — the best-constrained curve here |
 | Marstek Venus E | **User-measured** charge curve; discharge scaled to the measured full-power RTE |
 | Zendure, HomeWizard | RTE anchor is measured; the *shape* is borrowed from the Marstek fit |
 
-**Marstek Venus A** — 1800 W charge / 1200 W discharge, overhead 31 W, measured RTE 78.5 % at 200 W
+**Marstek Venus A** — 1800 W charge / 1200 W discharge, overhead 30 W, peak ~500 W
 ```
-charge:    0.05:0.617, 0.1:0.761, 0.2:0.860, 0.3:0.896, 0.5:0.923, 0.8:0.932, 1.2:0.928, 1.8:0.913
-discharge: 0.05:0.617, 0.1:0.761, 0.2:0.860, 0.3:0.896, 0.5:0.923, 0.8:0.932, 1.2:0.928
+charge:    0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.8:0.862
+discharge: 0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892
 ```
 The two directions share one loss function: a full-cycle RTE plus a discharge-power ratio
 constrains the shape but cannot separate charge from discharge. Note the different power
@@ -358,13 +377,50 @@ This is the number that decides whether a trade is profitable:
 | AC power | Marstek Venus A | Marstek Venus E | Zendure 2400 | HomeWizard |
 | ---: | ---: | ---: | ---: | ---: |
 | 100 W | 58 % | **41 %** | 49 % | 44 % |
-| 300 W | 80 % | 69 % | 76 % | 71 % |
-| 500 W | 85 % | 78 % | 83 % | 77 % |
-| 800 W | 87 % | 84 % | 87 % | 78 % |
-| rated | 86 % | 83 % | 85 % | 78 % |
+| 300 W | 79 % | 69 % | 76 % | 71 % |
+| 500 W | **83 %** (peak) | 78 % | 83 % | 77 % |
+| 800 W | 82 % | 84 % | 87 % | 78 % |
+| rated | 80 % | 83 % | 85 % | 78 % |
 
 Read down the 100 W column, not the "rated" row. That column is where these units spend
 most of their life, and it is where they differ most.
+
+### Where you measure changes what you get
+
+Efficiency figures for the same unit disagree by 5–10 points depending on the instrument.
+Before comparing any two numbers, establish which of these produced them:
+
+| Instrument | What it captures | Watch out for |
+| --- | --- | --- |
+| **Wall meter** (plug-in energy meter, P1) | Everything: conversion, standby, idle drain | Standby is counted even when the battery does nothing |
+| **Battery's own counters** (app, HA sensors) | Usually AC-side energy while actively converting | Unknown measurement plane; standby may or may not be counted; internal counters are less trustworthy than a meter |
+| **Single back-to-back cycle** | Close to pure conversion at one power | Only valid for the power you ran it at |
+
+The Venus A curve above is fitted to the first and second of these, from two different
+owners, and they agree to within half a percentage point once the power dependence is
+accounted for. That agreement is the reason to trust the fit.
+
+> ### ⚠️ Standby does not belong in the curve
+>
+> Whatever your metered figure, do not raise the curve's overhead term until it reproduces
+> it. Three reasons:
+>
+> 1. **The shape will not accept it.** Forcing the Venus E to 79.5 % at 1200 W by raising
+>    the fixed overhead gives 30 % round-trip at 100 W — but 69.5 % was *measured* there.
+>    If a gap does not fit the shape, it is not a conversion loss.
+> 2. **Standby is a sunk cost, not a marginal one.** The unit draws it whether or not it
+>    charges. Marginal cost is what decides a trade, so folding standby in makes the
+>    optimizer refuse arbitrage that is genuinely profitable.
+> 3. **Runtime calibration already handles the drift.** The integration compares planned
+>    against actual SoC each step and corrects the *transitions* — never the costs. A slow
+>    standby drain shows up there and is absorbed automatically.
+>
+> A metered whole-system figure is the right number for "is this battery worth owning".
+> It is the wrong number for "should the optimizer take this trade".
+
+To separate the two on your own unit: charge full, immediately discharge full at a fixed
+power, and compare that single cycle against your long-run meter figure. The difference is
+standby plus partial-cycle overhead. Repeat at a second power and you have a curve.
 
 ### Cross-check against owner reports
 
