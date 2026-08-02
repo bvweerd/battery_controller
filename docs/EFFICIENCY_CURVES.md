@@ -315,11 +315,35 @@ loss(P) = 30 W + 7.95e-5 · P²
 All three land within half a percentage point, and the fit implies smartzone charged at
 roughly 600 W — plausible, and a figure they never stated.
 
-> **The Venus A peaks around 500 W, not at its rated power.** Round trip is **83 % at
-> 500 W against 80 % at 1200 W**. Running one flat out is not its best operating point;
-> the quadratic term has already overtaken the fixed overhead by then. This is precisely
-> the trade-off the DP can exploit once the curve is loaded — it will spread a discharge
-> over more time at lower power when the horizon allows.
+The owner's counters were checked with the idle test below and **do not tick while the
+unit sits idle**, so that 79–80 % is conversion efficiency rather than a whole-system
+figure — which is what makes it usable as a curve anchor. Their reported capacity,
+cycle count and throughput are mutually consistent (4.24 kWh nominal, ~0.75 cycles/day
+over 90 days ≈ 300 kWh).
+
+> **The Venus A peaks around 500–800 W, not at its rated power.**
+>
+> | Power | Round trip | Full discharge takes |
+> | ---: | ---: | ---: |
+> | 300 W | 79 % | 11.7 h |
+> | **500 W** | **83 %** | 7.0 h |
+> | **800 W** | **83 %** | 4.4 h |
+> | 1200 W | 80 % | 2.9 h |
+> | 1800 W | 74 % | 2.0 h |
+>
+> The plateau is wide and flat: 500 W and 800 W are worth the same, so **800 W is the
+> better default** — identical efficiency in half the time. Above that the quadratic term
+> takes over, and charging at the full 1800 W costs **4.6 points one-way** against 800 W.
+>
+> This is exactly the trade-off the DP exploits once the curve is loaded, and it is not
+> a free choice: a slower discharge needs a longer window. Overnight there is usually
+> room, but a cheap-price charging window of three hours will not fit a 500 W charge —
+> which is why the optimizer, not a fixed setpoint, should be making the call.
+
+Note the curve mixes variants: the low-power points come from a 2.12 kWh unit and the
+1200 W point from 4.24 kWh units. The inverter is the same in both (1800 W charge /
+1200 W discharge); only the pack differs, so the larger unit runs at a lower C-rate and
+should if anything be marginally better.
 
 > **The Venus A beats the Venus E where it counts.** Its operating overhead is **31 W
 > against the Venus E's 55 W**, so at every power below rated it is the more efficient
@@ -428,10 +452,14 @@ points or more.
 **The idle test — two hours, no effort.** Park the battery in idle (no charge, no
 discharge, no PV) and read the "charged" counter before and after.
 
-| Counter after two idle hours | Verdict | What to do |
+| Counter after idling | Verdict | What to do |
 | --- | --- | --- |
 | Unchanged | Standby is **excluded**; your figure is conversion efficiency | Use it to anchor the curve directly |
 | Grew | Standby is **included**; your figure is whole-system efficiency | Subtract it before anchoring — see below |
+
+Idle overnight rather than for two hours if your counter reads in whole kWh or two
+decimals: 6 W for two hours is only 0.012 kWh, which can hide under the display
+resolution and read as a false "unchanged". Ten hours puts it at 0.06 kWh.
 
 If it grew, the increase over two hours gives you the standby power directly. Combine it
 with the period your throughput accumulated over:
