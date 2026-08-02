@@ -5,10 +5,14 @@ systems and turns it into ready-to-paste values for the **Charge efficiency curv
 **Discharge efficiency curve** fields of this integration.
 
 - **§3–§5** cover installed hybrid systems (KOSTAL, FRONIUS, SMA, FOX ESS, RCT, SAX,
-  ENERGY DEPOT, BYD) and are based on **published lab measurements** of the curve itself.
+  ENERGY DEPOT, BYD), based on **published lab measurements** of the curve itself.
 - **§6** covers the plug-in batteries common on the Dutch market (Marstek, Zendure,
-  HomeWizard). No part-load curves are published for these, so the curves there are
-  **modelled** from measured round-trip efficiency and measured idle draw.
+  HomeWizard). No lab publishes curves for these, but **owners measure them**: the
+  Marstek Venus curve comes from community measurements, and the other two borrow its
+  shape anchored on their own measured round-trip efficiency.
+
+Each curve says where it came from. Lab-measured, user-measured and modelled are not the
+same thing, and the difference is large enough to matter.
 
 If your system is not listed, jump to [§7 Deriving your own curve](#7-deriving-your-own-curve).
 
@@ -42,19 +46,31 @@ A single plain number (`0.95`) means a flat, power-independent curve.
 >
 > Cell resistive losses do grow with current, so the battery alone gets slightly worse at
 > high power. But in a complete home battery *system* that effect is swamped by the
-> **inverter's part-load behaviour**: a fixed standby/idle loss of roughly 30–60 W has to
-> be paid out of whatever power is flowing. At 100 W output that overhead eats a third or
-> more of the energy; at 5 kW it is negligible.
+> **inverter's operating overhead**: a fixed 40–60 W that has to be paid out of whatever
+> power is flowing, whether that is 100 W or 5 kW. At 100 W it eats a third to half of the
+> energy; at 5 kW it is a rounding error.
 >
-> The result is that real curves **rise steeply** from low power and then flatten —
-> they do not fall. This matters, because home batteries spend much of the night
-> discharging at exactly 100–300 W, which is where the curve is worst.
+> The result is that real curves **rise steeply** from low power and then flatten. They do
+> not fall — except mildly near rated power, where the resistive term finally catches up.
+>
+> This matters because home batteries spend much of the night discharging at exactly
+> 100–300 W, which is where the curve is worst. Measured examples: a 10 kW hybrid delivers
+> 54–86 % at 100 W depending on make (§3), and a plug-in unit held at 100 W throws away
+> more than half the energy round-trip (§6).
 
 ---
 
 ## 2. Where these numbers come from
 
-All measured data below is from the **HTW Berlin / aquu "Stromspeicher-Inspektion 2026"**,
+Three classes of source appear in this document, in descending order of confidence:
+
+| Class | Used for | Confidence |
+| --- | --- | --- |
+| **Lab-measured curve** | §3–§5, installed hybrids | High — the curve itself was measured |
+| **User-measured curve** | §6, Marstek Venus | Good — several power points, but one owner's unit |
+| **RTE-anchored model** | §6, Zendure and HomeWizard | Indicative — endpoint measured, shape borrowed |
+
+The lab data below is from the **HTW Berlin / aquu "Stromspeicher-Inspektion 2026"**,
 an annual independent lab test of home battery systems
 ([study page](https://solar.htw-berlin.de/studien/stromspeicher-inspektion-2026/),
 [full PDF](https://solar.htw-berlin.de/wp-content/uploads/HTW-aquu-Stromspeicher-Inspektion-2026.pdf)).
@@ -231,108 +247,133 @@ For a system that is not listed, pick the class that matches your hardware:
 ## 6. Dutch-market plug-in batteries (Marstek, Zendure, HomeWizard)
 
 The HTW study covers permanently installed hybrid systems. The plug-in ("stekker")
-batteries that dominate the Dutch market are a different class, and **nobody publishes
-part-load curves for them**. What independent reviewers do measure is a round-trip
-efficiency at a stated power plus an idle consumption — which is enough to reconstruct
-a curve.
+batteries that dominate the Dutch market are a different class. No lab publishes
+part-load curves for them — but **owners measure them**, and for the Marstek Venus that
+community data is detailed enough to be a curve in its own right.
 
-> ⚠️ Unlike §3–§5, **the curves in this section are modelled, not measured.** They are
-> anchored on measured endpoints (see the table) but the shape between them comes from
-> the loss model below. Treat them as informed starting points.
+### The Marstek Venus E/C — user-measured charge curve
 
-### Measured anchors
+Measured by users on the German [Photovoltaikforum](https://www.photovoltaikforum.com/thread/241171-marstek-venus-c-e-ac-speicher-5-12-kwh-erfahrungen-installation-leistung-im-allt/),
+charging efficiency against AC input power:
 
-| System | Usable | Rated power | Idle draw | Measured RTE | Measured at |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Marstek Venus E 3.0 / 4.0 | 5.12 kWh | 2500 W | ~7 W | **82–83 %** | full power |
-| Zendure SolarFlow 2400 PRO / AC+ | — | 2400 W | < 5 W | **87–88 %** | 1200 W (its best point) |
-| HomeWizard Plug-In Battery | 2.47 kWh | 800 W | 6 W (0.5 W in API standby) | **78.4 %** | 800 W constant, 4 full cycles |
+| AC input | 100 W | 500 W | ~1500 W | 2000–2200 W |
+| --- | ---: | ---: | ---: | ---: |
+| Charge efficiency | **64 %** | **90 %** | **93 %** (peak) | **92 %** |
 
-Note how far these sit below the ~90 % of the installed hybrid systems in §4, and how far
-below the manufacturers' own claims — Marstek quotes 92–95 % against ~82 % measured.
-
-### The model
-
-Per direction, with `P_idle` the idle draw and `a` the load-proportional loss fraction:
+Those four points pin the shape exactly, and the shape is not what a datasheet suggests:
 
 ```
-loss(P) = P_idle + a·P
-η(P)    = P / (P + P_idle + a·P)
+loss(P) = 55 W + 2.7e-5 · P²      →  fits all four points to within 1 pp
 ```
 
-`a` is solved from the measured RTE anchor, since `η(P_ref) = √RTE`. That splits the
-total loss into the part that scales with power and the part that does not — the whole
-reason the curve has a shape at all.
+The loss is **flat at ~55 W from 100 W to 500 W** — it barely moves — and only then does
+the quadratic term take over and pull efficiency back down above ~1500 W.
 
-### Derived curves
+> ### ⚠️ Standby draw is not operating overhead
+>
+> The Marstek's *idle* draw is about 7 W. Its *operating* overhead is **55 W** — eight
+> times higher. The control electronics, switching stage and BMS all wake up the moment
+> the unit converts anything, and that cost is paid at 100 W just as much as at 2500 W.
+>
+> This matters because deriving a curve from the datasheet standby figure — the obvious
+> thing to do — produces a curve that is far too optimistic at low power. For the Marstek
+> a standby-based model predicts 86 % at 100 W; users measure **64 %**. Anchor on
+> operating overhead, not standby.
 
-Ready to paste. The charge side is taken as symmetric, which is what the per-direction
-measurements that exist (Zendure: ~93–94 % both ways) support.
+### Curves
 
-**Marstek Venus E 3.0 / 4.0** — `a` = 0.098
-```
-charge:    0.05:0.808, 0.1:0.856, 0.2:0.882, 0.3:0.892, 0.5:0.899, 0.8:0.903, 1.2:0.906, 2.5:0.908
-discharge: 0.05:0.808, 0.1:0.856, 0.2:0.882, 0.3:0.892, 0.5:0.899, 0.8:0.903, 1.2:0.906, 2.5:0.908
-```
+| System | Provenance |
+| --- | --- |
+| Marstek Venus E | **User-measured** charge curve; discharge scaled to the measured full-power RTE |
+| Zendure, HomeWizard | RTE anchor is measured; the *shape* is borrowed from the Marstek fit |
 
-**Zendure SolarFlow 2400 PRO / AC+** — `a` = 0.065
+**Marstek Venus E 3.0 / 4.0** — 2500 W, overhead 55 W, measured RTE 82–83 %
 ```
-charge:    0.05:0.858, 0.1:0.897, 0.2:0.918, 0.3:0.925, 0.5:0.930, 0.8:0.934, 1.2:0.935, 2.4:0.937
-discharge: 0.05:0.858, 0.1:0.897, 0.2:0.918, 0.3:0.925, 0.5:0.930, 0.8:0.934, 1.2:0.935, 2.4:0.937
-```
-Reviewers note efficiency dips slightly above ~2000 W as the unit heats up. The linear
-model does not capture that; if you routinely run near 2400 W, shade the last point down
-by a point or two.
-
-**HomeWizard Plug-In Battery** — `a` = 0.122
-```
-charge:    0.05:0.805, 0.1:0.846, 0.2:0.868, 0.3:0.876, 0.5:0.882, 0.8:0.885
-discharge: 0.05:0.805, 0.1:0.846, 0.2:0.868, 0.3:0.876, 0.5:0.882, 0.8:0.885
+charge:    0.05:0.476, 0.1:0.644, 0.2:0.781, 0.3:0.839, 0.5:0.890, 0.8:0.917, 1.2:0.927, 2:0.925, 2.5:0.918
+discharge: 0.05:0.466, 0.1:0.631, 0.2:0.765, 0.3:0.822, 0.5:0.872, 0.8:0.898, 1.2:0.908, 2:0.905, 2.5:0.899
 ```
 
-### Sanity check on the model
+**Zendure SolarFlow 2400 PRO / AC+** — 2400 W, overhead ~42 W, measured RTE 87–88 % at 1200 W
+```
+charge:    0.05:0.541, 0.1:0.701, 0.2:0.821, 0.3:0.870, 0.5:0.910, 0.8:0.930, 1.2:0.935, 2.4:0.922
+discharge: 0.05:0.541, 0.1:0.701, 0.2:0.821, 0.3:0.870, 0.5:0.910, 0.8:0.930, 1.2:0.935, 2.4:0.922
+```
 
-For the HomeWizard the model predicts a round-trip efficiency of **71.6 % at 100 W**
-against 78.4 % at its rated 800 W. Owners running it in Nul-op-de-Meter mode — which
-holds the battery at low power for hours — report efficiency sagging to **~74 %**. The
-model lands in the right place, and the effect it predicts is exactly the one those
-owners are seeing.
+**HomeWizard Plug-In Battery** — 800 W, overhead ~50 W, measured RTE 78.4 % at 800 W
+```
+charge:    0.05:0.501, 0.1:0.665, 0.2:0.791, 0.3:0.840, 0.5:0.876, 0.8:0.885
+discharge: 0.05:0.501, 0.1:0.665, 0.2:0.791, 0.3:0.840, 0.5:0.876, 0.8:0.885
+```
+
+### Round-trip efficiency actually delivered
+
+This is the number that decides whether a trade is profitable:
+
+| AC power | Marstek Venus E | Zendure 2400 | HomeWizard |
+| ---: | ---: | ---: | ---: |
+| 100 W | **41 %** | 49 % | 44 % |
+| 300 W | 69 % | 76 % | 71 % |
+| 500 W | 78 % | 83 % | 77 % |
+| rated | 83 % | 85 % | 78 % |
+
+### Cross-check against owner reports
+
+HomeWizard owners running Nul-op-de-Meter — which holds the battery at household baseload
+for hours — report round-trip efficiency sagging to **~74 %** against the 78.4 % measured
+at its rated 800 W. The table above puts 74 % at roughly 400 W, which is exactly a typical
+Dutch household baseload. Independent measurement, independent model, same answer.
 
 ### What this means for scheduling
 
-Plug-in batteries have a **flatter but lower** curve than the installed hybrids:
+**A plug-in battery held at 100 W throws away more than half the energy.** That is not a
+rounding error the optimizer can absorb — at 41 % round trip, arbitrage needs a spread of
+well over 3× the naive estimate before it breaks even, and zero-grid tracking of a small
+baseload is close to pointless.
 
-- Their idle draw is small in absolute terms (5–7 W against 30–60 W for a 10 kW hybrid),
-  so the part-load cliff at 100 W is much less dramatic.
-- But their load-proportional loss is far larger (`a` ≈ 0.07–0.12 against ~0.02 for a good
-  hybrid). That is a floor no operating point escapes, and it is why their RTE tops out
-  around 78–88 %.
+Two practical consequences:
 
-The practical consequence for this integration: with a 2500 W unit the optimizer gains
-little from choosing a lower power, because the curve is nearly flat above ~500 W. What
-it does gain is an honest round-trip efficiency, which sets the arbitrage threshold. A
-Marstek entered as a flat `0.9487` (RTE 0.90) will look ~9 percentage points more
-profitable than it is, and the optimizer will take trades that lose money.
+- **Enter the real curve.** A Marstek entered as a flat `0.9487` (RTE 0.90) looks 7
+  percentage points better than it is at rated power and **more than twice as good** as it
+  is at 100 W. The optimizer will take trades that lose money.
+- **The curve makes the optimizer prefer bursts.** With a real curve loaded, discharging
+  1 kWh as 500 W for two hours beats trickling it out at 100 W for ten — and the DP will
+  now find that on its own, because that is precisely what a power-dependent efficiency
+  model is for.
 
 ---
 
 ## 7. Deriving your own curve
 
-### From an idle-loss figure
+### From an overhead figure
 
-An inverter's efficiency curve is captured well by a three-term loss model:
+An inverter's efficiency curve is captured well by a two-term loss model:
 
 ```
-P_loss(P) = P_idle + a·P + b·P²
+P_loss(P) = P_overhead + b·P²
 η(P)      = P / (P + P_loss(P))
 ```
 
-`P_idle` dominates at low power and is the number you actually need. The study measured
-a 10 kW hybrid inverter (KOSTAL PLENTICORE G3 M 10) at **≈50 W idle loss** and **228 W
-total loss at 10 kW output**, i.e. 97.8 % at nominal power. If your inverter's datasheet
-quotes a standby or self-consumption figure, plug it in as `P_idle`, use your datasheet's
-peak or EU efficiency to pin the top of the curve, and sample at 50 / 100 / 200 / 500 W
-and nominal power.
+`P_overhead` dominates at low power and is the number you actually need.
+
+> ⚠️ **Do not use the datasheet standby figure for `P_overhead`.** Standby is what the
+> unit draws while *sleeping*; overhead is what it burns while *converting*, and the two
+> differ by close to an order of magnitude. The Marstek Venus specifies ~7 W standby but
+> its measured operating overhead is ~55 W (§6). Using the standby number produces a
+> curve that is wildly optimistic in exactly the region where it matters most.
+
+Get `P_overhead` by rearranging a measurement instead. From one round-trip efficiency
+measured at a known power `P_ref`:
+
+```
+loss(P_ref) = P_ref / √RTE − P_ref
+P_overhead  = loss(P_ref) − b·P_ref²
+```
+
+For `b`, the quadratic loss at rated power is around **6–7 % of the rating** for the
+plug-in class (2.7e-5 × 2500² = 169 W for the Marstek). Installed hybrids are far better:
+the HTW study measured the KOSTAL PLENTICORE G3 M 10 at **≈50 W idle** and **228 W total
+loss at 10 kW**, i.e. 97.8 % at nominal power. Two anchor points are always better than
+one — measure at low and high power if you can.
 
 ### By measurement
 
@@ -352,9 +393,13 @@ efficiency.
 - Efficiency must be in `(0, 1]`; the config flow rejects anything outside that range.
 - The curve should be **monotonically rising** over the part-load region. A curve that
   falls from its zero-power value is almost certainly wrong for a complete system.
-- `charge_eff × discharge_eff` at nominal power should land around **0.86–0.93**.
-  If your composed curve implies a round-trip efficiency above 0.95, you have most likely
-  omitted either the battery-side losses or the inverter's part-load penalty.
+- `charge_eff × discharge_eff` at nominal power should land around **0.86–0.93** for an
+  installed hybrid, or **0.78–0.88** for a plug-in unit. If your composed curve implies a
+  round-trip efficiency above 0.95, you have most likely omitted either the battery-side
+  losses or the inverter's part-load penalty.
+- At 100 W the round trip should be *bad* — roughly 0.5–0.75 for a hybrid and 0.4–0.5 for
+  a plug-in unit. A curve that still shows 0.85 at 100 W is almost certainly built on a
+  standby figure rather than a real operating overhead.
 
 ---
 
@@ -374,3 +419,10 @@ efficiency.
 - [Marstek Venus E 3.0 review — energienerds.nl](https://energienerds.nl/index.php/2025/11/06/review-stekkerbatterij-marstek-venus-e-3-0-ac-thuisbatterij)
 - [Marstek Venus E — jeroen.nl](https://jeroen.nl/energie/opslaan/thuisbatterij/stekkerbatterij/marstek-venus-e) (standby draw ~7 W)
 - [Zendure SolarFlow 2400 PRO & AC+ technical deep-dive — Jay's Desk](https://www.jaysdesk.com/en/energie/zendure-2400-pro-ac-plus-review) (RTE ~87–88 %, ~93–94 % per direction, standby < 5 W)
+
+**User measurements (§6)**
+
+- [MARSTEK VENUS C/E AC-Speicher — Photovoltaikforum](https://www.photovoltaikforum.com/thread/241171-marstek-venus-c-e-ac-speicher-5-12-kwh-erfahrungen-installation-leistung-im-allt/) — the charge-efficiency points (64 % @ 100 W, 90 % @ 500 W, 93 % @ ~1500 W, 92 % @ 2000–2200 W) that §6 is fitted to
+- [Marstek Venus E 3.0 Roundtrip Effizienz gemessen — Photovoltaikforum](https://www.photovoltaikforum.com/thread/258512-marstek-venus-e-3-0-roundtrip-effizienz-gemessen/)
+- [Wirkungsgrad nur 74 % — Photovoltaikforum](https://www.photovoltaikforum.com/thread/261419-wirkungsgrad-nur-74/)
+- [Marstek VENUS-E 5.12 kWh Erfahrungen — Akkudoktor Forum](https://akkudoktor.net/t/marstek-venus-e-5-12-kwh-erfahrungen/27846)
