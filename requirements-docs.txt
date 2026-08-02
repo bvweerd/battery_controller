@@ -1,6 +1,12 @@
 # Documentation dependencies for MkDocs
+#
+# No upper bound on mkdocs here on purpose: mkdocs-material already declares
+# `mkdocs<2,>=1.6` itself, so pip cannot pull in a release it does not support.
+# Duplicating that cap would only block the upgrade once Material lifts it.
+#
+# Mermaid rendering comes from mkdocs-material (a superfences custom fence),
+# so no separate mermaid plugin is needed.
 
 mkdocs>=1.6.1
 mkdocs-material>=9.7.7
-mkdocs-mermaid2-plugin>=1.2.3
 pymdown-extensions>=11.0.1

@@ -1,0 +1,112 @@
+# Control modes
+
+The control mode decides *what the published setpoint is based on*: the DP schedule, the
+live grid meter, or a mix of both. Change it with the **Control Mode** select entity, or
+from an automation.
+
+The default is **Hybrid**.
+
+## Which one should I use?
+
+| Mode | Follows the DP schedule | Reacts to the live meter | Use when |
+|------|------------------------|--------------------------|----------|
+| `zero_grid` | no | yes | You only care about self-consumption, not arbitrage |
+| `follow_schedule` | exactly | no | You want the strictly cost-optimal plan |
+| `hybrid` | for arbitrage | for self-consumption | **Recommended default** — robust to forecast error |
+| `hybrid_plus` | for arbitrage | price-aware self-consumption | You want Hybrid, but not at the cost of exporting surplus that is worth more now |
+| `manual` | no | no | Testing, or driving the battery from your own logic |
+
+```mermaid
+flowchart TD
+    Q1{"Do you want price<br/>arbitrage at all?"}
+    Q1 -->|No, self-consumption only| ZG["<b>zero_grid</b>"]
+    Q1 -->|Yes| Q2{"Do you want real-time<br/>correction for forecast error?"}
+    Q2 -->|"No — trust the plan"| FS["<b>follow_schedule</b><br/>lowest cost if forecasts hold"]
+    Q2 -->|Yes| Q3{"May PV surplus be exported<br/>when storing it is worth less?"}
+    Q3 -->|"No — always capture surplus"| HY["<b>hybrid</b><br/>recommended default"]
+    Q3 -->|"Yes — follow the price"| HP["<b>hybrid_plus</b>"]
+
+    style HY fill:#0f766e22,stroke:#0f766e
+```
+
+`manual` is deliberately not in the tree — use it for testing, or when your own logic
+drives the battery and you only want the optimizer's numbers for reference.
+
+---
+
+## Zero Grid
+
+Minimize grid exchange in real time using the battery. The optimizer still runs and still
+publishes its schedule, but the controller ignores it: the setpoint follows the measured
+grid power, updated roughly every 5 seconds.
+
+No arbitrage happens in this mode. It is self-consumption only.
+
+## Follow Schedule
+
+Execute the DP-optimized schedule exactly.
+
+When the commitment filter keeps an active charge/discharge locked within the same price
+period, that lock applies to the published controller setpoint too, not just to the
+diagnostic `optimal_power` value. So the setpoint can stay put while `optimal_power`
+would suggest a change — this is deliberate, and prevents chattering inside a period.
+
+This is the mode that produces the lowest cost *if your forecasts are correct*. It has no
+real-time correction, so a consumption spike the forecast did not anticipate is simply
+imported from the grid.
+
+## Hybrid (recommended)
+
+DP schedule for arbitrage, zero-grid for self-consumption.
+
+When the DP schedule says `idle` and no discharge is planned soon, Hybrid still
+opportunistically captures PV surplus into the battery via zero-grid — **even if the
+feed-in price is currently positive and exporting that surplus would be more
+profitable**.
+
+That is a deliberate trade: a small amount of arbitrage profit is given up in exchange
+for resilience. Keeping headroom filled means the battery can absorb real-time
+consumption spikes — a cloud passing over the panels while a large appliance switches on
+— instead of pulling from the grid.
+
+!!! info "Hybrid is recommended for robustness, not for maximum arbitrage profit"
+    If you want surplus capture to follow the price forecast instead, use **Hybrid+**.
+    For the strictly cost-optimal schedule with no opportunistic charging at all, use
+    **Follow Schedule**.
+
+## Hybrid+
+
+Like Hybrid, but consults the price forecast before storing PV surplus.
+
+When the shadow price says the battery can be filled more cheaply later — for example
+during a midday PV peak at low prices — the surplus is exported at the current feed-in
+price instead of charged, and the battery charges later from the cheaper surplus.
+
+When little future surplus is forecast, stored energy stays valuable (it displaces grid
+import, or serves expensive evening hours), so the surplus is captured immediately —
+identical to Hybrid.
+
+In short: **exporting only wins when the battery would fill up anyway, or when the stored
+energy has little future value.**
+
+## Manual
+
+Target power is set via `number.battery_controller_manual_power_setpoint`.
+
+Positive is discharge, negative is charge. The optimizer keeps running and its sensors
+keep updating, so you can compare your own logic against what the DP would have done.
+
+---
+
+## A note on mode and SoC drift
+
+Hybrid and Hybrid+ can diverge from the DP plan whenever zero-grid takes over. The
+optimizer notices this on the next run: the actual SoC no longer matches what the
+previous plan assumed, and because the whole horizon is re-solved from scratch, the new
+plan can look meaningfully different.
+
+That is expected behaviour, not a bug — see [the learning
+period](how-it-works.md#learning-period-give-the-optimizer-time-to-calibrate) for why
+rolling-horizon DP behaves this way.
+
+Next: [connecting your inverter](inverter-control.md).

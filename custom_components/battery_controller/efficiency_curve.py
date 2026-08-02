@@ -75,7 +75,7 @@ def interpolate_efficiency(curve: EfficiencyCurve, power_kw: float) -> float:
 
     Linear interpolation between curve points. Flat clamping outside range.
     An empty curve yields 1.0 (no losses) — this matches the mirrored
-    implementations in docs/analyzer.js and simulate/simulate_diagnostics.py.
+    implementations in docs/analyzer/analyzer.js and simulate/simulate_diagnostics.py.
     """
     if not curve:
         return 1.0
