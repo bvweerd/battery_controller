@@ -66,7 +66,8 @@ def battery_subentry_data() -> dict:
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.battery_soc",
@@ -403,18 +404,19 @@ async def test_battery_subentry_invalid_capacity_rejected(
     assert len(v4_config_entry.subentries) == 0
 
 
-async def test_battery_subentry_invalid_rte_rejected(
+async def test_battery_subentry_invalid_curve_rejected(
     hass: HomeAssistant,
     v4_config_entry: config_entries.ConfigEntry,
     battery_subentry_data: dict,
 ) -> None:
-    """RTE > 1.0 is rejected."""
+    """Invalid efficiency curve string is rejected (form re-shown with errors)."""
     result = await _init_battery_subentry_flow(hass, v4_config_entry.entry_id)
-    with pytest.raises(InvalidData):
-        await hass.config_entries.subentries.async_configure(
-            result["flow_id"],
-            user_input={**battery_subentry_data, "round_trip_efficiency": 1.5},
-        )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={**battery_subentry_data, "charge_efficiency_curve": "not_a_curve"},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert "base" in result["errors"]
     assert len(v4_config_entry.subentries) == 0
 
 
@@ -506,7 +508,8 @@ async def test_battery_subentry_reconfigure(
             "capacity_kwh": 15.0,
             "max_charge_power_kw": 7.5,
             "max_discharge_power_kw": 7.5,
-            "round_trip_efficiency": 0.92,
+            "charge_efficiency_curve": "0.9487",
+            "discharge_efficiency_curve": "0.9487",
             "min_soc_percent": 15.0,
             "max_soc_percent": 85.0,
             "battery_soc_sensor": "sensor.battery_soc_new",
@@ -837,7 +840,8 @@ def test_validate_battery_subentry_with_name_stores_name():
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.soc",
@@ -857,7 +861,8 @@ def test_validate_battery_subentry_with_power_sensor():
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.soc",
@@ -882,7 +887,8 @@ def test_validate_battery_subentry_with_soc_derating_keys():
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.soc",
@@ -906,7 +912,8 @@ def test_validate_battery_subentry_whitespace_name_is_dropped():
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.soc",
@@ -926,7 +933,8 @@ def test_validate_battery_subentry_omits_optional_keys_when_absent():
         "capacity_kwh": 10.0,
         "max_charge_power_kw": 5.0,
         "max_discharge_power_kw": 5.0,
-        "round_trip_efficiency": 0.9,
+        "charge_efficiency_curve": "0.9487",
+        "discharge_efficiency_curve": "0.9487",
         "min_soc_percent": 10.0,
         "max_soc_percent": 90.0,
         "battery_soc_sensor": "sensor.soc",

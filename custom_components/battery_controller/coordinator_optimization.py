@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -20,6 +19,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
+from .efficiency_curve import EfficiencyCurve
 from .const import (
     DOMAIN,
     ACTION_CHARGING,
@@ -2197,38 +2197,39 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Apply charge efficiency correction only to the charge-side SoC
         # transition: when the battery charges slower than modelled, the DP
         # should plan less charge within the step. Economic costs still use the
-        # nominal RTE so a charging-speed problem is not double-counted as extra
-        # energy cost or degradation.
-        nominal_sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-        charge_eff_override: float | None = None
+        # nominal curve so a charging-speed problem is not double-counted as
+        # extra energy cost or degradation.
+        charge_eff_curve_override: EfficiencyCurve | None = None
         if self._charge_eff_correction < 0.995:
-            charge_eff_override = nominal_sqrt_rte * self._charge_eff_correction
+            charge_eff_curve_override = [
+                (p, min(1.0, eff * self._charge_eff_correction))
+                for p, eff in battery_config.charge_efficiency_curve_parsed
+            ]
             _LOGGER.debug(
-                "Charge efficiency correction %.3f applied: charge_eff %.4f → %.4f",
+                "Charge efficiency correction %.3f applied to curve",
                 self._charge_eff_correction,
-                nominal_sqrt_rte,
-                charge_eff_override,
             )
 
         # Apply discharge efficiency correction only to the discharge-side SoC
         # transition: when the battery discharges slower than modelled, the DP
         # should plan less discharge within the step. Economic costs still use
-        # the nominal RTE.
+        # the nominal curve.
         #
         # The SoC transition is: soc -= power * hours / discharge_eff
         # To reduce planned SoC drop by factor `correction`, we need a LARGER
         # discharge_eff (dividing by a larger value gives a smaller drop).
-        # Hence we divide sqrt(RTE) by the correction, not multiply.
-        # This may yield discharge_eff_override > 1, which is fine here because
-        # the override only affects SoC state transitions, not the economic cost.
-        discharge_eff_override: float | None = None
+        # Hence we divide each curve point by the correction, not multiply.
+        # Curve points may exceed 1.0 here; that is intentional — the override
+        # only affects SoC state transitions, not the economic cost.
+        discharge_eff_curve_override: EfficiencyCurve | None = None
         if self._discharge_eff_correction < 0.995:
-            discharge_eff_override = nominal_sqrt_rte / self._discharge_eff_correction
+            discharge_eff_curve_override = [
+                (p, max(1e-6, eff / self._discharge_eff_correction))
+                for p, eff in battery_config.discharge_efficiency_curve_parsed
+            ]
             _LOGGER.debug(
-                "Discharge efficiency correction %.3f applied: discharge_eff %.4f → %.4f",
+                "Discharge efficiency correction %.3f applied to curve",
                 self._discharge_eff_correction,
-                nominal_sqrt_rte,
-                discharge_eff_override,
             )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
@@ -2263,8 +2264,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             degradation_cost_per_kwh,
             min_spread,
             pv_dc_forecast,
-            charge_eff_override,
-            discharge_eff_override,
+            charge_eff_curve_override,
+            discharge_eff_curve_override,
         )
 
         self._last_result = result
