@@ -10,6 +10,7 @@
   .chart-container { position: relative; height: 260px; }
   .chart-container-lg { position: relative; height: 320px; }
   .drop-zone.drag-over { border-color: #3b82f6 !important; background-color: #eff6ff !important; }
+  #drop-zone:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
   .kv-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #f3f4f6; }
   .kv-row:last-child { border-bottom: none; }
   .kv-label { color: #6b7280; font-size: 0.8125rem; }
@@ -52,13 +53,21 @@
 
 <!-- ═══════════════════════════════════════════════════════════ UPLOAD -->
 <section id="upload-section" class="bg-white rounded-xl border border-gray-200 p-6">
-  <div id="drop-zone"
+  <!-- role/tabindex/keydown make this reachable without a mouse: the input
+       itself is display:none, so without them there is no focusable control
+       for uploading a file at all. -->
+  <div id="drop-zone" role="button" tabindex="0"
+    aria-label="Upload a diagnostics.json file. Drop a file here, or activate to browse."
     class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
-    <div class="text-5xl mb-3">📊</div>
+    <div class="text-5xl mb-3" aria-hidden="true">📊</div>
     <p class="text-base font-semibold text-gray-700">Drop <code class="text-blue-600">diagnostics.json</code> here</p>
     <p class="text-sm text-gray-400 mt-1">or click to browse · or paste below</p>
-    <input type="file" id="file-input" accept=".json" class="hidden">
   </div>
+  <!-- Kept outside #drop-zone: that div reports itself as a button, and a
+       button may not contain another interactive control. It is clicked
+       programmatically, so its position in the markup does not matter. -->
+  <input type="file" id="file-input" accept=".json" class="hidden"
+    aria-label="Diagnostics JSON file">
   <div class="mt-3 flex items-center gap-2">
     <button id="paste-toggle" class="text-sm text-blue-600 hover:underline">Paste JSON ▾</button>
   </div>
@@ -73,6 +82,10 @@
 
 <!-- ═══════════════════════════════════════════════════════════ DASHBOARD -->
 <div id="dashboard" class="hidden space-y-6">
+
+  <!-- Gives the report section its own level, so headings run h1 -> h2 -> h3
+       instead of jumping straight from the page title to the cards. -->
+  <h2 class="text-lg font-semibold text-gray-800">📋 Diagnostics Report</h2>
 
   <!-- Summary bar -->
   <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -135,19 +148,19 @@
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Power Schedule &amp; SoC Trajectory</h3>
-      <div class="chart-container"><canvas id="chart-schedule"></canvas></div>
+      <div class="chart-container"><canvas id="chart-schedule" role="img" aria-label="Chart: battery power schedule and state-of-charge trajectory over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Price Forecast</h3>
-      <div class="chart-container"><canvas id="chart-prices"></canvas></div>
+      <div class="chart-container"><canvas id="chart-prices" role="img" aria-label="Chart: electricity price forecast over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">PV Production &amp; Consumption</h3>
-      <div class="chart-container"><canvas id="chart-pv"></canvas></div>
+      <div class="chart-container"><canvas id="chart-pv" role="img" aria-label="Chart: forecast PV production and household consumption over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Cost Comparison</h3>
-      <div class="chart-container"><canvas id="chart-costs"></canvas></div>
+      <div class="chart-container"><canvas id="chart-costs" role="img" aria-label="Chart: cost comparison between the optimized schedule and doing nothing."></canvas></div>
       <div id="cost-details" class="mt-3"></div>
     </div>
   </div>
@@ -340,7 +353,7 @@
               <th class="border border-gray-200 px-2 py-1 text-green-700">Feed-in (€/kWh)</th>
               <th class="border border-gray-200 px-2 py-1 text-yellow-600">PV (kW)</th>
               <th class="border border-gray-200 px-2 py-1 text-red-600">Consump (kW)</th>
-              <th class="border border-gray-200 px-1 py-1"></th>
+              <th class="border border-gray-200 px-1 py-1"><span class="sr-only">Row actions</span></th>
             </tr>
           </thead>
           <tbody id="sim-fc-body"></tbody>
@@ -381,11 +394,11 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
         <h4 class="text-sm font-medium text-gray-700 mb-2">Power Schedule &amp; SoC</h4>
-        <div class="chart-container"><canvas id="sim-chart-schedule"></canvas></div>
+        <div class="chart-container"><canvas id="sim-chart-schedule" role="img" aria-label="Chart: simulated battery power schedule and state of charge for the re-run optimizer."></canvas></div>
       </div>
       <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
         <h4 class="text-sm font-medium text-gray-700 mb-2">Price Forecast with Actions</h4>
-        <div class="chart-container"><canvas id="sim-chart-prices"></canvas></div>
+        <div class="chart-container"><canvas id="sim-chart-prices" role="img" aria-label="Chart: simulated price forecast annotated with the charge and discharge actions."></canvas></div>
       </div>
     </div>
 
@@ -1371,6 +1384,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const dz = document.getElementById('drop-zone');
   const fi = document.getElementById('file-input');
   dz.addEventListener('click', () => fi.click());
+  // Enter and Space are what a native button would respond to; the drop zone
+  // only reports itself as one, so it has to honour them explicitly.
+  dz.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      fi.click();
+    }
+  });
   dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
   dz.addEventListener('drop', e => {
