@@ -124,6 +124,12 @@ jobs:
       - name: Run Jest
         run: npm test
 
+      # Separate from the Jest run on purpose: jest's vm context costs ~16x on
+      # this hot numeric loop, so a benchmark inside it would measure jest
+      # rather than the DP.
+      - name: Check DP runtime
+        run: npm run test:perf
+
   hassfest:
     name: Home Assistant hassfest
     runs-on: ubuntu-latest
