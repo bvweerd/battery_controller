@@ -26,6 +26,11 @@ exclude = [
   # The site being documented: it 404s until the first deploy of a new page,
   # which would make the check fail on exactly the pull request that adds it.
   "^https://bvweerd\\.github\\.io/battery_controller",
+  # Returns 403 to automated clients regardless of user agent — the two pages
+  # cited in docs/efficiency-curves.md load fine in a browser. Excluded per
+  # host rather than by accepting 403 globally, because a blanket accept would
+  # also swallow links that really are gone.
+  "^https://energienerds\\.nl",
 ]
 
 # GitHub rate-limits anonymous API traffic hard; these are checked via the
