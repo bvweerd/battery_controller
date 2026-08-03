@@ -1360,11 +1360,25 @@ async def test_async_update_data_pending_schedules_rerun(hass, monkeypatch):
     monkeypatch.setattr(coord, "_run_optimization", fake_run)
 
     tasks = []
-    monkeypatch.setattr(
-        coord.hass,
-        "async_create_task",
-        lambda coro: tasks.append(coro),
-    )
+
+    def capture_task(coro):
+        """Record the scheduled coroutine, then dispose of it.
+
+        The real async_request_refresh is not patched here, so this receives a
+        genuine coroutine object. Stashing it without ever scheduling it leaves
+        it to be garbage collected un-awaited, which raises
+
+            RuntimeWarning: coroutine 'DataUpdateCoordinator.async_request_refresh'
+            was never awaited
+
+        Closing it keeps the assertion below meaningful — the call still
+        happened and is still recorded — without leaving a dangling coroutine
+        that masks the same warning coming from real code.
+        """
+        tasks.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(coord.hass, "async_create_task", capture_task)
 
     result = await coord._async_update_data()
     assert result == {"control_mode": "result"}
