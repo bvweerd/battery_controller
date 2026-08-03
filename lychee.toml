@@ -1,0 +1,33 @@
+# Configuration for lychee, run weekly by .github/workflows/link-check.yml.
+
+# Some hosts rate-limit or block CI egress, and a slow response is not a dead
+# link. Be patient before calling anything broken.
+max_retries = 3
+retry_wait_time = 5
+timeout = 30
+
+# Identify as a browser: a few documentation hosts return 403 to default
+# HTTP-client user agents, which would otherwise read as a broken link.
+user_agent = "Mozilla/5.0 (compatible; lychee link checker; +https://github.com/bvweerd/battery_controller)"
+
+# Only outbound links are interesting here. mkdocs build --strict already
+# fails the Pages build on broken internal links, so re-checking them would
+# duplicate a check that runs on every pull request.
+exclude_path = ["docs/analyzer", "docs/__tests__", "docs/__perf__"]
+
+exclude = [
+  # Relative and anchor-only links: mkdocs --strict owns these.
+  "^#",
+  "^\\.\\.?/",
+  # Localhost and example hosts that appear in configuration snippets.
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+  "^https?://example\\.(com|org)",
+  # The site being documented: it 404s until the first deploy of a new page,
+  # which would make the check fail on exactly the pull request that adds it.
+  "^https://bvweerd\\.github\\.io/battery_controller",
+]
+
+# GitHub rate-limits anonymous API traffic hard; these are checked via the
+# token the workflow already has, so no extra accepted status codes are needed.
+accept = ["200", "204", "206", "429"]
