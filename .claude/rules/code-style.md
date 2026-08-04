@@ -16,7 +16,7 @@ paths:
 - `flake8` max-line-length=88; ignores: E501, W503, E203, D202, W504
 
 ## Type checking
-- `mypy` targeting Python 3.13
+- `mypy` targeting Python 3.14 (matches the lint job and Home Assistant's floor)
 - `ignore_missing_imports = true`; `follow_imports = silent`
 - Add type hints to all public functions and method signatures
 
