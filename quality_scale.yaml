@@ -110,8 +110,11 @@ rules:
   test-coverage:
     status: done
     comment: |
-      Total coverage 95%. All modules covered; coordinator_optimization.py at 79%
-      with the remaining gap in complex price-extension and hybrid-mode branches.
+      Total coverage 95.8% (855 tests). All modules covered; the floor is
+      enforced at 90% via fail_under in setup.cfg and CI reports the figure
+      per run. Lowest: coordinator_optimization.py 89%, __init__.py 88%,
+      switch.py 88% — the remaining gap is in price-extension branches and
+      error paths, not in the hybrid-mode hysteresis, which is covered.
 
   # Gold
   devices:
