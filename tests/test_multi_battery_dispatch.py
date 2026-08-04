@@ -134,7 +134,9 @@ def test_split_of_zero_returns_zero_for_every_battery(optimization_coordinator):
 
 
 @pytest.mark.parametrize("mode", [MODE_ZERO_GRID, MODE_HYBRID, MODE_HYBRID_PLUS])
-def test_realtime_modes_pick_the_battery_nearest_mid_range(optimization_coordinator, mode):
+def test_realtime_modes_pick_the_battery_nearest_mid_range(
+    optimization_coordinator, mode
+):
     """Real-time modes must survive a direction change, so they aim for 50%."""
     coord = _with_batteries(
         optimization_coordinator,
@@ -153,12 +155,12 @@ def test_scheduled_charge_picks_the_battery_with_most_room(optimization_coordina
     )
     rel_socs = {"bat1": 0.2, "bat2": 0.55}
 
-    assert (
-        coord._select_active_battery(1.0, rel_socs, MODE_FOLLOW_SCHEDULE) == "bat1"
-    )
+    assert coord._select_active_battery(1.0, rel_socs, MODE_FOLLOW_SCHEDULE) == "bat1"
 
 
-def test_scheduled_discharge_picks_the_battery_with_most_energy(optimization_coordinator):
+def test_scheduled_discharge_picks_the_battery_with_most_energy(
+    optimization_coordinator,
+):
     """A scheduled discharge goes to the highest relative SoC."""
     coord = _with_batteries(
         optimization_coordinator,
@@ -166,12 +168,12 @@ def test_scheduled_discharge_picks_the_battery_with_most_energy(optimization_coo
     )
     rel_socs = {"bat1": 0.2, "bat2": 0.55}
 
-    assert (
-        coord._select_active_battery(-1.0, rel_socs, MODE_FOLLOW_SCHEDULE) == "bat2"
-    )
+    assert coord._select_active_battery(-1.0, rel_socs, MODE_FOLLOW_SCHEDULE) == "bat2"
 
 
-def test_selection_holds_the_current_battery_within_hysteresis(optimization_coordinator):
+def test_selection_holds_the_current_battery_within_hysteresis(
+    optimization_coordinator,
+):
     """A marginally better candidate must not cause an inverter switch."""
     coord = _with_batteries(
         optimization_coordinator,
@@ -233,15 +235,15 @@ def test_power_sensor_without_a_unit_is_read_as_watts(hass, optimization_coordin
 
 def test_power_sensor_in_kilowatts_is_converted(hass, optimization_coordinator):
     coord = optimization_coordinator
-    hass.states.async_set(
-        "sensor.grid", "1.5", {"unit_of_measurement": "kW"}
-    )
+    hass.states.async_set("sensor.grid", "1.5", {"unit_of_measurement": "kW"})
 
     assert coord._read_power_sensor_w("sensor.grid") == pytest.approx(1500.0)
 
 
 @pytest.mark.parametrize("value", ["unknown", "unavailable", "not-a-number", ""])
-def test_unusable_power_sensor_states_return_none(hass, optimization_coordinator, value):
+def test_unusable_power_sensor_states_return_none(
+    hass, optimization_coordinator, value
+):
     coord = optimization_coordinator
     hass.states.async_set("sensor.grid", value, {"unit_of_measurement": "W"})
 
@@ -254,7 +256,9 @@ def test_missing_power_sensor_returns_none(optimization_coordinator):
     assert coord._read_power_sensor_w("sensor.does_not_exist") is None
 
 
-def test_unrecognised_unit_is_dropped_and_warned_once(hass, optimization_coordinator, caplog):
+def test_unrecognised_unit_is_dropped_and_warned_once(
+    hass, optimization_coordinator, caplog
+):
     """Assuming watts for a megawatt sensor would be wrong by a million."""
     coord = optimization_coordinator
     hass.states.async_set("sensor.grid", "2", {"unit_of_measurement": "MW"})
