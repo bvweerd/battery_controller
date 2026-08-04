@@ -286,6 +286,19 @@ class TestPVForecastSensor:
     def test_returns_current_pv_kw(self):
         assert self._sensor({"current_pv_kw": 3.5}).native_value == 3.5
 
+    def test_state_sums_ac_and_dc(self):
+        data = {"current_pv_kw": 1.5, "current_dc_pv_kw": 2.0}
+        assert self._sensor(data).native_value == pytest.approx(3.5)
+
+    def test_state_reports_dc_only_system(self):
+        """A fully DC-coupled system must not read a permanent 0 kW."""
+        data = {"current_pv_kw": 0.0, "current_dc_pv_kw": 7.318}
+        assert self._sensor(data).native_value == pytest.approx(7.318)
+
+    def test_state_handles_none_values(self):
+        data = {"current_pv_kw": None, "current_dc_pv_kw": None}
+        assert self._sensor(data).native_value == 0.0
+
     def test_extra_attrs_empty_when_no_data(self):
         assert self._sensor(None).extra_state_attributes == {}
 
@@ -304,6 +317,20 @@ class TestPVForecastSensor:
         attrs = self._sensor(data).extra_state_attributes
         assert "dc_forecast_kw" in attrs
         assert attrs["current_dc_pv_kw"] == 0.5
+        # zip stops at the shorter series
+        assert attrs["total_forecast_kw"] == [1.5]
+
+    def test_ac_split_exposed_in_attributes(self):
+        data = {
+            "pv_forecast_kw": [0.0],
+            "pv_dc_forecast_kw": [7.0],
+            "current_pv_kw": 0.0,
+            "current_dc_pv_kw": 7.0,
+        }
+        attrs = self._sensor(data).extra_state_attributes
+        # The AC part stays visible even though the state is now the total
+        assert attrs["current_ac_pv_kw"] == 0.0
+        assert attrs["current_dc_pv_kw"] == 7.0
 
 
 # ---------------------------------------------------------------------------

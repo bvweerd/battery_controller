@@ -13,7 +13,7 @@ battery_controller/
 │   ├── const.py              # SOC_RESOLUTION_WH=10Wh, POWER_STEP_W=100W, config keys
 │   ├── sensor.py / number.py / select.py / switch.py / binary_sensor.py
 │   ├── helpers.py            # Price extraction (Nordpool/ENTSO-E/generic formats)
-│   ├── manifest.json         # domain, version, requirements: [aiohttp]
+│   ├── manifest.json         # domain, version, quality_scale; requirements: [] (aiohttp is a Core requirement)
 │   └── translations/         # en.json + nl.json (strings.json = copy of en.json)
 ├── tests/                    # pytest tests (one file per source module)
 └── setup.cfg                 # pytest, flake8, isort, mypy, bumpversion config

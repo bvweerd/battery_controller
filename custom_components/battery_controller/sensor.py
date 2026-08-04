@@ -373,7 +373,18 @@ class BatteryPowerSensor(BatteryControllerSensor):
 
 
 class PVForecastSensor(BatteryForecastSensor):
-    """Sensor for PV production forecast."""
+    """Sensor for PV production forecast.
+
+    Reports total panel production: AC-coupled plus DC-coupled arrays. The
+    state used to be the AC series alone, which reads a permanent 0 kW on a
+    fully DC-coupled system even while the panels are at full output — there
+    the AC series is legitimately empty and everything sits in the DC series.
+    The AC/DC split stays available in the attributes.
+
+    No inverter derating is applied here: this is what the panels produce,
+    not what reaches the AC bus. Grid exchange is the net load sensor's job,
+    and that one does apply DC_TO_AC_INVERTER_EFFICIENCY.
+    """
 
     _attr_translation_key = "pv_forecast"
     _attr_name = "PV Forecast"
@@ -390,14 +401,23 @@ class PVForecastSensor(BatteryForecastSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return cast(float | None, self.coordinator.data.get("current_pv_kw", 0.0))
+        ac_kw = self.coordinator.data.get("current_pv_kw", 0.0) or 0.0
+        dc_kw = self.coordinator.data.get("current_dc_pv_kw", 0.0) or 0.0
+        return round(float(ac_kw) + float(dc_kw), 3)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
+        ac_forecast = self.coordinator.data.get("pv_forecast_kw", [])
         attrs: dict[str, Any] = {
-            "forecast_kw": self.coordinator.data.get("pv_forecast_kw", []),
+            "forecast_kw": ac_forecast,
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+            "current_ac_pv_kw": round(
+                float(self.coordinator.data.get("current_pv_kw", 0.0) or 0.0), 3
+            ),
         }
         dc_forecast = self.coordinator.data.get("pv_dc_forecast_kw", [])
         if dc_forecast and any(v > 0 for v in dc_forecast):
@@ -405,6 +425,11 @@ class PVForecastSensor(BatteryForecastSensor):
             attrs["current_dc_pv_kw"] = self.coordinator.data.get(
                 "current_dc_pv_kw", 0.0
             )
+            # Total series, so a DC-coupled system can chart production
+            # without having to add the two series itself.
+            attrs["total_forecast_kw"] = [
+                round(a + d, 3) for a, d in zip(ac_forecast, dc_forecast)
+            ]
         return attrs
 
 
@@ -434,7 +459,12 @@ class ConsumptionForecastSensor(BatteryForecastSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        return {"forecast_kw": self.coordinator.data.get("consumption_forecast_kw", [])}
+        return {
+            "forecast_kw": self.coordinator.data.get("consumption_forecast_kw", []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class NetGridForecastSensor(BatteryForecastSensor):
@@ -461,7 +491,12 @@ class NetGridForecastSensor(BatteryForecastSensor):
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        return {"forecast_kw": self.coordinator.data.get("net_load_forecast_kw", [])}
+        return {
+            "forecast_kw": self.coordinator.data.get("net_load_forecast_kw", []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class SolarIrradianceSensor(BatteryForecastSensor):
@@ -801,7 +836,12 @@ class PVArrayForecastSensor(BatteryForecastSensor):
         if self.coordinator.data is None:
             return {}
         forecasts = self.coordinator.data.get("per_pv_array_forecasts", {})
-        return {"forecast_kw": forecasts.get(self._subentry_id, [])}
+        return {
+            "forecast_kw": forecasts.get(self._subentry_id, []),
+            "forecast_interval_minutes": self.coordinator.data.get(
+                "forecast_interval_minutes", 60
+            ),
+        }
 
 
 class BatteryControlModeSensor(BatteryControllerSensor):

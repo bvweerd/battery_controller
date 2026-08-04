@@ -15,15 +15,11 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ABSORPTION_THRESHOLD
 from .coordinator import OptimizationCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 PARALLEL_UPDATES = 0
-
-# Minimum charging setpoint (W) below which the absorption check is skipped (noise floor).
-_MIN_SETPOINT_W = 200.0
 
 
 async def async_setup_entry(
@@ -68,15 +64,13 @@ class BatteryControllerBinarySensor(
 
 
 class PVCurtailmentSensor(BatteryControllerBinarySensor):
-    """Suggests curtailing PV when the feed-in price is negative and the battery
-    can no longer absorb the excess production.
+    """Suggests curtailing PV production while the feed-in price is negative.
 
-    ON when:
-      1. Current feed-in price < 0 (exporting costs money), AND
-      2. The battery is unable to absorb more:
-         - SoC is at or near its configured maximum, OR
-         - Actual charging power is significantly below the charge setpoint
-           (inverter / battery has reached its limit).
+    Purely price-based: ON when the current feed-in price < 0 (exporting costs
+    money), OFF otherwise. Battery state is deliberately not consulted — the
+    sensor signals the price condition; whether curtailment is executed (and
+    how the battery is used during it) is left to the user's automation and
+    the controller's own PV-curtailed handling.
     """
 
     _attr_translation_key = "pv_curtailment"
@@ -97,34 +91,7 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
             return None
 
         feed_in_price = self.coordinator.data.get("current_feed_in_price", 0.0)
-        if feed_in_price >= 0:
-            return False
-
-        battery_state = self.coordinator.data.get("battery_state")
-        control_action = self.coordinator.data.get("control_action", {})
-
-        if battery_state is None:
-            # Price is negative but no battery state info — suggest curtailment.
-            return True
-
-        # Condition A: battery SoC is at (or very near) configured maximum.
-        battery_config = self.coordinator.battery_config
-        if battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98:
-            return True
-
-        # Condition B: battery is being asked to charge but actual power is
-        # significantly less than the setpoint → battery/inverter is limiting.
-        # control_action["target_power_w"]: positive = charge (controller convention)
-        setpoint_w = control_action.get("target_power_w", 0.0)
-        actual_w = battery_state.power_kw * 1000  # positive = charging
-
-        if (
-            setpoint_w > _MIN_SETPOINT_W
-            and actual_w < setpoint_w * ABSORPTION_THRESHOLD
-        ):
-            return True
-
-        return False
+        return bool(feed_in_price < 0)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

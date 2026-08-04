@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -21,9 +22,13 @@ from custom_components.battery_controller.const import (
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
+    CONF_PV_DC_COUPLED,
+    CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ROUND_TRIP_EFFICIENCY,
+    CONF_ZERO_GRID_DEADBAND_W,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
+    MODE_HYBRID_PLUS,
     MODE_ZERO_GRID,
 )
 from custom_components.battery_controller.coordinator_optimization import (
@@ -233,6 +238,39 @@ async def test_mode_switch_resets_commitment(hass):
     assert coordinator._committed_action == "idle"
     assert coordinator._committed_power == 0.0
 
+    # Mode switch must also reset cached setpoint so the real-time loop does
+    # not apply stale setpoints from the previous mode while re-optimizing.
+    coordinator._effective_mode = "zero_grid"
+    coordinator._controller_schedule_w = 1200.0
+    coordinator.control_mode = MODE_HYBRID
+
+    assert coordinator._effective_mode == "idle"
+    assert coordinator._controller_schedule_w == 0.0
+
+    # Mode switch must mark the next optimization run as triggered by a mode change.
+    assert coordinator._optimization_trigger_source == "mode_change"
+
+    # Re-selecting the already-active mode is a no-op: it must NOT reset the
+    # commitment filter or force the real-time loop through an idle setpoint
+    # (e.g. an automation periodically calling select.select_option).
+    coordinator._committed_action = "charging"
+    coordinator._committed_power = 1.2
+    coordinator._committed_price = 0.25
+    coordinator._committed_step_start = fixed_now
+    coordinator._effective_mode = "charging"
+    coordinator._controller_schedule_w = 1200.0
+    coordinator._optimization_trigger_source = "price_boundary"
+
+    coordinator.control_mode = MODE_HYBRID  # same as current mode
+
+    assert coordinator._committed_action == "charging"
+    assert coordinator._committed_power == 1.2
+    assert coordinator._committed_price == 0.25
+    assert coordinator._committed_step_start == fixed_now
+    assert coordinator._effective_mode == "charging"
+    assert coordinator._controller_schedule_w == 1200.0
+    assert coordinator._optimization_trigger_source == "price_boundary"
+
 
 def _make_coordinator(hass):
     """Build a minimal OptimizationCoordinator for scheduling tests."""
@@ -346,6 +384,223 @@ async def test_same_period_no_trigger_below_threshold(hass, monkeypatch):
     assert not refresh_called, (
         "small intra-period change should not trigger optimization"
     )
+
+
+@pytest.mark.asyncio
+async def test_async_setup_tracks_distinct_feed_in_price_sensor(hass):
+    """A feed-in price sensor different from the buy price sensor gets its own tracker."""
+    from unittest.mock import AsyncMock
+
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_feed_in_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [],
+    }
+
+    coord = OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+    coord._price_model = MagicMock()
+    coord._price_model.async_update_pattern = AsyncMock()
+    coord._feed_in_price_model = MagicMock()
+    coord._feed_in_price_model.async_update_pattern = AsyncMock()
+
+    tracked_entities = []
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_time_interval",
+            return_value=lambda: None,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_state_change_event",
+            side_effect=lambda h, ids, cb: (
+                tracked_entities.extend(ids) or (lambda: None)
+            ),
+        ),
+    ):
+        await coord.async_setup()
+
+    assert "sensor.test_price" in tracked_entities
+    assert "sensor.test_feed_in_price" in tracked_entities
+
+
+@pytest.mark.asyncio
+async def test_async_setup_skips_feed_in_tracker_when_same_as_price_sensor(hass):
+    """No duplicate tracker is registered when feed-in price reuses the buy price sensor."""
+    from unittest.mock import AsyncMock
+
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_FIXED_FEED_IN_PRICE: 0.07,
+        CONF_POWER_CONSUMPTION_SENSORS: [],
+        CONF_POWER_PRODUCTION_SENSORS: [],
+        "battery_subentries": [],
+    }
+
+    coord = OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+    coord._price_model = MagicMock()
+    coord._price_model.async_update_pattern = AsyncMock()
+    coord._feed_in_price_model = MagicMock()
+    coord._feed_in_price_model.async_update_pattern = AsyncMock()
+
+    tracked_calls = []
+    with (
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_time_interval",
+            return_value=lambda: None,
+        ),
+        patch(
+            "custom_components.battery_controller.coordinator_optimization.async_track_state_change_event",
+            side_effect=lambda h, ids, cb: tracked_calls.append(ids) or (lambda: None),
+        ),
+    ):
+        await coord.async_setup()
+
+    # Only the buy price sensor is tracked — no duplicate for feed-in.
+    assert tracked_calls == [["sensor.test_price"]]
+
+
+def test_handle_feed_in_price_change_no_new_state(hass):
+    """_handle_feed_in_price_change returns early when new_state is None."""
+    coord = _make_coordinator(hass)
+    event = MagicMock()
+    event.data = {"new_state": None, "old_state": None}
+    coord._handle_feed_in_price_change(event)  # Should not raise
+
+
+def test_handle_feed_in_price_change_unavailable_state(hass):
+    """_handle_feed_in_price_change ignores unavailable/unknown states."""
+    coord = _make_coordinator(hass)
+    new_state = MagicMock()
+    new_state.state = "unavailable"
+    event = MagicMock()
+    event.data = {"new_state": new_state, "old_state": None}
+    coord._handle_feed_in_price_change(event)  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_period_boundary_triggers(hass, monkeypatch):
+    """A new feed-in price period must trigger optimization even when the buy
+    price sensor is a separate, unchanged entity."""
+    coordinator = _make_coordinator(hass)
+
+    period_a = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    period_b = datetime(2026, 3, 21, 11, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period_b], 60),
+    )
+
+    coordinator._last_feed_in_period_start = period_a
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "0.10"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called, (
+        "optimization should be triggered at feed-in price period boundary"
+    )
+    assert coordinator._last_feed_in_period_start == period_b
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_same_period_no_trigger(hass, monkeypatch):
+    """No refresh is triggered when the feed-in price period hasn't changed."""
+    coordinator = _make_coordinator(hass)
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+
+    coordinator._last_feed_in_period_start = period
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "0.05"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert not refresh_called
+
+
+@pytest.mark.asyncio
+async def test_handle_feed_in_price_change_was_unavailable_triggers(hass, monkeypatch):
+    """Sensor becoming available for the first time triggers a refresh."""
+    coordinator = _make_coordinator(hass)
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_state = MagicMock()
+    old_state.state = "unavailable"
+    new_state = MagicMock()
+    new_state.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    coordinator._handle_feed_in_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called
 
 
 def test_schedule_mid_period_run_future(hass, monkeypatch):
@@ -598,6 +853,7 @@ async def test_async_shutdown_unsubscribes_all(hass):
     unsub_calls = {}
     for attr in (
         "_unsub_price",
+        "_unsub_feed_in_price",
         "_unsub_soc",
         "_unsub_forecast",
         "_unsub_mid_period_timer",
@@ -657,6 +913,85 @@ def test_get_realtime_grid_w_kw_unit_conversion(hass):
     assert result == pytest.approx(300.0)
 
 
+def test_get_realtime_grid_w_all_sensors_unavailable_returns_none(hass):
+    """All configured sensors unavailable must yield None, not a fictitious 0 W.
+
+    Callers (realtime loop, full optimizer run) treat None as "no live
+    reading" and fall back appropriately; 0.0 would be acted upon as a real
+    balanced-grid measurement.
+    """
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "unavailable")
+    hass.states.async_set("sensor.production", "unknown")
+
+    assert coord._get_realtime_grid_w() is None
+
+
+def test_get_realtime_grid_w_partial_unavailable_uses_available(hass):
+    """One readable sensor is enough for a (partial) grid reading."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "unavailable")
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+
+    assert coord._get_realtime_grid_w() == pytest.approx(-200.0)
+
+
+def test_find_stale_power_sensor_fresh_sensors(hass):
+    """Fresh sensors are not reported as stale."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.consumption"]
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.consumption", "500", {"unit_of_measurement": "W"})
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+
+    assert coord._find_stale_power_sensor(20.0) is None
+
+
+def test_find_stale_power_sensor_detects_stale_production(hass, monkeypatch):
+    """Production sensors are also covered by the staleness check."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = []
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.production", "200", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.production").last_reported
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+
+    stale = coord._find_stale_power_sensor(20.0)
+    assert stale is not None
+    sensor_id, age_s = stale
+    assert sensor_id == "sensor.production"
+    assert age_s == pytest.approx(30.0, abs=1.0)
+
+
+def test_find_stale_power_sensor_skips_unavailable(hass, monkeypatch):
+    """Unavailable sensors are excluded from the grid sum, so an old
+    unavailable state must not flag the reading as stale (that would block
+    every realtime update e.g. overnight)."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = []
+    coord._power_production_sensors = ["sensor.production"]
+
+    hass.states.async_set("sensor.production", "unavailable")
+    prod_time = hass.states.get("sensor.production").last_reported
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: prod_time + timedelta(seconds=30),
+    )
+
+    assert coord._find_stale_power_sensor(20.0) is None
+
+
 def test_resolve_controller_mode(hass):
     """_resolve_controller_mode returns correct mode string (lines 616-634)."""
     from custom_components.battery_controller.const import MODE_ZERO_GRID
@@ -707,7 +1042,8 @@ def test_split_setpoint_charging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -715,7 +1051,8 @@ def test_split_setpoint_charging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -745,7 +1082,8 @@ def test_split_setpoint_discharging(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -767,7 +1105,8 @@ def test_split_setpoint_idle(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -798,7 +1137,8 @@ def test_get_current_battery_state_with_sensors(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1020,11 +1360,25 @@ async def test_async_update_data_pending_schedules_rerun(hass, monkeypatch):
     monkeypatch.setattr(coord, "_run_optimization", fake_run)
 
     tasks = []
-    monkeypatch.setattr(
-        coord.hass,
-        "async_create_task",
-        lambda coro: tasks.append(coro),
-    )
+
+    def capture_task(coro):
+        """Record the scheduled coroutine, then dispose of it.
+
+        The real async_request_refresh is not patched here, so this receives a
+        genuine coroutine object. Stashing it without ever scheduling it leaves
+        it to be garbage collected un-awaited, which raises
+
+            RuntimeWarning: coroutine 'DataUpdateCoordinator.async_request_refresh'
+            was never awaited
+
+        Closing it keeps the assertion below meaningful — the call still
+        happened and is still recorded — without leaving a dangling coroutine
+        that masks the same warning coming from real code.
+        """
+        tasks.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(coord.hass, "async_create_task", capture_task)
 
     result = await coord._async_update_data()
     assert result == {"control_mode": "result"}
@@ -1082,8 +1436,8 @@ def test_get_realtime_grid_w_value_error_skipped(hass):
     hass.states.async_set("sensor.bad_production", "also_bad")
 
     result = coord._get_realtime_grid_w()
-    # Should return 0.0 - 0.0 = 0.0 (both sensors skipped, defaults to 0)
-    assert result == 0.0
+    # Both sensors unreadable → no live reading (None), not a fictitious 0 W
+    assert result is None
 
 
 def test_read_battery_state_kwh_soc_unit(hass):
@@ -1095,7 +1449,8 @@ def test_read_battery_state_kwh_soc_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1116,7 +1471,8 @@ def test_read_battery_state_fallback_soc_when_unavailable(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1137,7 +1493,8 @@ def test_read_battery_state_no_soc_sensor_uses_fallback(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1159,7 +1516,8 @@ def test_read_battery_state_charging_mode_w_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1185,7 +1543,8 @@ def test_read_battery_state_discharging_mode_kw_unit(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1211,7 +1570,8 @@ def test_read_battery_state_unknown_unit_warns(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1237,7 +1597,8 @@ def test_get_current_battery_state_charging_mode(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1271,7 +1632,8 @@ def test_get_current_battery_state_discharging_mode(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -1550,7 +1912,8 @@ def test_split_setpoint_charging_zero_headroom(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=0.0,
         max_soc_percent=100.0,
     )
@@ -1578,7 +1941,8 @@ def test_split_setpoint_discharging_zero_available(hass):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.9,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=0.0,
         max_soc_percent=100.0,
     )
@@ -1628,6 +1992,80 @@ def test_refresh_battery_config_no_entry(hass, monkeypatch):
     coord._refresh_battery_config()
 
 
+def _make_dc_coordinator(hass):
+    """Build a coordinator whose entry-level config declares DC-coupled PV."""
+    weather_coordinator = MagicMock()
+    weather_coordinator.data = {}
+    forecast_coordinator = MagicMock()
+    forecast_coordinator.data = None
+    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+    config = {
+        "entry_id": "test-entry",
+        CONF_PRICE_SENSOR: "sensor.test_price",
+        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
+        CONF_PV_DC_COUPLED: True,
+        CONF_PV_DC_PEAK_POWER_KWP: 3.5,
+        "battery_subentries": [
+            (
+                "bat1",
+                {
+                    CONF_MAX_CHARGE_POWER_KW: 1.2,
+                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                    CONF_ROUND_TRIP_EFFICIENCY: 0.92,
+                    CONF_MIN_SOC_PERCENT: 10.0,
+                    CONF_MAX_SOC_PERCENT: 100.0,
+                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                },
+            )
+        ],
+    }
+    return OptimizationCoordinator(
+        hass, weather_coordinator, forecast_coordinator, config
+    )
+
+
+def test_dc_pv_config_applied_to_battery_config(hass):
+    """Entry-level DC-PV settings must reach the aggregated battery config.
+
+    DC coupling lives on the PV-array subentries; battery subentries carry no
+    DC-PV keys, so without the overlay pv_dc_coupled would always be False and
+    the DP would never model passive DC MPPT charging.
+    """
+    coord = _make_dc_coordinator(hass)
+    assert coord.battery_config.pv_dc_coupled is True
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(3.5)
+
+
+def test_dc_pv_config_not_applied_when_ac_only(hass):
+    """Without entry-level DC coupling the battery config stays AC-only."""
+    coord = _make_coordinator(hass)
+    assert coord.battery_config.pv_dc_coupled is False
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(0.0)
+
+
+def test_refresh_battery_config_preserves_dc_pv_overlay(hass, monkeypatch):
+    """_refresh_battery_config must re-apply the DC-PV overlay after rebuilding."""
+    coord = _make_dc_coordinator(hass)
+
+    mock_subentry = MagicMock()
+    mock_subentry.data = {
+        CONF_MAX_CHARGE_POWER_KW: 2.0,
+        CONF_MAX_DISCHARGE_POWER_KW: 2.0,
+        CONF_ROUND_TRIP_EFFICIENCY: 0.90,
+        CONF_MIN_SOC_PERCENT: 10.0,
+        CONF_MAX_SOC_PERCENT: 90.0,
+    }
+    mock_entry = MagicMock()
+    mock_entry.subentries = {"bat1": mock_subentry}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: mock_entry)
+
+    coord._refresh_battery_config()
+
+    assert coord.battery_config.max_charge_power_kw == pytest.approx(2.0)
+    assert coord.battery_config.pv_dc_coupled is True
+    assert coord.battery_config.pv_dc_peak_power_kwp == pytest.approx(3.5)
+
+
 def test_get_manual_setpoint_w_with_entry(hass, monkeypatch):
     """_get_manual_setpoint_w reads setpoint from live entry options (587-593)."""
     from custom_components.battery_controller.const import CONF_MANUAL_POWER_SETPOINT_W
@@ -1669,6 +2107,143 @@ async def test_handle_realtime_update_stale_sensor_returns_early(hass, monkeypat
     await coord._handle_realtime_update(datetime.now(timezone.utc))
 
     assert not updated, "stale sensor must prevent any data update"
+
+
+@pytest.mark.asyncio
+async def test_stale_zero_grid_unwinds_toward_zero(hass, monkeypatch):
+    """A stale (steady) grid sensor in zero_grid must still unwind an
+    over-committed discharge toward zero.
+
+    Reproduces the post-spike self-lock: after a Quooker/kettle spike the
+    integrator is left discharging ~1.5 kW, which holds the grid at a steady
+    export so an on-change power sensor stops updating and reads as "stale".
+    The correction must not be skipped — reducing battery power changes the
+    grid and wakes the sensor.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    # Battery left over-discharging 1500 W after a spike.
+    coord.zero_grid_controller.reset_setpoint(-1500.0)
+    coord.data = {
+        "control_action": {"target_power_kw": -1.5, "target_power_w": -1500.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-1.5, mode="discharging"
+        ),
+        "per_battery_states": {},
+    }
+
+    hass.states.async_set("sensor.grid_w", "-1300", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -1300.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-1.5, mode="discharging"
+        ),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "stale steady grid must still correct an over-commitment"
+    new_w = updated[-1]["control_action"]["target_power_w"]
+    # Moved toward zero (covers only base load now), not held at -1500 W.
+    assert -1500.0 < new_w <= 0.0
+    assert abs(new_w) < 1500.0
+    # The control mode is still zero_grid — not the instantaneous action.
+    assert updated[-1]["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_realtime_zero_grid_reports_zero_grid_mode(hass, monkeypatch):
+    """In zero_grid the real-time loop must report optimal_mode='zero_grid',
+    not the instantaneous physical action, so the Optimal Mode sensor does not
+    flip to 'discharging'/'charging' between optimizer runs.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+
+    # Fresh sensor reading (not stale): importing 500 W → controller discharges.
+    hass.states.async_set("sensor.grid_w", "500", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 500.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "a setpoint change must publish an update"
+    # Physical action is discharging (covers the load) ...
+    assert updated[-1]["control_action"]["action_mode"] == "discharging"
+    # ... but the reported control mode stays zero_grid.
+    assert updated[-1]["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
+    """A stale (possibly dead/frozen) grid sensor must never drive the battery
+    into a larger discharge — the original P4.1 runaway protection is kept."""
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(-200.0)
+    coord.data = {
+        "control_action": {"target_power_kw": -0.2, "target_power_w": -200.0},
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-0.2, mode="discharging"
+        ),
+        "per_battery_states": {},
+    }
+
+    # Sensor frozen at a large import value.
+    hass.states.async_set("sensor.grid_w", "2000", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 2000.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=-0.2, mode="discharging"
+        ),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert not updated, "stale frozen sensor must not drive a larger discharge"
+    # Integrator memory restored — not wound up further.
+    assert coord.zero_grid_controller.last_target_w == pytest.approx(-200.0)
 
 
 @pytest.mark.asyncio
@@ -2249,6 +2824,12 @@ def _make_fake_result(
     )
 
 
+def _mark_plan_executed(coord) -> None:
+    """Simulate that the previous DP plan was commanded to the controller unchanged."""
+    coord._effective_mode = coord._last_result.mode_schedule[0]
+    coord._controller_schedule_w = coord._last_result.power_schedule_kw[0] * 1000
+
+
 def test_calibration_no_sample_without_previous_result(hass):
     """No calibration sample when _last_result is None."""
     coord = _make_coordinator(hass)
@@ -2303,6 +2884,7 @@ def test_calibration_perfect_efficiency_no_correction(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual SoC reached exactly the planned value
     battery_state = BatteryState(
@@ -2331,6 +2913,7 @@ def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 10, 15, tzinfo=timezone.utc),
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=5.25, soc_percent=52.5, power_kw=1.0, mode="charging"
@@ -2357,6 +2940,7 @@ def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
@@ -2375,6 +2959,7 @@ def test_calibration_low_efficiency_updates_correction(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[4.0, 6.0],  # planned delta = 2.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 1.6 kWh → ratio = 0.8
     battery_state = BatteryState(
@@ -2396,6 +2981,7 @@ def test_calibration_rolling_average_converges(hass):
             mode_schedule=["charging"],
             soc_schedule_kwh=[0.0, 1.0],
         )
+        _mark_plan_executed(coord)
         # actual delta = 0.85 kWh → ratio = 0.85
         battery_state = BatteryState(
             soc_kwh=0.85, soc_percent=8.5, power_kw=1.0, mode="charging"
@@ -2417,6 +3003,7 @@ def test_calibration_floor_clips_extreme_low_ratio(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 7.0],  # planned delta = 2.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 0.5 kWh → uncipped ratio = 0.25, clipped to 0.5
     battery_state = BatteryState(
@@ -2434,6 +3021,7 @@ def test_calibration_ceiling_clips_extra_charge(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
     )
+    _mark_plan_executed(coord)
 
     # Actual delta = 1.5 kWh → unclipped ratio = 1.5, clipped to 1.05
     battery_state = BatteryState(
@@ -2489,6 +3077,7 @@ def test_calibration_not_applied_for_dc_coupled(hass):
         mode_schedule=["charging"],
         soc_schedule_kwh=[4.0, 6.0],
     )
+    _mark_plan_executed(coord)
 
     battery_state = BatteryState(
         soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
@@ -2517,7 +3106,8 @@ def _make_two_battery_coord(hass, soc1_kwh: float, soc2_kwh: float):
         capacity_kwh=10.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -2578,7 +3168,8 @@ def test_split_setpoint_overflow_redistribution(hass):
         capacity_kwh=5.0,
         max_charge_power_kw=1.0,  # low max
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -2586,7 +3177,8 @@ def test_split_setpoint_overflow_redistribution(hass):
         capacity_kwh=5.0,
         max_charge_power_kw=5.0,
         max_discharge_power_kw=5.0,
-        round_trip_efficiency=0.90,
+        charge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
+        discharge_efficiency_curve=f"{math.sqrt(0.9):.4f}",
         min_soc_percent=10.0,
         max_soc_percent=90.0,
     )
@@ -2674,3 +3266,998 @@ def test_split_setpoint_gap_resets_active_battery(hass):
     coord._split_setpoint(0.1, "follow_schedule")
     # Gap crossed threshold → proportional split → active battery reset to None
     assert coord._scheduled_active_battery is None
+
+
+# ---------------------------------------------------------------------------
+# Degradation cost conversion tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_degradation_per_cycle_converted_to_per_kwh_throughput(hass, monkeypatch):
+    """Per-cycle degradation cost is divided by 2 x usable kWh (charge + discharge)."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0, 0.0],
+        "consumption_forecast_kw": [0.5, 0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.20, 0.22], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+
+    live_entry = MagicMock()
+    live_entry.options = {"degradation_cost_per_cycle": 0.04}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["degradation_cost_per_kwh"] = args[7]
+        return OptimizationResult(
+            power_schedule_kw=[0.0, 0.0],
+            mode_schedule=["idle", "idle"],
+            soc_schedule_kwh=[5.0, 5.0, 5.0],
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=list(args[2]),
+            pv_forecast=[0.0, 0.0],
+            consumption_forecast=[0.5, 0.5],
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    # Default battery: 10 kWh, 10-100% SoC -> usable 9 kWh.
+    # One full cycle = 18 kWh throughput (charge + discharge), so
+    # 0.04 EUR/cycle -> 0.04 / 18 EUR/kWh.
+    usable_kwh = coord.battery_config.max_soc_kwh - coord.battery_config.min_soc_kwh
+    assert usable_kwh == pytest.approx(9.0)
+    assert captured["degradation_cost_per_kwh"] == pytest.approx(0.04 / (2 * 9.0))
+
+
+# ---------------------------------------------------------------------------
+# Sensor unit handling
+# ---------------------------------------------------------------------------
+
+
+def test_grid_power_kw_sensor_converted(hass):
+    """kW grid sensors are converted to W."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.grid_kw"]
+    hass.states.async_set("sensor.grid_kw", "1.5", {"unit_of_measurement": "kW"})
+    assert coord._get_realtime_grid_w() == pytest.approx(1500.0)
+
+
+def test_grid_power_unknown_unit_skipped(hass, caplog):
+    """A grid sensor with an unrecognized unit is skipped, not misread as W."""
+    coord = _make_coordinator(hass)
+    coord._power_consumption_sensors = ["sensor.grid_mw", "sensor.grid_w"]
+    hass.states.async_set("sensor.grid_mw", "2.0", {"unit_of_measurement": "MW"})
+    hass.states.async_set("sensor.grid_w", "300", {"unit_of_measurement": "W"})
+    assert coord._get_realtime_grid_w() == pytest.approx(300.0)
+    assert "unexpected unit 'MW'" in caplog.text
+    # Warning is emitted only once per sensor
+    caplog.clear()
+    coord._get_realtime_grid_w()
+    assert "unexpected unit" not in caplog.text
+
+
+def test_soc_sensor_in_wh_converted(hass):
+    """A Wh SoC sensor is converted to kWh."""
+    coord = _make_coordinator(hass)
+    hass.states.async_set("sensor.test_soc", "5000", {"unit_of_measurement": "Wh"})
+    sid, subentry = coord._battery_subentries[0]
+    cfg = dict(coord._individual_battery_configs)[sid]
+    state = coord._read_battery_state(subentry, cfg)
+    assert state.soc_kwh == pytest.approx(5.0)
+    assert state.soc_percent == pytest.approx(50.0)
+
+
+def test_concentrate_redistributes_when_winner_full(hass):
+    """A full concentration winner must not drop the charge setpoint."""
+    # bat1 full (9.0 = max SoC), bat2 nearly full; gap below split threshold.
+    coord = _make_two_battery_coord(hass, soc1_kwh=9.0, soc2_kwh=8.7)
+    # Selection hysteresis keeps the previously active (now full) battery.
+    coord._zero_grid_active_battery = "bat1"
+    result = coord._split_setpoint(1.0, MODE_ZERO_GRID)
+    # bat1 has no headroom; the setpoint must go to bat2 instead of vanishing.
+    assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
+    assert result["bat2"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_concentrate_redistributes_when_winner_empty(hass):
+    """An empty concentration winner must not drop the discharge setpoint."""
+    # bat1 empty (1.0 = min SoC), bat2 slightly above; gap below split threshold.
+    coord = _make_two_battery_coord(hass, soc1_kwh=1.0, soc2_kwh=1.3)
+    coord._zero_grid_active_battery = "bat1"
+    result = coord._split_setpoint(-1.0, MODE_ZERO_GRID)
+    assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
+    assert result["bat2"] == pytest.approx(-1.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_price_change_from_zero_uses_absolute_threshold(hass, monkeypatch):
+    """A price moving away from exactly 0 must still trigger re-optimization."""
+    coordinator = _make_coordinator(hass)
+
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coordinator._last_price = 0.0  # free hour
+    coordinator._last_period_start = period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.05], [period], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period + timedelta(minutes=5),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.0"
+    new_mock = MagicMock()
+    new_mock.state = "0.05"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert refresh_called, "absolute threshold should trigger from a zero price"
+    assert coordinator._last_price == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_price_change_from_zero_small_change_updates_price(hass, monkeypatch):
+    """Tiny changes from 0 do not trigger, but _last_price must still update."""
+    coordinator = _make_coordinator(hass)
+
+    period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coordinator._last_price = 0.0
+    coordinator._last_period_start = period
+
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.001], [period], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: period + timedelta(minutes=5),
+    )
+
+    refresh_called = []
+
+    async def fake_refresh():
+        refresh_called.append(True)
+
+    monkeypatch.setattr(coordinator, "async_request_refresh", fake_refresh)
+
+    old_mock = MagicMock()
+    old_mock.state = "0.0"
+    new_mock = MagicMock()
+    new_mock.state = "0.001"
+    event = MagicMock()
+    event.data = {"old_state": old_mock, "new_state": new_mock}
+
+    coordinator._handle_price_change(event)
+    await hass.async_block_till_done()
+
+    assert not refresh_called
+    # Previously _last_price stayed stuck at 0 because the whole branch was
+    # skipped for a zero price.
+    assert coordinator._last_price == pytest.approx(0.001)
+
+
+# ---------------------------------------------------------------------------
+# Calibration gating: only sample when the DP plan was actually executed
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_no_sample_when_plan_overridden_by_zero_grid(hass):
+    """No sample when hybrid/zero_grid resolved the planned charge to zero_grid."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],
+    )
+    # Hybrid resolved the planned charge to zero_grid: schedule not executed.
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    battery_state = BatteryState(
+        soc_kwh=4.1, soc_percent=41.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_calibration_no_sample_when_commitment_locked_other_power(hass):
+    """No sample when the commitment filter locked a different power."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"],
+        soc_schedule_kwh=[4.0, 6.0],
+    )
+    # Same direction but commitment filter locked 0.4 kW instead of planned 1.0 kW.
+    coord._effective_mode = "charging"
+    coord._controller_schedule_w = 400.0
+
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=0.4, mode="charging"
+    )
+    coord._update_charge_eff_calibration(battery_state)
+
+    assert len(coord._charge_eff_samples) == 0
+    assert coord._charge_eff_correction == 1.0
+
+
+def test_discharge_calibration_no_sample_when_plan_overridden(hass):
+    """Discharge calibration is gated on the executed plan as well."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    battery_state = BatteryState(
+        soc_kwh=5.9, soc_percent=59.0, power_kw=0.0, mode="idle"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 0
+    assert coord._discharge_eff_correction == 1.0
+
+
+def test_discharge_calibration_samples_when_plan_executed(hass):
+    """Discharge calibration samples normally when the plan was executed."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],  # planned delta = 2.0 kWh down
+    )
+    _mark_plan_executed(coord)
+
+    # Actual delta = 1.6 kWh down → ratio = 0.8
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 1
+    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+    assert coord._discharge_eff_correction == pytest.approx(0.8)
+
+
+def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
+    """No sample when the planned step crosses the low-SoC derating threshold.
+
+    The BMS throttles discharge power mid-step once the threshold is reached,
+    so actual < planned reflects derating, not efficiency. Sampling it would
+    corrupt the persisted calibration (mirror of the high-SoC charge guard).
+    """
+    coord = _make_coordinator(hass)
+    coord.battery_config.low_soc_discharge_threshold_pct = 50.0
+    coord.battery_config.low_soc_max_discharge_kw = 0.5
+
+    # capacity 10 kWh → threshold at 5.0 kWh; plan 6.0 → 4.0 crosses it
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    _mark_plan_executed(coord)
+
+    battery_state = BatteryState(
+        soc_kwh=5.2, soc_percent=52.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 0
+    assert coord._discharge_eff_correction == pytest.approx(1.0)
+
+
+def test_discharge_calibration_samples_above_low_soc_derating(hass):
+    """Sampling continues when derating is configured but the step stays above it."""
+    coord = _make_coordinator(hass)
+    coord.battery_config.low_soc_discharge_threshold_pct = 20.0
+    coord.battery_config.low_soc_max_discharge_kw = 0.5
+
+    # threshold at 2.0 kWh; plan 6.0 → 4.0 stays well above it
+    coord._last_result = _make_fake_result(
+        mode_schedule=["discharging"],
+        soc_schedule_kwh=[6.0, 4.0],
+    )
+    _mark_plan_executed(coord)
+
+    battery_state = BatteryState(
+        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
+    )
+    coord._update_discharge_eff_calibration(battery_state)
+
+    assert len(coord._discharge_eff_samples) == 1
+    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+
+
+# Feed-in interval handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_feed_in_forecast_resampled_from_native_interval(hass, monkeypatch):
+    """Hourly feed-in prices are expanded to the 15-min grid price interval."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.config[CONF_FEED_IN_PRICE_SENSOR] = "sensor.feed_in"
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0],
+        "consumption_forecast_kw": [0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    # Feed-in sensor publishes two HOURLY values via the generic forecast attr
+    # (no timestamps -> detected interval = 60 min).
+    hass.states.async_set("sensor.feed_in", "0.10", {"forecast": [0.10, 0.20]})
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    # Grid price sensor publishes 15-min prices: 4 steps = 1 hour
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: (
+            [0.20, 0.21, 0.22, 0.23],
+            [fixed_now + timedelta(minutes=15 * i) for i in range(4)],
+            15,
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [0.25] * 4,
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["feed_in"] = args[3]
+        return OptimizationResult(
+            power_schedule_kw=[0.0] * 4,
+            mode_schedule=["idle"] * 4,
+            soc_schedule_kwh=[5.0] * 5,
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=list(args[2]),
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5] * 4,
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    # The first hourly feed-in value (0.10) must cover the first four 15-min
+    # steps. Without interval-aware resampling the second hourly value (0.20)
+    # would incorrectly appear at step 1.
+    assert captured["feed_in"][:4] == pytest.approx([0.10, 0.10, 0.10, 0.10])
+
+
+@pytest.mark.asyncio
+async def test_feed_in_forecast_empty_after_resample_uses_fixed_price(
+    hass, monkeypatch
+):
+    """A feed-in series shorter than one grid-price period must not reach the
+    optimizer as an empty list.
+
+    Downsampling (e.g. 30 min of 15-min feed-in data against hourly grid
+    prices) yields []; the optimizer would then fall back to the grid buy
+    price per step and give stored energy a terminal value of 0. The fixed
+    feed-in price must be used instead.
+    """
+    from unittest.mock import patch as upatch
+
+    from homeassistant.util import dt as dt_util
+
+    coord = _make_coordinator(hass)
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.config[CONF_FEED_IN_PRICE_SENSOR] = "sensor.feed_in"
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.0],
+        "consumption_forecast_kw": [0.5],
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    hass.states.async_set("sensor.test_price", "0.20")
+    # Feed-in sensor has only 30 min of 15-min data left (2 timestamped
+    # entries -> detected interval = 15 min).
+    real_now = dt_util.utcnow()
+    hass.states.async_set(
+        "sensor.feed_in",
+        "0.10",
+        {
+            "forecast": [
+                {
+                    "start": (real_now + timedelta(minutes=15 * i)).isoformat(),
+                    "value": 0.10,
+                }
+                for i in range(2)
+            ]
+        },
+    )
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 0.0)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    # Grid price sensor publishes HOURLY prices: 2 steps = 2 hours
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: (
+            [0.20, 0.22],
+            [fixed_now + timedelta(minutes=60 * i) for i in range(2)],
+            60,
+        ),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0] * 2,
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    captured = {}
+
+    def fake_optimize(*args):
+        captured["feed_in"] = args[3]
+        return OptimizationResult(
+            power_schedule_kw=[0.0] * 2,
+            mode_schedule=["idle"] * 2,
+            soc_schedule_kwh=[5.0] * 3,
+            total_cost=0.0,
+            baseline_cost=0.0,
+            savings=0.0,
+            optimal_power_kw=0.0,
+            optimal_mode="idle",
+            shadow_price_eur_kwh=0.15,
+            price_forecast=list(args[2]),
+            pv_forecast=[0.0] * 2,
+            consumption_forecast=[0.5] * 2,
+        )
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        side_effect=fake_optimize,
+    ):
+        await coord._run_optimization()
+
+    # _make_coordinator configures CONF_FIXED_FEED_IN_PRICE = 0.07
+    assert captured["feed_in"], "optimizer must not receive an empty feed-in list"
+    assert captured["feed_in"] == pytest.approx([0.07, 0.07])
+
+
+# ---------------------------------------------------------------------------
+
+# Hybrid mode: planned charging vs PV export surplus
+# ---------------------------------------------------------------------------
+
+
+async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
+    """Run one hybrid optimization with a 3 kW planned charge and given grid power."""
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    coord.control_mode = MODE_HYBRID
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.5, 0.5],
+        "consumption_forecast_kw": [0.3, 0.3],
+        "current_pv_kw": 0.5,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.3,
+    }
+    hass.states.async_set("sensor.test_price", "0.10")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.10, 0.12], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    fake_result = OptimizationResult(
+        power_schedule_kw=[3.0, 0.0],
+        mode_schedule=["charging", "idle"],
+        soc_schedule_kwh=[5.0, 7.8, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=3.0,
+        optimal_mode="charging",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        return_value=fake_result,
+    ):
+        data = await coord._run_optimization()
+    return data
+
+
+@pytest.mark.asyncio
+async def test_hybrid_small_surplus_follows_charge_schedule(hass, monkeypatch):
+    """A 0.2 kW export surplus must not downgrade a 3 kW planned grid charge."""
+    data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-200.0)
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
+    """When the surplus covers the planned charge, zero_grid follows the surplus."""
+    data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-3500.0)
+    assert data["optimal_mode"] == "zero_grid"
+
+
+async def _run_hybrid_mode_sequence(
+    hass,
+    monkeypatch,
+    fake_result: OptimizationResult,
+    grid_sequence: list[float],
+    deadband_w: float | None = None,
+    control_mode: str = MODE_HYBRID,
+) -> list[str]:
+    """Run hybrid optimization repeatedly on one coordinator, varying grid power.
+
+    Used to verify hysteresis: unlike `_run_hybrid_charge_case`, which builds a
+    fresh coordinator per call (so it can't observe state carried between
+    realtime-update ticks), this reuses the same coordinator so the
+    `_last_hybrid_idle_decision` / `_last_hybrid_charge_decision` hysteresis
+    state persists across the calls in grid_sequence.
+    """
+    from unittest.mock import patch as upatch
+
+    coord = _make_coordinator(hass)
+    coord.control_mode = control_mode
+    fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
+    coord.forecast_coordinator.data = {
+        "pv_forecast_kw": [0.5, 0.5],
+        "consumption_forecast_kw": [0.3, 0.3],
+        "current_pv_kw": 0.5,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.3,
+    }
+    hass.states.async_set("sensor.test_price", "0.10")
+    monkeypatch.setattr(coord, "_refresh_battery_config", lambda: None)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
+    monkeypatch.setattr(coord._price_model, "has_data", lambda: False)
+    monkeypatch.setattr(coord._feed_in_price_model, "has_data", lambda: False)
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.extract_price_forecast_with_timestamps",
+        lambda state: ([0.10, 0.12], [fixed_now, fixed_now + timedelta(hours=1)], 60),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
+        lambda *a: [1.0, 1.0],
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
+        lambda values, src, dst: list(values),
+    )
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: fixed_now,
+    )
+    live_entry = MagicMock()
+    live_entry.options = (
+        {} if deadband_w is None else {CONF_ZERO_GRID_DEADBAND_W: deadband_w}
+    )
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        return_value={
+            "target_power_kw": 0.0,
+            "target_power_w": 0.0,
+            "action_mode": "idle",
+            "raw_target_w": 0.0,
+            "dp_schedule_w": 0.0,
+            "mode": "idle",
+        }
+    )
+
+    modes: list[str] = []
+    with upatch(
+        "custom_components.battery_controller.coordinator_optimization.optimize_battery_schedule",
+        return_value=fake_result,
+    ):
+        for grid_w in grid_sequence:
+            monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda gw=grid_w: gw)
+            data = await coord._run_optimization()
+            modes.append(data["optimal_mode"])
+    return modes
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_surplus_hysteresis_prevents_flicker(hass, monkeypatch):
+    """PV surplus hovering around the 80% coverage threshold must not flip the
+    effective mode every realtime tick.
+
+    Planned charge is 3 kW, so the coverage threshold is 2400 W. The first
+    tick has a solid 2600 W surplus (enters zero_grid). The second tick drops
+    to 2350 W: below the raw 2400 W threshold, but within the ±5% hysteresis
+    band, so it must stay in zero_grid rather than flicker back to charging.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[3.0, 0.0],
+        mode_schedule=["charging", "idle"],
+        soc_schedule_kwh=[5.0, 7.8, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=3.0,
+        optimal_mode="charging",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass, monkeypatch, fake_result, grid_sequence=[-2600.0, -2350.0]
+    )
+    assert modes == ["zero_grid", "zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_idle_zero_grid_hysteresis_prevents_flicker(hass, monkeypatch):
+    """Grid power hovering near 0 W must not flip idle/zero_grid every tick.
+
+    The optimizer wants idle (preserve capacity for an upcoming discharge).
+    The first tick has a solid PV surplus (-100 W, below the default -50 W
+    zero-grid-deadband band) so it enters zero_grid. The second tick is a
+    small positive import (20 W) — within the ±50 W deadband — so it must
+    stay in zero_grid rather than flicker back to idle.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[0.0, 2.0],
+        mode_schedule=["idle", "discharging"],
+        soc_schedule_kwh=[5.0, 5.0, 3.0],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass, monkeypatch, fake_result, grid_sequence=[-100.0, 20.0]
+    )
+    assert modes == ["zero_grid", "zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_idle_zero_grid_deadband_is_configurable(hass, monkeypatch):
+    """The hysteresis band width follows the user's zero_grid_deadband_w setting.
+
+    Same grid sequence as the default-band test above, but with the deadband
+    turned down to 10 W. The 20 W import on the second tick now exceeds the
+    (smaller) band, so the mode must flip back to idle — proving the band
+    width actually comes from the live config value, not a fixed constant.
+    """
+    fake_result = OptimizationResult(
+        power_schedule_kw=[0.0, 2.0],
+        mode_schedule=["idle", "discharging"],
+        soc_schedule_kwh=[5.0, 5.0, 3.0],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=0.15,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        fake_result,
+        grid_sequence=[-100.0, 20.0],
+        deadband_w=10.0,
+    )
+    assert modes == ["zero_grid", "idle"]
+
+
+# ---------------------------------------------------------------------------
+# Hybrid+ mode: PV-surplus capture gated on the price forecast (shadow price)
+# ---------------------------------------------------------------------------
+
+
+def _idle_plan_result(shadow_price: float) -> OptimizationResult:
+    """Optimizer result planning idle now and charging later (cheap surplus)."""
+    return OptimizationResult(
+        power_schedule_kw=[0.0, 3.0],
+        mode_schedule=["idle", "charging"],
+        soc_schedule_kwh=[5.0, 5.0, 7.8],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=0.0,
+        optimal_mode="idle",
+        shadow_price_eur_kwh=shadow_price,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_low_shadow_price_exports_surplus(hass, monkeypatch):
+    """Hybrid+ exports PV surplus when the battery can be filled cheaper later.
+
+    The optimizer plans idle now and charging later; its shadow price of
+    0.02 EUR/kWh (× sqrt(0.92) ≈ 0.019) is well below the 0.07 EUR/kWh fixed
+    feed-in price, so exporting the current surplus beats storing it and the
+    mode must stay idle instead of upgrading to zero_grid.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["idle"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_high_shadow_price_captures_surplus(hass, monkeypatch):
+    """Hybrid+ still captures surplus when stored energy is worth more than feed-in.
+
+    Shadow price 0.15 EUR/kWh (× sqrt(0.92) ≈ 0.144) exceeds the 0.07 EUR/kWh
+    feed-in price, so storing the surplus beats exporting it — same behaviour
+    as plain hybrid.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.15),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_captures_surplus_regardless_of_shadow_price(hass, monkeypatch):
+    """Plain hybrid is unchanged: surplus is captured even at a low shadow price."""
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[-2000.0],
+        control_mode=MODE_HYBRID,
+    )
+    assert modes == ["zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_self_consumption_not_gated(hass, monkeypatch):
+    """The hybrid+ gate only affects surplus capture, not self-consumption.
+
+    With the grid importing (no PV surplus) and no upcoming discharge, hybrid+
+    must still resolve idle to zero_grid for self-consumption, even though the
+    low shadow price blocks surplus capture.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _idle_plan_result(shadow_price=0.02),
+        grid_sequence=[500.0],
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert modes == ["zero_grid"]
+
+
+def test_hybrid_plus_capture_decision_hysteresis(hass):
+    """The capture decision applies a ±5% band around the feed-in threshold.
+
+    Test coordinator: RTE 0.92 → sqrt(RTE) ≈ 0.9592; feed-in 0.07 EUR/kWh.
+    Capture threshold while capturing: 0.07 × 0.95 = 0.0665; while exporting:
+    0.07 × 1.05 = 0.0735 (both on the stored value λ × sqrt(RTE)).
+    """
+    coord = _make_coordinator(hass)
+    # Initial state is capturing: keeps capturing down to the ×0.95 band edge
+    assert coord._hybrid_plus_should_capture_surplus(0.10, 0.07) is True
+    # Stored value 0.0652 < 0.0665 → flips to exporting
+    assert coord._hybrid_plus_should_capture_surplus(0.068, 0.07) is False
+    # Stored value 0.0691 is above the raw threshold but below ×1.05 → stays
+    # exporting (this is the hysteresis: without it the decision would flip)
+    assert coord._hybrid_plus_should_capture_surplus(0.072, 0.07) is False
+    # Stored value 0.0748 ≥ 0.0735 → flips back to capturing
+    assert coord._hybrid_plus_should_capture_surplus(0.078, 0.07) is True
+
+
+def test_hybrid_plus_negative_feed_in_always_captures(hass):
+    """With zero/negative feed-in, exporting earns nothing: always capture."""
+    coord = _make_coordinator(hass)
+    assert coord._hybrid_plus_should_capture_surplus(0.0, -0.05) is True
+    assert coord._hybrid_plus_should_capture_surplus(0.0, 0.0) is True
+
+
+def test_resolve_controller_mode_hybrid_plus_blocks_surplus_upgrade(hass):
+    """The realtime idle→zero_grid upgrade respects the hybrid+ capture block."""
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID_PLUS
+    coord._power_consumption_sensors = ["sensor.power"]
+
+    coord._hybrid_plus_capture_blocked = True
+    assert coord._resolve_controller_mode("idle", -500.0) == "idle"
+
+    coord._hybrid_plus_capture_blocked = False
+    assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
+
+    # Plain hybrid ignores the flag entirely
+    coord._control_mode = MODE_HYBRID
+    coord._hybrid_plus_capture_blocked = True
+    assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"

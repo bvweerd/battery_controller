@@ -5,15 +5,6 @@
         "title": "Battery Controller",
         "description": "Configureer je thuisbatterij voor kostenoptimalisatie.",
         "sections": {
-          "battery": {
-            "name": "Batterij Specificaties",
-            "data": {
-              "capacity_kwh": "Capaciteit (kWh)",
-              "max_charge_power_kw": "Max laadvermogen (kW)",
-              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)"
-            }
-          },
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
@@ -84,15 +75,6 @@
         "title": "Battery Controller",
         "description": "Herconfigureer je battery controller instellingen.",
         "sections": {
-          "battery": {
-            "name": "Batterij Specificaties",
-            "data": {
-              "capacity_kwh": "Capaciteit (kWh)",
-              "max_charge_power_kw": "Max laadvermogen (kW)",
-              "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-              "round_trip_efficiency": "Round-trip efficiency (0-1)"
-            }
-          },
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
@@ -169,12 +151,17 @@
             "capacity_kwh": "Capaciteit (kWh)",
             "max_charge_power_kw": "Max laadvermogen (kW)",
             "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "charge_efficiency_curve": "Laadrendementscurve",
+            "discharge_efficiency_curve": "Ontlaadrendementscurve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
+          },
+          "data_description": {
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
           }
         },
         "reconfigure": {
@@ -185,12 +172,17 @@
             "capacity_kwh": "Capaciteit (kWh)",
             "max_charge_power_kw": "Max laadvermogen (kW)",
             "max_discharge_power_kw": "Max ontlaadvermogen (kW)",
-            "round_trip_efficiency": "Round-trip rendement (0–1)",
+            "charge_efficiency_curve": "Laadrendementscurve",
+            "discharge_efficiency_curve": "Ontlaadrendementscurve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
+          },
+          "data_description": {
+            "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
           }
         }
       },
@@ -216,7 +208,11 @@
             "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
             "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
             "efficiency_factor": "Systeemrendement (0-1, rekening met schaduw, bedrading, vervuiling)",
-            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)",
+            "pv_forecast_sensors": "PV-voorspellingssensoren (optioneel, bijv. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Voorspellingssensoren van een PV-forecast-integratie zoals Solcast (selecteer zowel de 'Forecast Today' als 'Forecast Tomorrow' sensoren). Indien ingesteld vervangt deze data het interne stralingsmodel voor de periodes die ze dekken; het interne model blijft de terugval."
           }
         },
         "reconfigure": {
@@ -228,7 +224,11 @@
             "orientation": "Oriëntatie (graden, 0=noord, 90=oost, 180=zuid, 270=west)",
             "tilt": "Hellingshoek (graden, 0=vlak, 90=verticaal)",
             "efficiency_factor": "Systeemrendement (0-1)",
-            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
+            "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)",
+            "pv_forecast_sensors": "PV-voorspellingssensoren (optioneel, bijv. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Voorspellingssensoren van een PV-forecast-integratie zoals Solcast (selecteer zowel de 'Forecast Today' als 'Forecast Tomorrow' sensoren). Indien ingesteld vervangt deze data het interne stralingsmodel voor de periodes die ze dekken; het interne model blijft de terugval."
           }
         }
       },
@@ -312,6 +312,7 @@
           "zero_grid": "Nul op de meter",
           "follow_schedule": "Volg schema",
           "hybrid": "Hybride",
+          "hybrid_plus": "Hybride+",
           "manual": "Handmatig"
         }
       }
@@ -328,6 +329,20 @@
       "use_max_power": {
         "name": "Gebruik Maximale Energie Voorgesteld"
       }
+    }
+  },
+  "issues": {
+    "price_sensor_unavailable": {
+      "title": "Elektriciteitsprijssensor niet beschikbaar",
+      "description": "De prijssensor **{sensor}** is niet beschikbaar en er bestaat nog geen historisch prijsmodel. De batterij-optimalisatie kan niet draaien zonder prijsdata. Controleer of de sensor werkt en forecast-attributen heeft."
+    },
+    "weather_data_unavailable": {
+      "title": "Weerdata niet beschikbaar (open-meteo)",
+      "description": "De batterijcontroller kan de open-meteo weer-API niet bereiken. PV-productie wordt op nul verondersteld totdat de verbinding is hersteld. Controleer je internetverbinding of de status van open-meteo."
+    },
+    "weather_data_stale": {
+      "title": "Weerdata is verouderd (open-meteo)",
+      "description": "De weerdata is {age_hours} uur oud en wordt niet meer ververst. De kwaliteit van de PV-voorspelling neemt af naarmate de data veroudert. Controleer je internetverbinding of de status van open-meteo; herlaad de integratie als het probleem aanhoudt."
     }
   }
 }

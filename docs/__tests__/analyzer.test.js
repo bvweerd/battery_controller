@@ -2,7 +2,12 @@
 
 const {
   SOC_RES_WH,
+  DC_TO_AC_EFF,
+  interpolateEfficiency,
+  flatCurve,
   calculateStepCost,
+  totalPvSeries,
+  netPvSeries,
   findNearestSocIdx,
   runDP,
   forwardPass,
@@ -10,14 +15,18 @@ const {
   computeTotalCost,
   runOptimizer,
   generateTips,
-} = require('../analyzer');
+} = require('../analyzer/analyzer');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 /** Minimal battery config for runDP / runOptimizer. */
 function makeCfg(overrides = {}) {
+  const rte = overrides.rte ?? 0.9;
+  const sqrtRte = Math.sqrt(rte);
   return {
-    rte: 0.9,
+    rte,
+    chargeCurve:    flatCurve(sqrtRte, 10),
+    dischargeCurve: flatCurve(sqrtRte, 10),
     minSocKwh: 1.0,
     maxSocKwh: 10.0,
     maxChargeKw: 5.0,
@@ -48,21 +57,26 @@ function runSimple(prices, feedIn, pv, consump, socKwh = 5, cfg = makeCfg(), deg
 // ─── calculateStepCost ──────────────────────────────────────────────────────
 
 describe('calculateStepCost', () => {
+  const sqrtRte09 = Math.sqrt(0.9);
+  const CHG = flatCurve(sqrtRte09, 10);
+  const DIS = flatCurve(sqrtRte09, 10);
+
   const baseArgs = (actionW) => [
-    0.25,          // stepH
-    5000,          // socWh
-    actionW,       // actionW
-    0.15,          // gridPrice
-    0.07,          // feedInPrice
-    0,             // pvW
-    1000,          // consumW  (1 kW load)
-    0.9,           // rte
-    0.004,         // degradCostPerKwh
-    false,         // pvDcCoupled
-    0,             // pvDcW
-    0.97,          // pvDcEfficiency
-    0,             // maxGridPowerKw
-    10000,         // maxSocWh
+    0.25,   // stepH
+    5000,   // socWh
+    actionW,// actionW
+    0.15,   // gridPrice
+    0.07,   // feedInPrice
+    0,      // pvW
+    1000,   // consumW  (1 kW load)
+    CHG,    // chargeCurve
+    DIS,    // dischargeCurve
+    0.004,  // degradCostPerKwh
+    false,  // pvDcCoupled
+    0,      // pvDcW
+    0.97,   // pvDcEfficiency
+    0,      // maxGridPowerKw
+    10000,  // maxSocWh
   ];
 
   test('idle: cost = consumption × price × stepH', () => {
@@ -88,16 +102,16 @@ describe('calculateStepCost', () => {
   test('charging adds degradation cost', () => {
     // With degradation > 0, charging costs more than without
     const args = baseArgs(2000);
-    const withDeg    = calculateStepCost(...args);
-    const noDeg      = calculateStepCost(args[0], args[1], args[2], args[3], args[4],
-      args[5], args[6], args[7], 0, ...args.slice(9));
+    const withDeg = calculateStepCost(...args);
+    // Replace degradCostPerKwh (index 9) with 0
+    const noDeg   = calculateStepCost(...args.slice(0, 9), 0, ...args.slice(10));
     expect(withDeg).toBeGreaterThan(noDeg);
   });
 
   test('PV surplus (feed-in > consumption) produces negative cost', () => {
     // 5 kW PV, 1 kW load → 4 kW net export at feed-in price €0.07
     const cost = calculateStepCost(
-      0.25, 5000, 0, 0.15, 0.07, 5000, 1000, 0.9, 0.004,
+      0.25, 5000, 0, 0.15, 0.07, 5000, 1000, CHG, DIS, 0.004,
       false, 0, 0.97, 0, 10000
     );
     expect(cost).toBeLessThan(0);
@@ -105,15 +119,15 @@ describe('calculateStepCost', () => {
 
   test('maxGridPowerKw caps grid export income', () => {
     // Huge PV surplus, cap at 3 kW → less revenue than uncapped
-    const uncapped = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, 0.9, 0, false, 0, 0.97, 0, 10000);
-    const capped   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, 0.9, 0, false, 0, 0.97, 3, 10000);
+    const uncapped = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, CHG, DIS, 0, false, 0, 0.97, 0, 10000);
+    const capped   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 10000, 1000, CHG, DIS, 0, false, 0, 0.97, 3, 10000);
     expect(capped).toBeGreaterThan(uncapped);
   });
 
   test('DC-coupled idle passive charging: throughputKwh > 0 adds degradation', () => {
     // DC PV 2 kW, idle → passive charging → degradation cost added
-    const noDc = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, 0.9, 0.004, false, 2000, 0.97, 0, 10000);
-    const dcIdle = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, 0.9, 0.004, true, 2000, 0.97, 0, 10000);
+    const noDc   = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, CHG, DIS, 0.004, false, 2000, 0.97, 0, 10000);
+    const dcIdle = calculateStepCost(0.25, 5000, 0, 0.15, 0.07, 0, 1000, CHG, DIS, 0.004, true,  2000, 0.97, 0, 10000);
     // DC passive charging reduces grid draw (pvExcess → AC) and adds degradation
     // Net should differ from non-DC case
     expect(dcIdle).not.toBeCloseTo(noDc, 4);
@@ -306,6 +320,43 @@ describe('computeShadowPrice', () => {
   });
 });
 
+// ─── totalPvSeries / netPvSeries ────────────────────────────────────────────
+
+describe('totalPvSeries / netPvSeries', () => {
+  test('AC-only system is unchanged', () => {
+    expect(totalPvSeries([1, 2, 3], [])).toEqual([1, 2, 3]);
+  });
+
+  test('DC PV is counted through the inverter', () => {
+    const out = totalPvSeries([0, 0], [2, 4]);
+    expect(out[0]).toBeCloseTo(2 * DC_TO_AC_EFF);
+    expect(out[1]).toBeCloseTo(4 * DC_TO_AC_EFF);
+  });
+
+  test('AC and DC are summed', () => {
+    const out = totalPvSeries([1, 1], [2, 0]);
+    expect(out[0]).toBeCloseTo(1 + 2 * DC_TO_AC_EFF);
+    expect(out[1]).toBeCloseTo(1);
+  });
+
+  test('handles missing/undefined series and unequal lengths', () => {
+    expect(totalPvSeries(undefined, undefined)).toEqual([]);
+    expect(totalPvSeries([1], [1, 1]).length).toBe(2);
+  });
+
+  test('net line reflects DC PV instead of showing no solar', () => {
+    // DC-coupled system: AC series all zeros, DC carries production
+    const net = netPvSeries([0, 0], [4, 4], [1, 1]);
+    expect(net[0]).toBeCloseTo(4 * DC_TO_AC_EFF - 1);
+    expect(net[0]).toBeGreaterThan(0); // surplus, not a deficit
+  });
+
+  test('net line is a deficit when consumption exceeds PV', () => {
+    const net = netPvSeries([0], [1], [3]);
+    expect(net[0]).toBeLessThan(0);
+  });
+});
+
 // ─── generateTips ───────────────────────────────────────────────────────────
 
 describe('generateTips', () => {
@@ -426,6 +477,20 @@ describe('generateTips', () => {
     expect(tips.some(t => t.t === 'warn' && t.title.toLowerCase().includes('soc/power limited'))).toBe(true);
   });
 
+  test('does not warn for zero_grid runs where effective_power_kw is 0 by design', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { effective_power_kw: 0.0, setpoint_kw: 1.8, commitment_locked: false,
+        effective_mode: 'zero_grid', timestamp: '2026-03-23T10:00:00', soc_kwh: 5.0 },
+      { effective_power_kw: 0.0, setpoint_kw: 2.1, commitment_locked: false,
+        effective_mode: 'zero_grid', timestamp: '2026-03-23T10:15:00', soc_kwh: 5.5 },
+      { effective_power_kw: 0.5, setpoint_kw: 0.5, commitment_locked: false,
+        effective_mode: 'charging', timestamp: '2026-03-23T10:30:00', soc_kwh: 6.0 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.t === 'warn' && t.title.toLowerCase().includes('soc/power limited'))).toBe(false);
+  });
+
   test('info tip when commitment filter is active', () => {
     const d = makeDiag();
     d.optimization.optimizer_run_log = [
@@ -457,6 +522,164 @@ describe('generateTips', () => {
     d.optimization.setpoint_log = [];
     const tips = generateTips(d);
     expect(tips.some(t => t.title.toLowerCase().includes('soc limit blocked'))).toBe(false);
+  });
+
+  test('err tip when consumption pattern is empty', () => {
+    const d = makeDiag();
+    d.forecast.consumption_hourly_pattern = {};
+    d.forecast.current_consumption_kw = 0.5;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('no consumption pattern learned'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('err');
+    // Should tell the user that waiting does not help
+    expect(tip.text.toLowerCase()).toContain('not');
+    expect(tip.text).toContain('0.5 kW');
+  });
+
+  test('warn tip when consumption pattern is only partly learned', () => {
+    const d = makeDiag();
+    d.forecast.consumption_hourly_pattern = { '08_0': 0.4, '09_0': 0.5, '10_0': 0.6 };
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('partly learned'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+    expect(tip.title).toContain('3 of 168');
+  });
+
+  test('no consumption pattern tip when the pattern is well populated', () => {
+    const d = makeDiag();
+    const pattern = {};
+    for (let h = 0; h < 24; h++) {
+      for (let dow = 0; dow < 7; dow++) {
+        pattern[`${String(h).padStart(2, '0')}_${dow}`] = 1.2;
+      }
+    }
+    d.forecast.consumption_hourly_pattern = pattern;
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('consumption pattern'))).toBe(false);
+  });
+
+  test('no consumption pattern tip for diagnostics without the key', () => {
+    // Older diagnostics files have no consumption_hourly_pattern at all
+    const d = makeDiag();
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('consumption pattern'))).toBe(false);
+  });
+
+  test('info tip reports an all-DC PV forecast', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [0, 0, 0, 0];
+    d.forecast.pv_dc_forecast_kw = [2, 2, 2, 2];
+    d.forecast.forecast_interval_minutes = 15;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.includes('all DC-coupled'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('info');
+    // 4 steps x 2 kW x 0.25 h = 2.0 kWh
+    expect(tip.title).toContain('2.0 kWh');
+  });
+
+  test('warn tip when the PV forecast is zero everywhere', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [0, 0];
+    d.forecast.pv_dc_forecast_kw = [0, 0];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('pv forecast is zero'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+  });
+
+  test('info tip reports the AC/DC split when both produce', () => {
+    const d = makeDiag();
+    d.forecast.pv_forecast_kw = [1, 1];
+    d.forecast.pv_dc_forecast_kw = [1, 1];
+    d.forecast.forecast_interval_minutes = 60;
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.includes('over the horizon'));
+    expect(tip).toBeDefined();
+    expect(tip.text).toContain('DC-coupled');
+  });
+
+  test('no PV forecast tip when the arrays are absent', () => {
+    const d = makeDiag();
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('pv forecast'))).toBe(false);
+  });
+
+  test('no soc_limited tip when the controller ran zero_grid', () => {
+    const d = makeDiag();
+    // idle upgraded to zero_grid on PV surplus: effective_power is 0 by
+    // design while the real-time controller publishes a real setpoint
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T10:37:00', effective_mode: 'idle',
+        controller_mode: 'zero_grid', effective_power_kw: 0, setpoint_kw: -2.18,
+        soc_kwh: 20.68, grid_kw: -3.8 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(false);
+  });
+
+  test('legacy run log without controller_mode is not flagged either', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T10:37:00', effective_mode: 'idle',
+        effective_power_kw: 0, setpoint_kw: -2.18, soc_kwh: 20.68, grid_kw: -3.8 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(false);
+  });
+
+  test('a genuine limit is still reported', () => {
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T18:00:00', effective_mode: 'discharging',
+        controller_mode: 'follow_schedule', effective_power_kw: 2.4,
+        setpoint_kw: 0.4, soc_kwh: 1.05, grid_kw: 1.2 },
+    ];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('limited'));
+    expect(tip).toBeDefined();
+    expect(tip.t).toBe('warn');
+  });
+
+  test('idle without a grid surplus is still compared', () => {
+    // No surplus means no zero_grid upgrade, so a mismatch is real
+    const d = makeDiag();
+    d.optimization.optimizer_run_log = [
+      { timestamp: '2026-07-28T18:00:00', effective_mode: 'idle',
+        effective_power_kw: 0, setpoint_kw: -2.0, soc_kwh: 20.0, grid_kw: 1.5 },
+    ];
+    const tips = generateTips(d);
+    expect(tips.some(t => t.title.toLowerCase().includes('limited'))).toBe(true);
+  });
+
+  test('SoC boundary tips name the planned horizon, not history', () => {
+    const d = makeDiag();
+    // Battery pinned at max for the whole planned schedule
+    d.battery_config.max_soc_kwh = 9.0;
+    d.battery_config.min_soc_kwh = 1.0;
+    d.optimization.schedule.soc_schedule_kwh = [9, 9, 9, 9, 9];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('max soc'));
+    expect(tip).toBeDefined();
+    // Must not read as a claim about measured history
+    expect(tip.title.toLowerCase()).toContain('planned');
+    expect(tip.title.toLowerCase()).toContain('horizon');
+    expect(tip.title.toLowerCase()).not.toContain('of the time');
+    expect(tip.text.toLowerCase()).toContain('not what the battery did in the past');
+  });
+
+  test('minimum SoC tip is worded the same way', () => {
+    const d = makeDiag();
+    d.battery_config.max_soc_kwh = 9.0;
+    d.battery_config.min_soc_kwh = 1.0;
+    d.optimization.schedule.soc_schedule_kwh = [1, 1, 1, 1, 1];
+    const tips = generateTips(d);
+    const tip = tips.find(t => t.title.toLowerCase().includes('minimum soc'));
+    expect(tip).toBeDefined();
+    expect(tip.title.toLowerCase()).toContain('planned');
+    expect(tip.text.toLowerCase()).toContain('not what the battery did in the past');
   });
 
   test('ok tip included in clean configuration', () => {

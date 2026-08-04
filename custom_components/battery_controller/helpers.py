@@ -55,6 +55,116 @@ def _detect_interval_from_entries(entries: Any) -> int:
     return 60
 
 
+def _first_entry_has_timestamp(entries: Any) -> bool:
+    """Return True when the first entry is a dict carrying a start timestamp."""
+    if not isinstance(entries, (list, tuple)) or not entries:
+        return False
+    first = entries[0]
+    return isinstance(first, dict) and bool(
+        first.get("start") or first.get("from") or first.get("time")
+    )
+
+
+def _skip_index_since_local_midnight(now_local: datetime, interval_minutes: int) -> int:
+    """Return the number of fully elapsed price periods since local midnight.
+
+    Uses true elapsed time (now - midnight) rather than wall-clock
+    hour*60+minute: daily price arrays (raw_today/today) contain one entry per
+    period since midnight, so on DST transition days (23- or 25-hour days)
+    wall-clock arithmetic points at the wrong entry.
+    """
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Subtract via POSIX timestamps: naive subtraction of two datetimes that
+    # share the same tzinfo ignores UTC-offset changes, which is exactly the
+    # DST case this helper needs to handle.
+    elapsed_min = (now_local.timestamp() - midnight.timestamp()) / 60
+    return int(elapsed_min // interval_minutes)
+
+
+def price_unit_scale_from_state(state: State | None) -> float:
+    """Return the factor converting the sensor's prices to EUR/kWh.
+
+    Based on the sensor's unit_of_measurement: per-MWh units (e.g. the OMIE
+    integration's €/MWh) yield 0.001; per-kWh or unknown units yield 1.0.
+    """
+    if state is None:
+        return 1.0
+    unit = str(state.attributes.get("unit_of_measurement") or "").lower()
+    if "mwh" in unit:
+        return 0.001
+    return 1.0
+
+
+def _extract_hours_dict_forecast(
+    state: State, now: datetime
+) -> tuple[list[float], list[datetime], int] | None:
+    """Extract prices from OMIE-style hour-keyed dict attributes.
+
+    The OMIE integration (hass_omie) exposes ``today_hours`` and
+    ``tomorrow_hours``: dicts mapping period-start datetimes (or ISO strings)
+    to prices in €/MWh. ``tomorrow_hours`` is None before publication and
+    values are None while provisional — both are skipped.
+
+    Prices are converted to EUR/kWh using the sensor's unit_of_measurement;
+    when no unit is available, values with magnitude > 5 are assumed €/MWh
+    (kWh prices never reach that, MWh prices practically always do).
+
+    Returns:
+        (prices_eur_kwh, start_times_utc, interval_minutes), or None when the
+        sensor has no hour-dict attributes with usable data.
+    """
+    entries: dict[datetime, float] = {}
+    found_attr = False
+    for attr_key in ("today_hours", "tomorrow_hours"):
+        hours = state.attributes.get(attr_key)
+        if not isinstance(hours, dict):
+            continue
+        found_attr = True
+        for raw_ts, raw_price in hours.items():
+            price = _normalize_price_value(raw_price)
+            if price is None:
+                continue
+            if isinstance(raw_ts, datetime):
+                ts = raw_ts
+            elif isinstance(raw_ts, str):
+                parsed = dt_util.parse_datetime(raw_ts)
+                if parsed is None:
+                    continue
+                ts = parsed
+            else:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt_util.UTC)
+            entries[dt_util.as_utc(ts)] = price
+
+    if not found_attr or not entries:
+        return None
+
+    sorted_ts = sorted(entries)
+    interval = 60
+    if len(sorted_ts) >= 2:
+        minutes = int((sorted_ts[1] - sorted_ts[0]).total_seconds() / 60)
+        if minutes in (15, 30, 60):
+            interval = minutes
+
+    scale = price_unit_scale_from_state(state)
+    if scale == 1.0 and not state.attributes.get("unit_of_measurement"):
+        if any(abs(v) > 5.0 for v in entries.values()):
+            scale = 0.001
+
+    prices: list[float] = []
+    start_times: list[datetime] = []
+    for ts in sorted_ts:
+        if ts + timedelta(minutes=interval) <= now:
+            continue
+        prices.append(entries[ts] * scale)
+        start_times.append(ts)
+
+    if not prices:
+        return None
+    return prices, start_times, interval
+
+
 def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int]:
     """Extract price forecast and detected interval from a Home Assistant price state.
 
@@ -140,9 +250,22 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         if interval_forecast:
             return interval_forecast, detected_interval
 
-    # Priority 3: forecast_prices (no per-entry skip-past; interval from timestamps)
+    # Priority 2.5: OMIE-style hour-keyed dicts (today_hours/tomorrow_hours)
+    hours_result = _extract_hours_dict_forecast(state, now)
+    if hours_result is not None:
+        hours_prices, _, hours_interval = hours_result
+        return hours_prices, hours_interval
+
+    # Priority 3: forecast_prices (skip elapsed periods when entries carry
+    # timestamps; plain value lists are taken as-is)
     forecast_attr = state.attributes.get("forecast_prices")
     if isinstance(forecast_attr, (list, tuple)):
+        if _first_entry_has_timestamp(forecast_attr):
+            interval_forecast = []
+            detected_interval = 60
+            _extend_interval_forecast(forecast_attr, skip_past=True)
+            if interval_forecast:
+                return interval_forecast, detected_interval
         interval = _detect_interval_from_entries(forecast_attr)
         forecast: list[float] = []
         for entry in forecast_attr:
@@ -152,9 +275,15 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
         if forecast:
             return forecast, interval
 
-    # Priority 4: generic forecast (no per-entry skip-past)
+    # Priority 4: generic forecast (same timestamp-aware skip)
     generic_forecast = state.attributes.get("forecast")
     if isinstance(generic_forecast, (list, tuple)):
+        if _first_entry_has_timestamp(generic_forecast):
+            interval_forecast = []
+            detected_interval = 60
+            _extend_interval_forecast(generic_forecast, skip_past=True)
+            if interval_forecast:
+                return interval_forecast, detected_interval
         interval = _detect_interval_from_entries(generic_forecast)
         forecast = []
         for entry in generic_forecast:
@@ -168,7 +297,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
     if _raw_ref and not _raw_first_has_ts:
         now_local = dt_util.now()
         raw_interval = _detect_interval_from_entries(_raw_ref)
-        skip_index = (now_local.hour * 60 + now_local.minute) // raw_interval
+        skip_index = _skip_index_since_local_midnight(now_local, raw_interval)
         forecast = []
         for entry in raw_today_list[skip_index:]:
             price = _normalize_price_value(entry)
@@ -188,7 +317,7 @@ def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int
     interval = _detect_interval_from_entries(today_attr)
     if interval == 60:
         interval = _detect_interval_from_entries(tomorrow_attr)
-    skip_index = (now_local.hour * 60 + now_local.minute) // interval
+    skip_index = _skip_index_since_local_midnight(now_local, interval)
     combined: list[Any] = []
     if isinstance(today_attr, list):
         combined.extend(today_attr[skip_index:])
@@ -243,7 +372,8 @@ def _fill_missing_timestamps(
     if anchor_idx is None:
         return synthesize_timestamps(now, interval_minutes, len(timestamps))
     anchor = timestamps[anchor_idx]
-    assert anchor is not None
+    if anchor is None:  # unreachable; explicit so it also holds under python -O
+        return synthesize_timestamps(now, interval_minutes, len(timestamps))
     return [
         ts
         if ts is not None
@@ -340,9 +470,25 @@ def extract_price_forecast_with_timestamps(
             )
             return interval_forecast, filled, detected_interval
 
-    # Priority 3: forecast_prices — detect interval from entries if timestamps present
+    # Priority 2.5: OMIE-style hour-keyed dicts (today_hours/tomorrow_hours)
+    hours_result = _extract_hours_dict_forecast(state, now)
+    if hours_result is not None:
+        return hours_result
+
+    # Priority 3: forecast_prices — skip elapsed periods and keep real
+    # timestamps when entries carry them; plain value lists are taken as-is
     forecast_attr = state.attributes.get("forecast_prices")
     if isinstance(forecast_attr, (list, tuple)):
+        if _first_entry_has_timestamp(forecast_attr):
+            interval_forecast = []
+            interval_timestamps = []
+            detected_interval = 60
+            _extend_with_timestamps(forecast_attr, skip_past=True)
+            if interval_forecast:
+                filled = _fill_missing_timestamps(
+                    interval_timestamps, detected_interval, now
+                )
+                return interval_forecast, filled, detected_interval
         interval = _detect_interval_from_entries(forecast_attr)
         forecast: list[float] = []
         for entry in forecast_attr:
@@ -356,9 +502,19 @@ def extract_price_forecast_with_timestamps(
                 interval,
             )
 
-    # Priority 4: Generic forecast — detect interval if entries carry timestamps
+    # Priority 4: Generic forecast — same timestamp-aware skip
     generic_forecast = state.attributes.get("forecast")
     if isinstance(generic_forecast, (list, tuple)):
+        if _first_entry_has_timestamp(generic_forecast):
+            interval_forecast = []
+            interval_timestamps = []
+            detected_interval = 60
+            _extend_with_timestamps(generic_forecast, skip_past=True)
+            if interval_forecast:
+                filled = _fill_missing_timestamps(
+                    interval_timestamps, detected_interval, now
+                )
+                return interval_forecast, filled, detected_interval
         interval = _detect_interval_from_entries(generic_forecast)
         forecast = []
         for entry in generic_forecast:
@@ -376,7 +532,7 @@ def extract_price_forecast_with_timestamps(
     if _raw_ref and not _raw_first_has_ts:
         now_local = dt_util.now()
         raw_interval = _detect_interval_from_entries(_raw_ref)
-        skip_index = (now_local.hour * 60 + now_local.minute) // raw_interval
+        skip_index = _skip_index_since_local_midnight(now_local, raw_interval)
         forecast = []
         for entry in raw_today_list[skip_index:]:
             price = _normalize_price_value(entry)
@@ -400,7 +556,7 @@ def extract_price_forecast_with_timestamps(
     interval = _detect_interval_from_entries(today_attr)
     if interval == 60:
         interval = _detect_interval_from_entries(tomorrow_attr)
-    skip_index = (now_local.hour * 60 + now_local.minute) // interval
+    skip_index = _skip_index_since_local_midnight(now_local, interval)
     combined: list[Any] = []
     if isinstance(today_attr, list):
         combined.extend(today_attr[skip_index:])
@@ -541,6 +697,97 @@ def get_sensor_value(
         return default
 
     return safe_float(state.state, default)
+
+
+def extract_pv_forecast_series(states: list[State]) -> list[tuple[datetime, float]]:
+    """Extract a PV power forecast series (kW) from PV forecast sensor states.
+
+    Supports the attribute formats of common PV forecast integrations:
+
+    - **Solcast** (HACS ``solcast_solar``): ``detailedForecast`` /
+      ``detailedHourly`` attributes — lists of
+      ``{"period_start": <datetime|ISO string>, "pv_estimate": <kW>}``
+      entries at 30-minute or hourly resolution. Pass both the *Forecast
+      Today* and *Forecast Tomorrow* sensors to cover the full horizon.
+    - **Volcast** (HACS ``volcast``): ``detailedHourly`` /
+      ``detailedForecast`` attributes with ``period_start`` +
+      ``power_kw`` (hourly) or ``power_w`` (5-minute) entries.
+    - **Generic**: a ``forecast`` attribute with the same entry layout;
+      timestamp keys ``period_start``/``datetime``/``start``/``time`` and
+      value keys ``pv_estimate``/``pv_power``/``power``/``power_kw`` (kW)
+      or ``watts``/``power_w`` (W) are accepted.
+    - **Forecast.Solar**: a ``watts`` attribute mapping timestamp → W.
+
+    The native resolution of the source data is preserved: each entry
+    becomes one point in the series. Entries sharing the same timestamp
+    (e.g. the same hour from both ``detailedForecast`` and
+    ``detailedHourly``) are averaged.
+
+    Returns:
+        List of (period start UTC, mean PV power in kW), sorted by time.
+    """
+    buckets: dict[datetime, list[float]] = {}
+
+    def _parse_ts(raw: Any) -> datetime | None:
+        if isinstance(raw, datetime):
+            ts = raw
+        elif isinstance(raw, str):
+            parsed = dt_util.parse_datetime(raw)
+            if parsed is None:
+                return None
+            ts = parsed
+        else:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=dt_util.UTC)
+        return dt_util.as_utc(ts).replace(second=0, microsecond=0)
+
+    def _entry_power_kw(entry: dict[str, Any]) -> float | None:
+        # kW keys (Solcast pv_estimate, Volcast power_kw, generic)
+        for key in ("pv_estimate", "pv_power", "power", "power_kw"):
+            if key in entry:
+                value = _normalize_price_value(entry[key])
+                return value if value is None else max(0.0, value)
+        # W keys (Forecast.Solar watts, Volcast power_w)
+        for key in ("watts", "power_w"):
+            if key in entry:
+                value = _normalize_price_value(entry[key])
+                return value if value is None else max(0.0, value / 1000.0)
+        return None
+
+    def _add_entries(entries: Any) -> None:
+        if not isinstance(entries, (list, tuple)):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_ts = (
+                entry.get("period_start")
+                or entry.get("datetime")
+                or entry.get("start")
+                or entry.get("time")
+            )
+            ts = _parse_ts(raw_ts)
+            power_kw = _entry_power_kw(entry)
+            if ts is not None and power_kw is not None:
+                buckets.setdefault(ts, []).append(power_kw)
+
+    for state in states:
+        if state is None or state.state in ("unknown", "unavailable"):
+            continue
+        attrs = state.attributes
+        for attr_key in ("detailedForecast", "detailedHourly", "forecast"):
+            _add_entries(attrs.get(attr_key))
+        # Forecast.Solar style: {"watts": {"<timestamp>": <W>, ...}}
+        watts = attrs.get("watts")
+        if isinstance(watts, dict):
+            for raw_ts, raw_w in watts.items():
+                ts = _parse_ts(raw_ts)
+                value = _normalize_price_value(raw_w)
+                if ts is not None and value is not None:
+                    buckets.setdefault(ts, []).append(max(0.0, value / 1000.0))
+
+    return sorted((ts, sum(vals) / len(vals)) for ts, vals in buckets.items())
 
 
 def _solar_position(

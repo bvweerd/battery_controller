@@ -1,11 +1,12 @@
 """Tests for forecast_models.py."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from custom_components.battery_controller.const import MAX_PLAUSIBLE_CONSUMPTION_KW
 from custom_components.battery_controller.forecast_models import (
     PVForecastModel,
     ConsumptionForecastModel,
@@ -1228,3 +1229,186 @@ class TestNetLoadForecastConsumptionPadded:
         # Padded with base_consumption_kw
         assert consumption_fc[2] == pytest.approx(0.5)
         assert consumption_fc[3] == pytest.approx(0.5)
+
+
+class TestPriceForecastModelUnitScaling:
+    """Recorder prices in €/MWh (e.g. OMIE) are scaled to EUR/kWh."""
+
+    _TS = "2024-01-01T10:00:00+00:00"
+
+    async def test_mwh_unit_scales_learned_prices(self):
+        hass = MagicMock()
+        live_state = MagicMock()
+        live_state.attributes = {"unit_of_measurement": "€/MWh"}
+        hass.states.get = MagicMock(return_value=live_state)
+
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.omie_spot_price_pt", entry_id=None
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            return_value={
+                "sensor.omie_spot_price_pt": [{"start": self._TS, "mean": 85.0}]
+            }
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model.has_data() is True
+        assert model._overall_avg == pytest.approx(0.085)
+
+    async def test_kwh_unit_not_scaled(self):
+        hass = MagicMock()
+        live_state = MagicMock()
+        live_state.attributes = {"unit_of_measurement": "EUR/kWh"}
+        hass.states.get = MagicMock(return_value=live_state)
+
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.price", entry_id=None
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            return_value={"sensor.price": [{"start": self._TS, "mean": 0.25}]}
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model._overall_avg == pytest.approx(0.25)
+
+
+class TestAsyncUpdatePatternStartFormats:
+    """The recorder's "start" field must be handled in every form it takes.
+
+    Current Home Assistant returns statistics rows with "start" as a Unix
+    timestamp (float); older versions used a datetime or an ISO string.
+    A float used to be stringified to "1704106800.0" and parsed back with
+    parse_datetime(), which returns None — silently dropping every bucket
+    and leaving the learned pattern empty while statistics were present.
+    """
+
+    # 2024-01-01 10:00 UTC (a Monday)
+    _DT = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _expected_key():
+        from homeassistant.util import dt as dt_util
+
+        local = dt_util.as_local(TestAsyncUpdatePatternStartFormats._DT)
+        return (local.hour, local.weekday())
+
+    async def _run(self, start_value):
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass, consumption_sensors=["sensor.consumption"]
+        )
+        stats = {"sensor.consumption": [{"start": start_value, "change": 2.5}]}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+        return model
+
+    async def test_float_unix_timestamp_start(self):
+        """Regression: float timestamps must not be dropped."""
+        model = await self._run(self._DT.timestamp())
+        assert model._hourly_pattern, "pattern must not be empty for float timestamps"
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_int_unix_timestamp_start(self):
+        model = await self._run(int(self._DT.timestamp()))
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_datetime_start(self):
+        model = await self._run(self._DT)
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_iso_string_start(self):
+        model = await self._run(self._DT.isoformat())
+        assert model._hourly_pattern[self._expected_key()] == pytest.approx(2.5)
+
+    async def test_unparseable_start_is_skipped(self):
+        """Garbage timestamps are dropped without raising."""
+        model = await self._run("not-a-timestamp")
+        assert model._hourly_pattern == {}
+
+
+class TestConsumptionOutlierRejection:
+    """Meter artefacts must not poison the learned pattern.
+
+    A total_increasing sensor that jumps (device replaced, unit change,
+    spurious reading) yields an enormous hourly "change". With ~2 samples
+    per (hour, weekday) bucket over 14 days, one such sample dominates the
+    average and propagates into the DP cost function.
+    """
+
+    _DT = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _key():
+        from homeassistant.util import dt as dt_util
+
+        local = dt_util.as_local(TestConsumptionOutlierRejection._DT)
+        return (local.hour, local.weekday())
+
+    async def _run(self, changes):
+        """Run the learner over a list of (hour_offset, change_kwh)."""
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass, consumption_sensors=["sensor.consumption"]
+        )
+        rows = [
+            {"start": (self._DT + timedelta(days=7 * i)).timestamp(), "change": v}
+            for i, v in enumerate(changes)
+        ]
+        stats = {"sensor.consumption": rows}
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(return_value=stats)
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+        return model
+
+    async def test_absurd_sample_is_rejected(self):
+        """A 94 GW 'hour' must not reach the pattern."""
+        model = await self._run([0.4, 93972250.55])
+        # Only the sane sample survives — not the average of the two
+        assert model._hourly_pattern[self._key()] == pytest.approx(0.4)
+
+    async def test_all_samples_absurd_leaves_bucket_empty(self):
+        model = await self._run([5816382.577, 28419810.183])
+        assert self._key() not in model._hourly_pattern
+
+    async def test_plausible_high_load_is_kept(self):
+        """A genuinely heavy hour (EV + heat pump) is still learned."""
+        model = await self._run([11.5, 12.5])
+        assert model._hourly_pattern[self._key()] == pytest.approx(12.0)
+
+    async def test_value_just_below_ceiling_is_kept(self):
+        model = await self._run([MAX_PLAUSIBLE_CONSUMPTION_KW - 0.1])
+        assert model._hourly_pattern[self._key()] == pytest.approx(
+            MAX_PLAUSIBLE_CONSUMPTION_KW - 0.1
+        )
+
+    async def test_value_just_above_ceiling_is_rejected(self):
+        model = await self._run([MAX_PLAUSIBLE_CONSUMPTION_KW + 0.1])
+        assert self._key() not in model._hourly_pattern
+
+    async def test_warning_names_the_dropped_count(self, caplog):
+        with caplog.at_level("WARNING"):
+            await self._run([0.4, 93972250.55])
+        assert "implausible" in caplog.text.lower()
+        assert "1 " in caplog.text

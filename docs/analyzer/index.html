@@ -10,6 +10,7 @@
   .chart-container { position: relative; height: 260px; }
   .chart-container-lg { position: relative; height: 320px; }
   .drop-zone.drag-over { border-color: #3b82f6 !important; background-color: #eff6ff !important; }
+  #drop-zone:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
   .kv-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #f3f4f6; }
   .kv-row:last-child { border-bottom: none; }
   .kv-label { color: #6b7280; font-size: 0.8125rem; }
@@ -52,13 +53,21 @@
 
 <!-- ═══════════════════════════════════════════════════════════ UPLOAD -->
 <section id="upload-section" class="bg-white rounded-xl border border-gray-200 p-6">
-  <div id="drop-zone"
+  <!-- role/tabindex/keydown make this reachable without a mouse: the input
+       itself is display:none, so without them there is no focusable control
+       for uploading a file at all. -->
+  <div id="drop-zone" role="button" tabindex="0"
+    aria-label="Upload a diagnostics.json file. Drop a file here, or activate to browse."
     class="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors">
-    <div class="text-5xl mb-3">📊</div>
+    <div class="text-5xl mb-3" aria-hidden="true">📊</div>
     <p class="text-base font-semibold text-gray-700">Drop <code class="text-blue-600">diagnostics.json</code> here</p>
     <p class="text-sm text-gray-400 mt-1">or click to browse · or paste below</p>
-    <input type="file" id="file-input" accept=".json" class="hidden">
   </div>
+  <!-- Kept outside #drop-zone: that div reports itself as a button, and a
+       button may not contain another interactive control. It is clicked
+       programmatically, so its position in the markup does not matter. -->
+  <input type="file" id="file-input" accept=".json" class="hidden"
+    aria-label="Diagnostics JSON file">
   <div class="mt-3 flex items-center gap-2">
     <button id="paste-toggle" class="text-sm text-blue-600 hover:underline">Paste JSON ▾</button>
   </div>
@@ -73,6 +82,10 @@
 
 <!-- ═══════════════════════════════════════════════════════════ DASHBOARD -->
 <div id="dashboard" class="hidden space-y-6">
+
+  <!-- Gives the report section its own level, so headings run h1 -> h2 -> h3
+       instead of jumping straight from the page title to the cards. -->
+  <h2 class="text-lg font-semibold text-gray-800">📋 Diagnostics Report</h2>
 
   <!-- Summary bar -->
   <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -135,19 +148,19 @@
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Power Schedule &amp; SoC Trajectory</h3>
-      <div class="chart-container"><canvas id="chart-schedule"></canvas></div>
+      <div class="chart-container"><canvas id="chart-schedule" role="img" aria-label="Chart: battery power schedule and state-of-charge trajectory over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Price Forecast</h3>
-      <div class="chart-container"><canvas id="chart-prices"></canvas></div>
+      <div class="chart-container"><canvas id="chart-prices" role="img" aria-label="Chart: electricity price forecast over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">PV Production &amp; Consumption</h3>
-      <div class="chart-container"><canvas id="chart-pv"></canvas></div>
+      <div class="chart-container"><canvas id="chart-pv" role="img" aria-label="Chart: forecast PV production and household consumption over the planning horizon."></canvas></div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-2 text-sm">Cost Comparison</h3>
-      <div class="chart-container"><canvas id="chart-costs"></canvas></div>
+      <div class="chart-container"><canvas id="chart-costs" role="img" aria-label="Chart: cost comparison between the optimized schedule and doing nothing."></canvas></div>
       <div id="cost-details" class="mt-3"></div>
     </div>
   </div>
@@ -181,7 +194,7 @@
       </table>
     </div>
     <div id="profitability-legend" class="mt-2 text-xs text-gray-400">
-      Terminal price λ = <span id="terminal-price-label">—</span> €/kWh (re-computed; integration may use rolling shadow price) ·
+      Terminal price λ = <span id="terminal-price-label">—</span> €/kWh (re-computed from the feed-in forecast tail, same as the integration) ·
       Break-even discharge: <span id="breakeven-discharge-label">—</span> €/kWh ·
       Break-even charge: <span id="breakeven-charge-label">—</span> €/kWh
     </div>
@@ -197,7 +210,7 @@
   <!-- Optimizer run history -->
   <div id="run-log-section" class="hidden bg-white rounded-xl border border-gray-200 p-5">
     <h3 class="font-semibold text-gray-700 mb-1 text-sm">🕒 Optimizer Run History <span id="run-log-count" class="text-xs text-gray-400 font-normal"></span></h3>
-    <p class="text-xs text-gray-400 mb-3">One row per 15-min optimizer run. Highlights deviations between DP output, effective mode (after hybrid/commitment logic), and the published setpoint.</p>
+    <p class="text-xs text-gray-400 mb-3">One row per 15-min optimizer run. Highlights deviations between DP output, effective mode (after hybrid/commitment logic), and the published setpoint. Note: "Eff. kW" is always 0 whenever "Eff. mode" is <code>zero_grid</code> &mdash; in zero_grid mode there is no fixed schedule power, it's continuously recalculated by the real-time (~5&ndash;10s) zero-grid controller instead. Look at "Setpoint kW" (or the Real-time Setpoint Log below) for the actual battery power during zero_grid periods.</p>
     <div class="scrolltable sticky-header">
       <table class="w-full text-xs border-collapse">
         <thead>
@@ -207,7 +220,7 @@
             <th class="border border-gray-200 px-2 py-1">DP mode</th>
             <th class="border border-gray-200 px-2 py-1">DP kW</th>
             <th class="border border-gray-200 px-2 py-1">Eff. mode</th>
-            <th class="border border-gray-200 px-2 py-1">Eff. kW</th>
+            <th class="border border-gray-200 px-2 py-1" title="Effective power from the DP schedule after hybrid/commitment resolution. Always 0 in zero_grid mode by design &mdash; see actual power in Setpoint kW.">Eff. kW</th>
             <th class="border border-gray-200 px-2 py-1">Setpoint kW</th>
             <th class="border border-gray-200 px-2 py-1">SoC kWh</th>
             <th class="border border-gray-200 px-2 py-1">Price</th>
@@ -309,8 +322,6 @@
         <input id="sp-spread" type="number" value="0.05" step="0.01" class="sim-input mt-0.5"></label>
       <label class="block"><span class="kv-label">Step duration (hours) — 0.25 = 15 min, 1.0 = 60 min</span>
         <input id="sp-step-h" type="number" value="0.25" step="0.0833" min="0.0833" max="1" class="sim-input mt-0.5"></label>
-      <label class="block"><span class="kv-label">Terminal shadow price (€/kWh, 0=auto)</span>
-        <input id="sp-terminal" type="number" value="0" step="0.01" class="sim-input mt-0.5"></label>
       <label class="flex items-center gap-2 mt-2 cursor-pointer">
         <input id="sp-pv-curtailed" type="checkbox" class="w-4 h-4 rounded">
         <span class="kv-label">PV Curtailed (zero out all PV forecasts)</span>
@@ -342,7 +353,7 @@
               <th class="border border-gray-200 px-2 py-1 text-green-700">Feed-in (€/kWh)</th>
               <th class="border border-gray-200 px-2 py-1 text-yellow-600">PV (kW)</th>
               <th class="border border-gray-200 px-2 py-1 text-red-600">Consump (kW)</th>
-              <th class="border border-gray-200 px-1 py-1"></th>
+              <th class="border border-gray-200 px-1 py-1"><span class="sr-only">Row actions</span></th>
             </tr>
           </thead>
           <tbody id="sim-fc-body"></tbody>
@@ -383,11 +394,11 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
         <h4 class="text-sm font-medium text-gray-700 mb-2">Power Schedule &amp; SoC</h4>
-        <div class="chart-container"><canvas id="sim-chart-schedule"></canvas></div>
+        <div class="chart-container"><canvas id="sim-chart-schedule" role="img" aria-label="Chart: simulated battery power schedule and state of charge for the re-run optimizer."></canvas></div>
       </div>
       <div class="bg-gray-50 rounded-xl border border-gray-200 p-4">
         <h4 class="text-sm font-medium text-gray-700 mb-2">Price Forecast with Actions</h4>
-        <div class="chart-container"><canvas id="sim-chart-prices"></canvas></div>
+        <div class="chart-container"><canvas id="sim-chart-prices" role="img" aria-label="Chart: simulated price forecast annotated with the charge and discharge actions."></canvas></div>
       </div>
     </div>
 
@@ -522,15 +533,49 @@ function chartPrices(id, priceFc, feedInFc, shadowPrice, modeArr, labels, priceM
   });
 }
 
+// Convert a forecast series between step intervals (minutes): repeat when
+// upsampling, average when downsampling. Mirrors helpers.resample_forecast.
+// Forecast-coordinator arrays are emitted at fc.forecast_interval_minutes
+// (15 for current integration versions, hourly in older diagnostics) and
+// must be converted to the schedule's step interval before charting.
+function resampleSeries(data, fromMin, toMin) {
+  if (!data || !data.length || !fromMin || !toMin || fromMin === toMin) return data || [];
+  if (fromMin % toMin === 0) {
+    const f = fromMin / toMin, out = [];
+    for (const v of data) for (let i = 0; i < f; i++) out.push(v);
+    return out;
+  }
+  if (toMin % fromMin === 0) {
+    const f = toMin / fromMin, out = [];
+    for (let i = 0; i + f <= data.length; i += f) {
+      let s = 0;
+      for (let j = 0; j < f; j++) s += data[i + j];
+      out.push(s / f);
+    }
+    return out;
+  }
+  return data;
+}
+
 function chartPv(id, pvFc, consumFc, pvDcFc, labels) {
-  const net = pvFc.map((v,i) => v - (consumFc[i]||0));
-  const datasets = [
-    { label:'PV AC (kW)',      data:pvFc,   borderColor:'#eab308', backgroundColor:'rgba(234,179,8,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 },
+  const hasDc = pvDcFc && pvDcFc.some(v => v > 0);
+  const hasAc = pvFc.some(v => v > 0);
+  // netPvSeries (analyzer.js) counts DC-coupled PV through the inverter, the
+  // same path the optimizer's baseline uses. Summing only the AC series showed
+  // a DC-coupled system as if it had no solar at all.
+  const net = netPvSeries(pvFc, pvDcFc, consumFc);
+  const datasets = [];
+  // A flat zero "PV AC" band is pure noise when every array is DC-coupled;
+  // keep it when there is no DC series either, so a system without any PV
+  // still renders the zero line for context.
+  if (hasAc || !hasDc)
+    datasets.push({ label:'PV AC (kW)', data:pvFc, borderColor:'#eab308', backgroundColor:'rgba(234,179,8,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 });
+  if (hasDc)
+    datasets.push({ label:'PV DC (kW)', data:pvDcFc, borderColor:'#f97316', backgroundColor:'rgba(249,115,22,0.1)', fill:true, borderWidth:2, pointRadius:0, tension:0.3 });
+  datasets.push(
     { label:'Consumption (kW)',data:consumFc,borderColor:'#ef4444', borderWidth:2, pointRadius:0, tension:0.3 },
     { label:'Net (PV−consump)',data:net,    borderColor:'#3b82f6', borderWidth:1.5, pointRadius:0, borderDash:[4,2], tension:0.3 },
-  ];
-  if (pvDcFc && pvDcFc.some(v => v > 0))
-    datasets.push({ label:'PV DC (kW)', data:pvDcFc, borderColor:'#f97316', borderWidth:1.5, pointRadius:0, borderDash:[2,2], tension:0.3 });
+  );
   mkChart(id, {
     type:'line', data:{ labels, datasets },
     options:{ responsive:true, maintainAspectRatio:false,
@@ -579,7 +624,7 @@ function renderSpreadAnalysis(bc, opts, prices) {
   const sqrtRte= Math.sqrt(rte);
   const usableKwh966 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc966 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-  const degrad = degradCyc966 != null ? degradCyc966 / usableKwh966 : 0.04 / usableKwh966;
+  const degrad = degradCyc966 != null ? degradCyc966 / (2 * usableKwh966) : 0.04 / (2 * usableKwh966);
   if (!prices || prices.length === 0) return;
   const minP   = Math.min(...prices);
   const maxP   = Math.max(...prices);
@@ -638,7 +683,7 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const sqrtRte= Math.sqrt(rte);
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-  const degrad = degradCyc1024 != null ? degradCyc1024 / usableKwh1024 : 0.04 / usableKwh1024;
+  const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
   const breakeven = (terminalPrice + degrad) / sqrtRte;
   const breakevenChg = (terminalPrice - degrad) * sqrtRte;
 
@@ -791,8 +836,23 @@ function renderDiagnostics(raw) {
   // ── Coordinator status
   const failureHtml = opt.failure_reason
     ? `<div class="mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">⚠ ${opt.failure_reason}</div>` : '';
+  // Weather staleness: prefer the stale/age_minutes fields written at dump time;
+  // for older diagnostics files fall back to comparing the weather timestamp
+  // against the optimization timestamp (≈ dump time). last_update_success alone
+  // stays true when polling silently stops, so "OK" would hide a dead coordinator.
+  const WEATHER_STALE_MIN = 120;
+  let wxAgeMin = wx.age_minutes;
+  if (wxAgeMin === undefined && wx.timestamp && opt.timestamp) {
+    wxAgeMin = (new Date(opt.timestamp) - new Date(wx.timestamp)) / 60000;
+  }
+  const wxStale = wx.stale !== undefined ? wx.stale : (wxAgeMin !== undefined && wxAgeMin > WEATHER_STALE_MIN);
+  const wxBadge = !wx.last_update_success
+    ? `<span class="badge badge-fail">Failed</span>`
+    : wxStale
+      ? `<span class="badge badge-fail">Stale (${(wxAgeMin/60).toFixed(1)} h old)</span>`
+      : `<span class="badge badge-ok">OK</span>`;
   document.getElementById('coord-status').innerHTML = `
-    ${kv('Weather coordinator', `<span class="badge ${wx.last_update_success?'badge-ok':'badge-fail'}">${wx.last_update_success?'OK':'Failed'}</span>`)}
+    ${kv('Weather coordinator', wxBadge)}
     ${kv('Weather timestamp', wx.timestamp ? new Date(wx.timestamp).toLocaleString() : '—')}
     ${kv('Forecast coordinator', `<span class="badge ${fc.last_update_success?'badge-ok':'badge-fail'}">${fc.last_update_success?'OK':'Failed'}</span>`)}
     ${kv('Forecast timestamp', fc.timestamp ? new Date(fc.timestamp).toLocaleString() : '—')}
@@ -822,9 +882,8 @@ function renderDiagnostics(raw) {
   // ── Charts
   const prices    = sched.price_forecast || [];
   const feedInFc  = sched.feed_in_price_forecast || null; // new field; null = use buy price
-  const pvFc      = sched.pv_forecast_kw || sched.pv_forecast || fc.pv_forecast_kw || [];
-  const consumFc  = sched.consumption_forecast_kw || sched.consumption_forecast || fc.consumption_forecast_kw || [];
-  const pvDcFc    = fc.pv_dc_forecast_kw || [];
+  const pvFcSched     = sched.pv_forecast_kw || sched.pv_forecast || [];
+  const consumFcSched = sched.consumption_forecast_kw || sched.consumption_forecast || [];
   const powerKw   = sched.power_schedule_kw || [];
   const modes     = sched.mode_schedule    || [];
   const socKwh    = sched.soc_schedule_kwh || [];
@@ -847,6 +906,18 @@ function renderDiagnostics(raw) {
   const labels   = resolvedStepTimes.length > 0
     ? resolvedStepTimes.map(t => t.includes('T') ? t.slice(5,16).replace('T',' ') : t)
     : timeLabels(prices.length, startIso, stepH);
+
+  // Forecast-coordinator series come at fc.forecast_interval_minutes (15 min
+  // for current versions, hourly in older diagnostics); convert them to the
+  // schedule's step interval so they index 1:1 with the chart labels.
+  const fcIntervalMin = fc.forecast_interval_minutes || 60;
+  const chartStepMin  = sched.price_interval
+    || Math.round((resolvedStepDurs[1] || resolvedStepDurs[0] || 0.25) * 60);
+  const pvFc     = pvFcSched.length     ? pvFcSched
+    : resampleSeries(fc.pv_forecast_kw || [], fcIntervalMin, chartStepMin);
+  const consumFc = consumFcSched.length ? consumFcSched
+    : resampleSeries(fc.consumption_forecast_kw || [], fcIntervalMin, chartStepMin);
+  const pvDcFc   = resampleSeries(fc.pv_dc_forecast_kw || [], fcIntervalMin, chartStepMin);
 
   if (powerKw.length > 0) chartSchedule('chart-schedule', powerKw, modes, socKwh, labels);
   if (prices.length   > 0) {
@@ -895,13 +966,13 @@ function renderDiagnostics(raw) {
     const feedInForDp = feedInFc || prices;
     const usableKwhDp = (cfg2.maxSocKwh - cfg2.minSocKwh) || 1;
     const degradCycleOpts = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
-    const degradPerKwhDp = degradCycleOpts != null ? degradCycleOpts / usableKwhDp : 0.04 / usableKwhDp;
+    const degradPerKwhDp = degradCycleOpts != null ? degradCycleOpts / (2 * usableKwhDp) : 0.04 / (2 * usableKwhDp);
     const dp2 = runDP(cfg2, bs.soc_kwh || 5, prices, feedInForDp,
       pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
       degradPerKwhDp, opts.min_price_spread || 0.05,
-      null, sched.terminal_shadow_price ?? null);
+      null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
       const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
@@ -934,8 +1005,12 @@ function renderDiagnostics(raw) {
         ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`
         : '<span class="text-gray-300">—</span>';
 
-      // Highlight rows where setpoint deviates from effective power (SoC/power limit)
-      const socLimited = Math.abs((entry.setpoint_kw ?? 0) - (entry.effective_power_kw ?? 0)) > 0.05;
+      // Highlight rows where setpoint deviates from effective power (SoC/power limit).
+      // effective_power_kw is always 0 in zero_grid mode by design (see column
+      // tooltip above), so skip the comparison there to avoid flagging normal
+      // zero_grid charging/discharging as "SoC/power limited".
+      const socLimited = entry.effective_mode !== 'zero_grid'
+        && Math.abs((entry.setpoint_kw ?? 0) - (entry.effective_power_kw ?? 0)) > 0.05;
       // Highlight rows where effective differs from DP (mode override, not commitment)
       const modeOverride = !entry.commitment_locked
         && Math.abs((entry.effective_power_kw ?? 0) - (entry.dp_power_kw ?? 0)) > 0.05;
@@ -1090,7 +1165,6 @@ function getSimParams() {
     degradation:   g('sp-degradation'),
     minPriceSpread:g('sp-spread'),
     stepH:         g('sp-step-h') || 0.25,
-    terminalShadowPrice: g('sp-terminal') || null,
     charge_eff_correction: window._simChargeEffCorrection ?? null,
     discharge_eff_correction: window._simDischargeEffCorrection ?? null,
   };
@@ -1142,8 +1216,11 @@ function prefillSim(d) {
       if (prices.length && pvFc.length && consumFc.length) break;
     }
   }
-  if (!pvFc.length)     pvFc     = fc.pv_forecast_kw  || [];
-  if (!consumFc.length) consumFc = fc.consumption_forecast_kw || [];
+  // Forecast-coordinator fallbacks are at fc.forecast_interval_minutes
+  // (15 min for current versions); convert to the simulator step interval.
+  const fcIntMin = fc.forecast_interval_minutes || 60;
+  if (!pvFc.length)     pvFc     = resampleSeries(fc.pv_forecast_kw || [], fcIntMin, Math.round(stepH * 60));
+  if (!consumFc.length) consumFc = resampleSeries(fc.consumption_forecast_kw || [], fcIntMin, Math.round(stepH * 60));
 
   const fixedFeedIn = opts.fixed_feed_in_price || 0.04;
   const feedInFcSim = sched.feed_in_price_forecast || null;
@@ -1153,10 +1230,6 @@ function prefillSim(d) {
       const feedInVal = feedInFcSim && feedInFcSim[i] !== undefined ? feedInFcSim[i] : fixedFeedIn;
       addFcRow(prices[i]||0.15, feedInVal, pvFc[i]||0, consumFc[i]||1.5);
     }
-  }
-  // Pre-fill terminal shadow price from previous DP run (stored in schedule)
-  if (sched.terminal_shadow_price !== undefined && sched.terminal_shadow_price !== null) {
-    set('sp-terminal', sched.terminal_shadow_price);
   }
   window._simChargeEffCorrection =
     opt.charge_eff_correction
@@ -1182,9 +1255,8 @@ function runSimulator() {
       if (price.length < 2) { statusEl.textContent = '⚠ Add at least 2 rows'; return; }
 
       const stepH   = p.stepH || 0.25;
-      const termSP  = p.terminalShadowPrice > 0 ? p.terminalShadowPrice : null;
       const simUsableKwh = (p.maxSocKwh - p.minSocKwh) || 1;
-      const degradPerKwhSim = p.degradation / simUsableKwh;
+      const degradPerKwhSim = p.degradation / (2 * simUsableKwh);
       const pvCurtailed = document.getElementById('sp-pv-curtailed').checked;
       const zeroes = new Array(price.length).fill(0);
       const inputs  = {
@@ -1193,7 +1265,7 @@ function runSimulator() {
         consumFc: consump,
         stepDurations: new Array(price.length).fill(stepH),
         degradCost: degradPerKwhSim, minPriceSpread: p.minPriceSpread,
-        pvDcFc: null, terminalShadowPrice: termSP,
+        pvDcFc: null,
         chargeEffCorrection: p.charge_eff_correction,
         dischargeEffCorrection: p.discharge_eff_correction,
       };
@@ -1312,6 +1384,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const dz = document.getElementById('drop-zone');
   const fi = document.getElementById('file-input');
   dz.addEventListener('click', () => fi.click());
+  // Enter and Space are what a native button would respond to; the drop zone
+  // only reports itself as one, so it has to honour them explicitly.
+  dz.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      fi.click();
+    }
+  });
   dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
   dz.addEventListener('drop', e => {

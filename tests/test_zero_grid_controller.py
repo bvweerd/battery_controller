@@ -24,8 +24,6 @@ def battery_config():
 @pytest.fixture
 def controller_config():
     return ZeroGridControllerConfig(
-        max_charge_w=5000.0,
-        max_discharge_w=5000.0,
         deadband_w=50.0,
     )
 
@@ -305,7 +303,6 @@ class TestCreateZeroGridController:
         config = {
             "zero_grid_deadband_w": 100.0,
             "zero_grid_response_time_s": 10.0,
-            "zero_grid_priority": "zero_grid",
         }
         controller = create_zero_grid_controller(config, battery_config)
         assert isinstance(controller, ZeroGridController)
@@ -317,14 +314,37 @@ class TestCreateZeroGridController:
         assert controller.config.deadband_w == 50.0
 
 
+class TestSetpointMemory:
+    """Tests for the internal setpoint memory accessor and reset."""
+
+    def test_last_target_w_reflects_last_action(self, controller):
+        controller.get_control_action(
+            current_grid_w=1000,
+            current_soc_kwh=5.0,
+            current_battery_w=0,
+            dp_schedule_w=0,
+            mode="zero_grid",
+        )
+        # Importing 1 kW -> discharge ~1 kW; memory tracks the applied target.
+        assert controller.last_target_w == pytest.approx(-1000, abs=10)
+
+    def test_reset_setpoint_forces_memory(self, controller):
+        controller._last_target_w = -1500.0
+        controller.reset_setpoint(-200.0)
+        assert controller.last_target_w == pytest.approx(-200.0)
+
+    def test_reset_setpoint_defaults_to_zero(self, controller):
+        controller._last_target_w = 1234.0
+        controller.reset_setpoint()
+        assert controller.last_target_w == 0.0
+
+
 class TestZeroDeadband:
     """T7: deadband_w=0 must not cause division or crash."""
 
     def test_zero_deadband_does_not_crash(self, battery_config):
         """With deadband=0 the controller runs without errors."""
         config = ZeroGridControllerConfig(
-            max_charge_w=5000.0,
-            max_discharge_w=5000.0,
             deadband_w=0.0,
         )
         controller = ZeroGridController(config, battery_config)
@@ -339,8 +359,6 @@ class TestZeroDeadband:
     def test_zero_deadband_setpoint_always_updates(self, battery_config):
         """With deadband=0 every call updates the setpoint (no hysteresis)."""
         config = ZeroGridControllerConfig(
-            max_charge_w=5000.0,
-            max_discharge_w=5000.0,
             deadband_w=0.0,
         )
         controller = ZeroGridController(config, battery_config)
@@ -361,3 +379,25 @@ class TestZeroDeadband:
         # Both calls should return finite values without raising
         assert isinstance(t1, float)
         assert isinstance(t2, float)
+
+
+def test_get_control_action_zero_capacity_does_not_crash():
+    """A zero-capacity battery config must not raise ZeroDivisionError."""
+    from custom_components.battery_controller.battery_model import BatteryConfig
+    from custom_components.battery_controller.zero_grid_controller import (
+        ZeroGridController,
+        ZeroGridControllerConfig,
+    )
+
+    controller = ZeroGridController(
+        ZeroGridControllerConfig(),
+        BatteryConfig(capacity_kwh=0.0),
+    )
+    action = controller.get_control_action(
+        current_grid_w=500.0,
+        current_soc_kwh=0.0,
+        current_battery_w=0.0,
+        dp_schedule_w=0.0,
+        mode="zero_grid",
+    )
+    assert action["soc_percent"] == 0.0

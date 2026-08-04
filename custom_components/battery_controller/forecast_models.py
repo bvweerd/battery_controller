@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_PV_ORIENTATION_DEG, DEFAULT_PV_TILT_DEG
-from .helpers import calculate_pv_forecast, calculate_consumption_pattern
+from .const import (
+    DEFAULT_PV_ORIENTATION_DEG,
+    DEFAULT_PV_TILT_DEG,
+    MAX_PLAUSIBLE_CONSUMPTION_KW,
+)
+from .helpers import (
+    calculate_consumption_pattern,
+    calculate_pv_forecast,
+    price_unit_scale_from_state,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,34 +203,44 @@ class ConsumptionForecastModel:
 
             # Build per-hour net consumption: sum(consumption) - sum(production)
             # Each stat entry's "change" = kWh in that hour = avg kW
-            hourly_net: dict[str, float] = {}  # key: ISO timestamp -> net kWh
+            hourly_net: dict[datetime, float] = {}  # key: UTC hour -> net kWh
 
-            # Normalise a stat entry to (ts_key, value) regardless of whether
-            # the recorder returns the "start" field as a string or datetime.
-            def _ts_and_value(stat: Any, field: str) -> tuple[str, float] | None:
+            # Normalise a stat entry to (start_dt, value).  The recorder returns
+            # "start" as a Unix timestamp (float) on current Home Assistant
+            # versions, and as a datetime or ISO string on older ones — all
+            # three must be handled.  Keying on the datetime itself avoids a
+            # string round-trip: formatting a float as "1753617600.0" and
+            # parsing it back yields None, which silently dropped every bucket
+            # and left the learned pattern empty.
+            def _ts_and_value(stat: Any, field: str) -> tuple[datetime, float] | None:
                 value = stat.get(field)
                 if value is None:
                     return None
                 start = stat.get("start")
                 if isinstance(start, datetime):
-                    ts_key = start.isoformat()
+                    start_dt = start
+                elif isinstance(start, (int, float)):
+                    start_dt = datetime.fromtimestamp(start, tz=UTC)
                 else:
-                    ts_key = str(start or "")
-                return ts_key, float(value)
+                    parsed = dt_util.parse_datetime(str(start or ""))
+                    if parsed is None:
+                        return None
+                    start_dt = parsed
+                return start_dt, float(value)
 
             for sensor_id in self.consumption_sensors:
                 for stat in stats.get(sensor_id, []):
                     result = _ts_and_value(stat, "change")
                     if result:
-                        ts_key, val = result
-                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + val
+                        stat_dt, val = result
+                        hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + val
 
             for sensor_id in self.production_sensors:
                 for stat in stats.get(sensor_id, []):
                     result = _ts_and_value(stat, "change")
                     if result:
-                        ts_key, val = result
-                        hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) - val
+                        stat_dt, val = result
+                        hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - val
 
             # PV correction: add back historical PV production so that the
             # stored pattern represents gross household consumption.
@@ -244,8 +262,8 @@ class ConsumptionForecastModel:
                     for stat in pv_stats.get(sensor_id, []):
                         result = _ts_and_value(stat, "change")
                         if result:
-                            ts_key, val = result
-                            hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + max(
                                 0.0, val
                             )
                 pv_corrected = True
@@ -278,11 +296,11 @@ class ConsumptionForecastModel:
                         for stat in pv_stats.get(pv_entity_id, []):
                             result = _ts_and_value(stat, "mean")
                             if result:
-                                ts_key, val = result
+                                stat_dt, val = result
                                 # mean kW over 1 h = kWh for that hour
-                                hourly_net[ts_key] = hourly_net.get(ts_key, 0.0) + max(
-                                    0.0, val
-                                )
+                                hourly_net[stat_dt] = hourly_net.get(
+                                    stat_dt, 0.0
+                                ) + max(0.0, val)
                         pv_corrected = True
                         _LOGGER.debug(
                             "PV correction applied from own pv_forecast sensor (%s)",
@@ -308,18 +326,38 @@ class ConsumptionForecastModel:
             # season: 0=winter(DJF), 1=spring(MAM), 2=summer(JJA), 3=autumn(SON)
             hourly_values: dict[tuple[int, int], list[float]] = {}
             seasonal_values: dict[tuple[int, int, int], list[float]] = {}
-            for ts_key, net_kwh in hourly_net.items():
-                dt = dt_util.parse_datetime(ts_key)
-                if dt is None:
-                    continue
-                dt_local = dt_util.as_local(dt)
+            dropped_outliers = 0
+            for stat_dt, net_kwh in hourly_net.items():
+                dt_local = dt_util.as_local(stat_dt)
                 val = max(0.0, net_kwh)
+                # Reject meter artefacts. An hourly "change" equals the average
+                # power over that hour, so a value above the plausibility
+                # ceiling cannot be household load — it is a sensor that jumped,
+                # was replaced, or briefly reported nonsense. Such a sample is
+                # unbounded, and with only ~2 samples per (hour, weekday) bucket
+                # over 14 days a single one dominates the average and propagates
+                # into the DP cost.
+                if val > MAX_PLAUSIBLE_CONSUMPTION_KW:
+                    dropped_outliers += 1
+                    continue
                 key = (dt_local.hour, dt_local.weekday())
                 hourly_values.setdefault(key, []).append(val)
                 season = _get_season(dt_local.month)
                 seasonal_values.setdefault(
                     (dt_local.hour, dt_local.weekday(), season), []
                 ).append(val)
+
+            if dropped_outliers:
+                _LOGGER.warning(
+                    "Ignored %d implausible hourly sample(s) above %.0f kW while "
+                    "learning the consumption pattern. This points at a meter "
+                    "artefact in one of the configured energy sensors (a "
+                    "total_increasing sensor that jumped or was replaced). Check "
+                    "the statistics of your consumption/production/PV sensors "
+                    "around the affected hours in Developer Tools -> Statistics.",
+                    dropped_outliers,
+                    MAX_PLAUSIBLE_CONSUMPTION_KW,
+                )
 
             for h_key, values in hourly_values.items():
                 if values:
@@ -533,6 +571,19 @@ class PriceForecastModel:
                     list(price_stats.keys())[:5] if price_stats else "none",
                 )
                 return
+
+            # Recorder statistics are in the sensor's native unit. Sensors
+            # publishing €/MWh (e.g. OMIE) must be scaled to EUR/kWh so the
+            # learned pattern matches the live forecast fed to the optimizer.
+            unit_scale = price_unit_scale_from_state(
+                self.hass.states.get(self.price_sensor_id)
+            )
+            if unit_scale != 1.0:
+                price_hourly = [(dt, p * unit_scale) for dt, p in price_hourly]
+                _LOGGER.debug(
+                    "Price model: scaling recorder prices by %s (sensor unit per MWh)",
+                    unit_scale,
+                )
 
             # Query weather sensor statistics if GHI/wind sensors exist
             # Key: UTC datetime rounded to hour → value for bin lookup

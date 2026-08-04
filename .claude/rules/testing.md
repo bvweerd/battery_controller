@@ -9,7 +9,8 @@ paths:
 - `pytest` with `pytest-homeassistant-custom-component`
 - `asyncio_mode = auto` — all tests are async by default
 - `syrupy` for snapshot assertions
-- `--maxfail=1 --strict --disable-warnings` configured in setup.cfg
+- `--strict --disable-warnings` configured in setup.cfg; `filterwarnings`
+  promotes an un-awaited coroutine to an error
 
 ## Run tests
 ```
@@ -21,6 +22,7 @@ python -m pytest tests/ -v -k "test_name"     # single test
 ## Fixtures
 - `hass` — HomeAssistant instance (from pytest-homeassistant-custom-component)
 - `snapshot` — syrupy snapshot fixture
+- `optimization_coordinator` — a minimal OptimizationCoordinator (conftest)
 - Conftest: `tests/conftest.py`
 
 ## Patterns
@@ -30,5 +32,6 @@ python -m pytest tests/ -v -k "test_name"     # single test
 - Snapshot tests: first run creates `.ambr` files; update with `--snapshot-update`
 
 ## Coverage
-- Source: `tests/` (see setup.cfg `[coverage:run]`)
+- Source: `custom_components/battery_controller` (see setup.cfg `[coverage:run]`)
+- Floor: 90% (`fail_under`); CI writes the total and the weakest files to the job summary
 - Run with coverage: `python -m pytest tests/ --cov=custom_components/battery_controller`

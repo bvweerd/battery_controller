@@ -99,6 +99,10 @@
     "weather_data_unavailable": {
       "title": "Weather data unavailable (open-meteo)",
       "description": "The battery controller cannot reach the open-meteo weather API. PV production is assumed to be zero until the connection is restored. Check your internet connection or open-meteo service status."
+    },
+    "weather_data_stale": {
+      "title": "Weather data is stale (open-meteo)",
+      "description": "The weather data is {age_hours} hours old and is no longer being refreshed. The PV forecast quality degrades as the data ages. Check your internet connection or open-meteo service status; reload the integration if the problem persists."
     }
   },
   "options": {
@@ -173,7 +177,8 @@
             "capacity_kwh": "Capacity (kWh)",
             "max_charge_power_kw": "Max charge power (kW)",
             "max_discharge_power_kw": "Max discharge power (kW)",
-            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "charge_efficiency_curve": "Charge efficiency curve",
+            "discharge_efficiency_curve": "Discharge efficiency curve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
@@ -186,11 +191,12 @@
           },
           "data_description": {
             "capacity_kwh": "Total nameplate capacity of the battery.",
-            "round_trip_efficiency": "Fraction of energy returned on discharge vs. energy used on charge (e.g. 0.90 for 90%). Split as √RTE per direction in the optimizer.",
+            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
+            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
             "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
-            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Optional; improves real-time charge/discharge mode detection.",
+            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Positive = charging, negative = discharging (this is the opposite sign convention from the power sensors the integration creates, e.g. Battery Setpoint). Optional; improves real-time charge/discharge mode detection.",
             "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
             "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
             "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",
@@ -206,7 +212,8 @@
             "capacity_kwh": "Capacity (kWh)",
             "max_charge_power_kw": "Max charge power (kW)",
             "max_discharge_power_kw": "Max discharge power (kW)",
-            "round_trip_efficiency": "Round-trip efficiency (0–1)",
+            "charge_efficiency_curve": "Charge efficiency curve",
+            "discharge_efficiency_curve": "Discharge efficiency curve",
             "min_soc_percent": "Minimum SoC (%)",
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
@@ -219,11 +226,12 @@
           },
           "data_description": {
             "capacity_kwh": "Total nameplate capacity of the battery.",
-            "round_trip_efficiency": "Fraction of energy returned on discharge vs. energy used on charge (e.g. 0.90 for 90%). Split as √RTE per direction in the optimizer.",
+            "charge_efficiency_curve": "Charge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
+            "discharge_efficiency_curve": "Discharge efficiency as a function of power. Plain value (e.g. 0.95) for flat efficiency, or power:efficiency pairs (e.g. '0.1:0.73, 0.5:0.91, 5:0.95'). Efficiency is usually much lower at low power, because the inverter's fixed idle loss is paid out of a small flow. See the efficiency curves page in the Battery Controller documentation for measured curves.",
             "min_soc_percent": "Optimizer will not discharge below this level. Set slightly above the inverter's hard limit for a safety margin.",
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
-            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Optional; improves real-time charge/discharge mode detection.",
+            "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Positive = charging, negative = discharging (this is the opposite sign convention from the power sensors the integration creates, e.g. Battery Setpoint). Optional; improves real-time charge/discharge mode detection.",
             "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
             "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
             "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",
@@ -255,11 +263,13 @@
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1, accounts for shading, wiring, soiling)",
-            "dc_coupled": "DC-coupled (directly on battery inverter)"
+            "dc_coupled": "DC-coupled (directly on battery inverter)",
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
           },
           "data_description": {
             "peak_power_kwp": "Total rated peak power of all panels in this array",
-            "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)"
+            "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)",
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
           }
         },
         "reconfigure": {
@@ -271,7 +281,11 @@
             "orientation": "Orientation (degrees, 0=north, 90=east, 180=south, 270=west)",
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1)",
-            "dc_coupled": "DC-coupled (directly on battery inverter)"
+            "dc_coupled": "DC-coupled (directly on battery inverter)",
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
+          },
+          "data_description": {
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
           }
         }
       },
@@ -364,6 +378,7 @@
           "zero_grid": "Zero grid",
           "follow_schedule": "Follow schedule",
           "hybrid": "Hybrid",
+          "hybrid_plus": "Hybrid+",
           "manual": "Manual"
         }
       }

@@ -3,10 +3,13 @@
   "description": "Unit tests for the browser-side DP optimizer and diagnostics analyzer",
   "private": true,
   "scripts": {
-    "test": "jest --coverage"
+    "test": "jest --coverage",
+    "test:perf": "node docs/__perf__/dp_benchmark.js"
   },
   "devDependencies": {
-    "jest": "^29.7.0"
+    "axe-core": "^4.12.1",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
   },
   "jest": {
     "testEnvironment": "node",
@@ -15,7 +18,7 @@
     ],
     "coverageDirectory": "coverage-js",
     "collectCoverageFrom": [
-      "docs/analyzer.js"
+      "docs/analyzer/analyzer.js"
     ]
   }
 }

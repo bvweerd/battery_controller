@@ -15,13 +15,15 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class ZeroGridControllerConfig:
-    """Configuration for the zero-grid controller."""
+    """Configuration for the zero-grid controller.
 
-    max_charge_w: float = 5000.0
-    max_discharge_w: float = 5000.0
+    Power limits are not stored here: the controller clamps setpoints with the
+    SoC-dependent limits from BatteryConfig (max_charge_at_soc /
+    max_discharge_at_soc), which are the authoritative source.
+    """
+
     deadband_w: float = 50.0  # Hysteresis to prevent oscillation
     response_time_s: float = 5.0  # Update interval
-    priority: str = "schedule"  # 'zero_grid' or 'schedule' when in conflict
 
 
 class ZeroGridController:
@@ -46,6 +48,21 @@ class ZeroGridController:
         self.battery_config = battery_config
         self._last_target_w = 0.0
         self._setpoint_w = 0.0  # Target grid power (0 = zero-grid)
+
+    @property
+    def last_target_w(self) -> float:
+        """Return the internal setpoint memory in W (positive = charge)."""
+        return self._last_target_w
+
+    def reset_setpoint(self, value_w: float = 0.0) -> None:
+        """Force the internal setpoint memory to a specific value.
+
+        Used on mode changes and by the coordinator's stale-sensor fail-safe to
+        keep the integrator state consistent when a computed setpoint is
+        rejected.
+        """
+        self._last_target_w = value_w
+        self._setpoint_w = value_w
 
     def calculate_battery_setpoint(
         self,
@@ -255,7 +272,11 @@ class ZeroGridController:
             "mode": mode,
             "action_mode": action_mode,
             "soc_kwh": current_soc_kwh,
-            "soc_percent": (current_soc_kwh / self.battery_config.capacity_kwh) * 100,
+            "soc_percent": (
+                (current_soc_kwh / self.battery_config.capacity_kwh) * 100
+                if self.battery_config.capacity_kwh > 0
+                else 0.0
+            ),
         }
 
 
@@ -275,15 +296,11 @@ def create_zero_grid_controller(
     from .const import (
         CONF_ZERO_GRID_DEADBAND_W,
         CONF_ZERO_GRID_RESPONSE_TIME_S,
-        CONF_ZERO_GRID_PRIORITY,
         DEFAULT_ZERO_GRID_DEADBAND_W,
         DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
-        DEFAULT_ZERO_GRID_PRIORITY,
     )
 
     controller_config = ZeroGridControllerConfig(
-        max_charge_w=battery_config.max_charge_power_kw * 1000,
-        max_discharge_w=battery_config.max_discharge_power_kw * 1000,
         deadband_w=float(
             config.get(CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W)
         ),
@@ -292,7 +309,6 @@ def create_zero_grid_controller(
                 CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
             )
         ),
-        priority=config.get(CONF_ZERO_GRID_PRIORITY, DEFAULT_ZERO_GRID_PRIORITY),
     )
 
     return ZeroGridController(controller_config, battery_config)

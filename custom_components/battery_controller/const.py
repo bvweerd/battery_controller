@@ -20,9 +20,20 @@ PLATFORMS: list[Platform] = [
 MODE_ZERO_GRID = "zero_grid"
 MODE_FOLLOW_SCHEDULE = "follow_schedule"
 MODE_HYBRID = "hybrid"
+# Hybrid+ behaves like hybrid, but consults the price forecast (via the DP
+# shadow price) before storing PV surplus: when the battery can be filled more
+# cheaply later (e.g. a midday PV peak at low prices), the surplus is exported
+# at the current feed-in price instead of charged.
+MODE_HYBRID_PLUS = "hybrid_plus"
 MODE_MANUAL = "manual"
 
-CONTROL_MODES = [MODE_ZERO_GRID, MODE_FOLLOW_SCHEDULE, MODE_HYBRID, MODE_MANUAL]
+CONTROL_MODES = [
+    MODE_ZERO_GRID,
+    MODE_FOLLOW_SCHEDULE,
+    MODE_HYBRID,
+    MODE_HYBRID_PLUS,
+    MODE_MANUAL,
+]
 
 # Battery action modes
 ACTION_IDLE = "idle"
@@ -38,6 +49,8 @@ CONF_USABLE_CAPACITY_KWH = "usable_capacity_kwh"
 CONF_MAX_CHARGE_POWER_KW = "max_charge_power_kw"
 CONF_MAX_DISCHARGE_POWER_KW = "max_discharge_power_kw"
 CONF_ROUND_TRIP_EFFICIENCY = "round_trip_efficiency"
+CONF_CHARGE_EFFICIENCY_CURVE = "charge_efficiency_curve"
+CONF_DISCHARGE_EFFICIENCY_CURVE = "discharge_efficiency_curve"
 CONF_MIN_SOC_PERCENT = "min_soc_percent"
 CONF_MAX_SOC_PERCENT = "max_soc_percent"
 
@@ -54,6 +67,13 @@ CONF_LOW_SOC_MAX_DISCHARGE_KW = "low_soc_max_discharge_kw"
 # Subentry types
 PV_SUBENTRY_TYPE = "pv_array"
 BATTERY_SUBENTRY_TYPE = "battery"
+
+# Configuration keys - PV array (subentry): external PV forecast sensors.
+# When set, the PV forecast is read from these sensors (e.g. the Solcast
+# integration's "Forecast Today"/"Forecast Tomorrow" sensors) at their
+# native resolution instead of the internal radiation-based model. The
+# internal model remains the fallback for steps not covered by sensor data.
+CONF_PV_FORECAST_SENSORS = "pv_forecast_sensors"
 
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
@@ -88,7 +108,6 @@ CONF_MANUAL_POWER_SETPOINT_W = "manual_power_setpoint_w"
 CONF_ZERO_GRID_ENABLED = "zero_grid_enabled"
 CONF_ZERO_GRID_DEADBAND_W = "zero_grid_deadband_w"
 CONF_ZERO_GRID_RESPONSE_TIME_S = "zero_grid_response_time_s"
-CONF_ZERO_GRID_PRIORITY = "zero_grid_priority"
 
 # Configuration keys - Control mode (persisted)
 CONF_CONTROL_MODE = "control_mode"
@@ -101,6 +120,11 @@ DEFAULT_CAPACITY_KWH = 10.0
 DEFAULT_MAX_CHARGE_POWER_KW = 5.0
 DEFAULT_MAX_DISCHARGE_POWER_KW = 5.0
 DEFAULT_ROUND_TRIP_EFFICIENCY = 0.90
+# Per-direction default = sqrt(DEFAULT_ROUND_TRIP_EFFICIENCY) so the default
+# round-trip efficiency stays 0.90 (0.9487 × 0.9487 ≈ 0.90), matching both the
+# pre-curve scalar default and what migrated entries get.
+DEFAULT_CHARGE_EFFICIENCY_CURVE = "0.9487"
+DEFAULT_DISCHARGE_EFFICIENCY_CURVE = "0.9487"
 DEFAULT_MIN_SOC_PERCENT = 10.0
 DEFAULT_MAX_SOC_PERCENT = 90.0
 
@@ -136,7 +160,6 @@ DEFAULT_MANUAL_POWER_SETPOINT_W = 0.0
 DEFAULT_ZERO_GRID_ENABLED = True
 DEFAULT_ZERO_GRID_DEADBAND_W = 50.0
 DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
-DEFAULT_ZERO_GRID_PRIORITY = "schedule"
 
 # Default values - Fixed prices
 DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+)
@@ -144,14 +167,35 @@ DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+
 # Default values - Control mode
 DEFAULT_CONTROL_MODE = "hybrid"
 
+# Base resolution of the PV/consumption forecast pipeline.
+# Weather input (open-meteo) is hourly, but forecasts are emitted at
+# 15-minute steps aligned to quarter-hour boundaries so they map 1:1 onto
+# 15-minute price intervals without the up-to-45-minute misalignment that
+# hourly series had at hour boundaries. Hourly inputs are expanded by
+# repetition (mean-preserving); solar geometry is evaluated per step, so
+# dawn/dusk ramps gain sub-hourly shape even from hourly radiation data.
+FORECAST_INTERVAL_MINUTES = 15
+
 # DP resolution constants
-# SoC resolution must be large enough that arbitrage is decisively profitable:
-# with too-fine resolution (e.g. 8 Wh at 5-min), the V-function slope collapses
-# to near the feed-in price, making charging appear break-even and preventing
-# the optimizer from finding profitable charge/discharge cycles.
-# 25 Wh ensures ~6× margin between charging cost and discharge revenue per state.
+# 10 Wh SoC states: fine enough that the post-discharge SoC maps accurately
+# (coarse states systematically undervalue concentrating discharge at the
+# peak-price hour), while the per-action sub-resolution guard in the DP
+# (new_soc_idx == s_idx -> skip) prevents "free-looking" micro-actions that
+# would otherwise oscillate. See the resolution discussion in optimizer.py.
 SOC_RESOLUTION_WH = 10.0  # Minimum SoC state size in Wh
 POWER_STEP_W = 100  # Minimum practical power action granularity in W
+
+# Upper bound on the number of discrete SoC states in the DP.
+# At a fixed 10 Wh resolution the state count grows linearly with usable
+# capacity, and DP cost grows with it: a 10 kWh battery needs ~800 states,
+# a 55 kWh battery ~4500, making the solve several times slower purely
+# because the battery is larger. Above this budget the resolution is
+# coarsened so the state count stays bounded.
+# 1000 states means the cap only engages above 10 kWh of usable range —
+# typical home batteries keep the exact 10 Wh resolution and are bit-for-bit
+# unaffected. At the cap the resolution is 0.1% of usable capacity (e.g.
+# 45 Wh on a 45 kWh range), far below SoC sensor accuracy (~1%).
+MAX_SOC_STATES = 1000
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96
@@ -174,16 +218,25 @@ POWER_IDLE_THRESHOLD_KW = (
 PRICE_CHANGE_REOPTIMIZE_THRESHOLD = (
     0.10  # fractional — re-run optimizer on >=10% price change
 )
+PRICE_CHANGE_REOPTIMIZE_ABS_EUR = (
+    0.01  # EUR/kWh — absolute change threshold when the previous price is 0
+)
 STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
+WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
+# Plausibility ceiling for a learned hourly consumption sample, in kW.
+# An hourly statistics "change" equals the average power over that hour, so a
+# household hour above this is a meter artefact (a total_increasing sensor that
+# jumped or was replaced, a unit change, or a spurious reading), not real load:
+# even a 3x80 A connection at full load for a whole hour stays near 55 kW.
+# Such a sample is unbounded in magnitude — observed values reach 10^8 kW — and
+# a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
+MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
+
 SOC_UNCERTAINTY_RESERVE_FRACTION = (
     0.10  # max fraction of capacity reserved for solar forecast uncertainty
 )
-
-# Absorption detection: actual battery power must be at least this fraction of the
-# charge setpoint before the battery is considered unable to absorb more charge.
-ABSORPTION_THRESHOLD = 0.70  # fraction of setpoint
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode

@@ -1,0 +1,96 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/pages.yml"
+  # The strict build is only a guard if it runs before the merge. Without this
+  # trigger a pull request that breaks an internal link merges green and takes
+  # the deploy down afterwards.
+  #
+  # The path list is repeated rather than shared through a YAML anchor:
+  # GitHub Actions does not support anchors, even though local YAML parsers
+  # resolve them happily.
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+concurrency:
+  # Pull requests get their own group so a docs PR cannot cancel a deploy, and
+  # two pushes to the same pull request still supersede one another.
+  group: pages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns a broken internal link into a build failure, so a renamed
+      # page cannot silently ship a dead link. The analyzer under docs/analyzer/
+      # is copied verbatim; docs/__tests__/ is dropped via exclude_docs.
+      - name: Build site
+        run: mkdocs build --strict --site-dir _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Pull requests validate only. Deploying from a pull request would publish
+    # unreviewed content to the live site.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      # Rebuilt rather than carried across from the build job: the build is
+      # sub-second and deterministic, so passing a directory between jobs costs
+      # more machinery than it saves.
+      - name: Build site
+        run: mkdocs build --strict --site-dir _site
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

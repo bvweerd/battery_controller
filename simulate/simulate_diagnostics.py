@@ -20,6 +20,86 @@ from dataclasses import dataclass
 # ---------------------------------------------------------------------------
 
 
+EfficiencyCurve = list[tuple[float, float]]  # [(power_kw, efficiency), ...]
+
+
+def _interpolate_efficiency(curve: EfficiencyCurve, power_kw: float) -> float:
+    """Linear interpolation on efficiency curve; flat clamping beyond range."""
+    if not curve:
+        return 1.0
+    if len(curve) == 1 or power_kw <= curve[0][0]:
+        return curve[0][1]
+    if power_kw >= curve[-1][0]:
+        return curve[-1][1]
+    for i in range(len(curve) - 1):
+        p0, e0 = curve[i]
+        p1, e1 = curve[i + 1]
+        if p0 <= power_kw <= p1:
+            t = (power_kw - p0) / (p1 - p0)
+            return e0 + t * (e1 - e0)
+    return curve[-1][1]
+
+
+def _flat_curve(eff: float, max_kw: float) -> EfficiencyCurve:
+    """Build a flat (power-independent) efficiency curve."""
+    return [(0.0, eff), (max_kw, eff)]
+
+
+# 10 load points from 5% to 95% of nominal power (mirrors efficiency_curve.py).
+_REPRESENTATIVE_LOAD_POINTS = tuple(0.05 + 0.10 * i for i in range(10))
+
+
+def _representative_efficiency(curve: EfficiencyCurve, max_power_kw: float) -> float:
+    """Reduce a curve to one scalar describing typical operating efficiency.
+
+    Sampling at zero power instead would pick the single worst point of a
+    realistic curve, inflating every threshold derived from it.
+    """
+    if not curve:
+        return 1.0
+    if max_power_kw <= 0:
+        return _interpolate_efficiency(curve, 0.0)
+    return sum(
+        _interpolate_efficiency(curve, f * max_power_kw)
+        for f in _REPRESENTATIVE_LOAD_POINTS
+    ) / len(_REPRESENTATIVE_LOAD_POINTS)
+
+
+# Boundary-power fixed point: iterate until the efficiency stops moving.
+_BOUNDARY_SOLVER_MAX_ITER = 12
+_BOUNDARY_SOLVER_TOL = 1e-9
+
+
+def _solve_drain_w(
+    delta_wh: float, step_hours: float, curve: EfficiencyCurve, seed_eff: float
+) -> float:
+    """AC discharge power that draws exactly delta_wh from the battery."""
+    eff = seed_eff
+    for _ in range(_BOUNDARY_SOLVER_MAX_ITER):
+        next_eff = _interpolate_efficiency(curve, delta_wh * eff / step_hours / 1000.0)
+        done = abs(next_eff - eff) < _BOUNDARY_SOLVER_TOL
+        eff = next_eff
+        if done:
+            break
+    return delta_wh * eff / step_hours
+
+
+def _solve_fill_w(
+    delta_wh: float, step_hours: float, curve: EfficiencyCurve, seed_eff: float
+) -> float:
+    """AC charge power that stores exactly delta_wh in the battery."""
+    eff = seed_eff
+    for _ in range(_BOUNDARY_SOLVER_MAX_ITER):
+        next_eff = _interpolate_efficiency(
+            curve, delta_wh / (step_hours * eff) / 1000.0
+        )
+        done = abs(next_eff - eff) < _BOUNDARY_SOLVER_TOL
+        eff = next_eff
+        if done:
+            break
+    return delta_wh / (step_hours * eff)
+
+
 @dataclass
 class BatteryConfig:
     capacity_kwh: float
@@ -36,11 +116,23 @@ class BatteryConfig:
     pv_dc_coupled: bool
     pv_dc_peak_power_kwp: float
     pv_dc_efficiency: float
+    charge_efficiency_curve: EfficiencyCurve = None  # type: ignore[assignment]
+    discharge_efficiency_curve: EfficiencyCurve = None  # type: ignore[assignment]
     max_grid_power_kw: float = 0.0
     high_soc_charge_threshold_pct: float = 100.0
     high_soc_max_charge_kw: float = 0.0
     low_soc_discharge_threshold_pct: float = 0.0
     low_soc_max_discharge_kw: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.charge_efficiency_curve is None:
+            self.charge_efficiency_curve = _flat_curve(
+                self.charge_efficiency, self.max_charge_power_kw
+            )
+        if self.discharge_efficiency_curve is None:
+            self.discharge_efficiency_curve = _flat_curve(
+                self.discharge_efficiency, self.max_discharge_power_kw
+            )
 
     def max_charge_at_soc(self, soc_kwh: float) -> float:
         if (
@@ -71,38 +163,68 @@ def load_diagnostics(path: str) -> dict:
 
 
 def get_charge_eff_override(
-    rte: float, charge_eff_correction: float | None
-) -> float | None:
-    """Return corrected charge-side efficiency when diagnostics contain a calibration."""
+    battery: "BatteryConfig", charge_eff_correction: float | None
+) -> "EfficiencyCurve | None":
+    """Return corrected charge efficiency curve when diagnostics contain a calibration."""
     if charge_eff_correction is None or charge_eff_correction >= 0.995:
         return None
-    return math.sqrt(rte) * charge_eff_correction
+    return [
+        (p, min(1.0, eff * charge_eff_correction))
+        for p, eff in battery.charge_efficiency_curve
+    ]
 
 
 def get_discharge_eff_override(
-    rte: float, discharge_eff_correction: float | None
-) -> float | None:
-    """Return corrected discharge-side efficiency when diagnostics contain a calibration."""
+    battery: "BatteryConfig", discharge_eff_correction: float | None
+) -> "EfficiencyCurve | None":
+    """Return corrected discharge efficiency curve when diagnostics contain a calibration."""
     if discharge_eff_correction is None or discharge_eff_correction >= 0.995:
         return None
     # SoC transition: soc -= power * hours / discharge_eff.
-    # To reduce planned SoC drop by factor `correction`, divide sqrt(RTE) by it
-    # (a larger divisor yields a smaller SoC drop). May be > 1; only used for
+    # To reduce planned SoC drop by factor `correction`, divide each curve point by it
+    # (a larger divisor yields a smaller SoC drop). May exceed 1.0; only used for
     # SoC state transitions, not for economic cost.
-    return math.sqrt(rte) / discharge_eff_correction
+    return [
+        (p, max(1e-6, eff / discharge_eff_correction))
+        for p, eff in battery.discharge_efficiency_curve
+    ]
 
 
 def extract_inputs(diag: dict) -> tuple:
     """Extract all optimizer inputs from diagnostics.json."""
     bc = diag["data"]["battery_config"]
+    charge_eff_scalar = bc.get(
+        "charge_efficiency", math.sqrt(bc.get("round_trip_efficiency", 0.90))
+    )
+    discharge_eff_scalar = bc.get(
+        "discharge_efficiency", math.sqrt(bc.get("round_trip_efficiency", 0.90))
+    )
+    max_chg_kw = bc.get("max_charge_power_kw", 5.0)
+    max_dis_kw = bc.get("max_discharge_power_kw", 5.0)
+
+    # Build efficiency curves: use stored curve data if present, else flat scalar curve
+    raw_chg_curve = bc.get("charge_efficiency_curve_parsed")
+    if raw_chg_curve and isinstance(raw_chg_curve, list):
+        charge_curve: EfficiencyCurve = [tuple(p) for p in raw_chg_curve]  # type: ignore[misc]
+    else:
+        charge_curve = _flat_curve(charge_eff_scalar, max_chg_kw)
+
+    raw_dis_curve = bc.get("discharge_efficiency_curve_parsed")
+    if raw_dis_curve and isinstance(raw_dis_curve, list):
+        discharge_curve: EfficiencyCurve = [tuple(p) for p in raw_dis_curve]  # type: ignore[misc]
+    else:
+        discharge_curve = _flat_curve(discharge_eff_scalar, max_dis_kw)
+
     battery = BatteryConfig(
         capacity_kwh=bc["capacity_kwh"],
         usable_capacity_kwh=bc["usable_capacity_kwh"],
-        max_charge_power_kw=bc["max_charge_power_kw"],
-        max_discharge_power_kw=bc["max_discharge_power_kw"],
-        round_trip_efficiency=bc["round_trip_efficiency"],
-        charge_efficiency=bc["charge_efficiency"],
-        discharge_efficiency=bc["discharge_efficiency"],
+        max_charge_power_kw=max_chg_kw,
+        max_discharge_power_kw=max_dis_kw,
+        round_trip_efficiency=bc.get(
+            "round_trip_efficiency", charge_eff_scalar * discharge_eff_scalar
+        ),
+        charge_efficiency=charge_eff_scalar,
+        discharge_efficiency=discharge_eff_scalar,
         min_soc_percent=bc["min_soc_percent"],
         max_soc_percent=bc["max_soc_percent"],
         min_soc_kwh=bc["min_soc_kwh"],
@@ -110,6 +232,8 @@ def extract_inputs(diag: dict) -> tuple:
         pv_dc_coupled=bc["pv_dc_coupled"],
         pv_dc_peak_power_kwp=bc["pv_dc_peak_power_kwp"],
         pv_dc_efficiency=bc["pv_dc_efficiency"],
+        charge_efficiency_curve=charge_curve,
+        discharge_efficiency_curve=discharge_curve,
         high_soc_charge_threshold_pct=bc.get("high_soc_charge_threshold_pct", 100.0),
         high_soc_max_charge_kw=bc.get("high_soc_max_charge_kw", 0.0),
         low_soc_discharge_threshold_pct=bc.get("low_soc_discharge_threshold_pct", 0.0),
@@ -148,10 +272,13 @@ def extract_inputs(diag: dict) -> tuple:
         "degradation_cost_per_cycle",
         options.get("degradation_cost_per_kwh", 0.04),  # fallback for old diagnostics
     )
-    # Convert per-cycle to per-kWh for the DP (same as coordinator)
+    # Convert per-cycle to per-kWh for the DP (same as coordinator).
+    # A full cycle moves usable capacity through the battery twice (charge +
+    # discharge) and degradation is charged on throughput in both directions,
+    # hence the division by 2 × usable_kwh.
     usable_kwh = battery.max_soc_kwh - battery.min_soc_kwh
     degradation_cost = (
-        degradation_cost_per_cycle / usable_kwh
+        degradation_cost_per_cycle / (2 * usable_kwh)
         if usable_kwh > 0
         else degradation_cost_per_cycle
     )
@@ -161,7 +288,7 @@ def extract_inputs(diag: dict) -> tuple:
     # Use actual feed-in forecast from schedule if available (new diagnostics field)
     feed_in_forecast = sched.get("feed_in_price_forecast") or list(price_forecast)
 
-    # Terminal shadow price stored in schedule for DP reproduction
+    # Shadow price from the diagnostics snapshot; informational only (not a DP input).
     terminal_shadow_price = sched.get("terminal_shadow_price")
     charge_eff_correction = opt_data.get("charge_eff_correction")
     if charge_eff_correction is None:
@@ -201,6 +328,7 @@ def extract_inputs(diag: dict) -> tuple:
 
 SOC_RESOLUTION_WH = 10.0
 POWER_STEP_W = 100
+MAX_SOC_STATES = 1000
 MIN_CYCLE_KWH = 0.2
 POWER_IDLE_THRESHOLD_KW = 0.001
 MIN_PV_SURPLUS_KW = 0.05
@@ -215,35 +343,51 @@ def calculate_step_cost(
     feed_in_price,
     pv_production_w,
     consumption_w,
-    rte,
+    charge_curve,
+    discharge_curve,
     degradation_cost_per_kwh,
     battery_config,
     pv_dc_production_w=0.0,
+    charge_eff=None,
+    discharge_eff=None,
 ):
-    sqrt_rte = math.sqrt(rte)
-    charge_eff = sqrt_rte
-    discharge_eff = sqrt_rte
-    dc_eff = (
-        battery_config.pv_dc_efficiency if battery_config.pv_dc_coupled else sqrt_rte
-    )
+    # charge_eff / discharge_eff may be supplied pre-interpolated (hot-path
+    # optimisation); they MUST come from the same curves passed above.
+    # Interpolate only when the caller did not pre-compute (mirrors optimizer.py).
+    if charge_eff is None or discharge_eff is None:
+        action_kw = abs(action_w) / 1000.0
+        if charge_eff is None:
+            charge_eff = _interpolate_efficiency(charge_curve, action_kw)
+        if discharge_eff is None:
+            discharge_eff = _interpolate_efficiency(discharge_curve, action_kw)
+    # Only read on the DC-coupled paths below; the MPPT path never goes through
+    # the AC charger, so it does not use the charge curve.
+    dc_eff = battery_config.pv_dc_efficiency
 
     pv_production_w = max(0.0, pv_production_w)
     pv_dc_production_w = max(0.0, pv_dc_production_w)
 
-    dc_charge_w = 0.0
-    ac_charge_w = 0.0
     dc_pv_excess_w = pv_dc_production_w
     throughput_kwh = 0.0
 
     if action_w > 0:
-        dc_charge_w = min(action_w, pv_dc_production_w * dc_eff)
-        ac_charge_w = action_w - dc_charge_w
-        dc_pv_used_w = dc_charge_w / dc_eff if dc_eff > 0 else 0.0
-        dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_used_w)
-        grid_to_battery_w = ac_charge_w  # grid draws AC setpoint power
-        throughput_kwh = (
-            action_w * time_step_hours * charge_eff / 1000
-        )  # actual stored Wh
+        # AC charging: grid draws the AC setpoint; passive DC MPPT charging
+        # continues on top, limited by the remaining headroom.
+        grid_to_battery_w = action_w  # grid draws AC setpoint power
+        ac_stored_wh = action_w * time_step_hours * charge_eff
+        throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
+        if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
+            max_soc_wh = battery_config.max_soc_kwh * 1000
+            headroom_wh = max(0.0, max_soc_wh - soc_wh - ac_stored_wh)
+            passive_charge_wh = min(
+                pv_dc_production_w * dc_eff * time_step_hours, headroom_wh
+            )
+            passive_charge_w = (
+                passive_charge_wh / time_step_hours if time_step_hours > 0 else 0.0
+            )
+            dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
+            dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
+            throughput_kwh += passive_charge_wh / 1000
     elif action_w < 0:
         dc_pv_excess_w = pv_dc_production_w
         usable_power_w = abs(action_w)  # AC output = discharge setpoint
@@ -308,9 +452,8 @@ def run_dp(
     degradation_cost_per_kwh,
     min_price_spread,
     pv_dc_forecast=None,
-    terminal_shadow_price=None,
-    charge_eff_override=None,
-    discharge_eff_override=None,
+    charge_eff_curve_override=None,
+    discharge_eff_curve_override=None,
 ):
     """Run the DP backward pass and return V, policy, soc_states, soc_resolution_wh."""
     if pv_dc_forecast is None:
@@ -325,19 +468,41 @@ def run_dp(
         ] * (n_steps - len(step_durations_hours))
 
     min_step_hours = min(step_durations_hours[:n_steps])
-    soc_resolution_wh = float(SOC_RESOLUTION_WH)
+
+    min_soc_wh = round(battery_config.min_soc_kwh * 1000)
+    max_soc_wh = round(battery_config.max_soc_kwh * 1000)
+
+    # Coarsen the SoC grid for large batteries so the state count stays
+    # bounded (mirrors optimizer.py).
+    soc_resolution_wh = max(
+        float(SOC_RESOLUTION_WH), (max_soc_wh - min_soc_wh) / MAX_SOC_STATES
+    )
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours
     )
     aligned_step_w = soc_resolution_wh / full_step_hours
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
 
-    min_soc_wh = round(battery_config.min_soc_kwh * 1000)
-    max_soc_wh = round(battery_config.max_soc_kwh * 1000)
-    sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
-    discharge_eff = (
-        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    # Overrides apply to SoC TRANSITIONS only; the cost model always uses the
+    # nominal curves (mirrors optimizer.py).
+    charge_curve = (
+        charge_eff_curve_override
+        if charge_eff_curve_override is not None
+        else battery_config.charge_efficiency_curve
+    )
+    discharge_curve = (
+        discharge_eff_curve_override
+        if discharge_eff_curve_override is not None
+        else battery_config.discharge_efficiency_curve
+    )
+    cost_charge_curve = battery_config.charge_efficiency_curve
+    cost_discharge_curve = battery_config.discharge_efficiency_curve
+    # Scalar at zero power for boundary action estimation
+    _chg_eff_seed = _representative_efficiency(
+        charge_curve, battery_config.max_charge_power_kw
+    )
+    _dis_eff_seed = _representative_efficiency(
+        discharge_curve, battery_config.max_discharge_power_kw
     )
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
@@ -353,7 +518,8 @@ def run_dp(
         median_price = sorted_prices[len(sorted_prices) // 2]
         clipped_tail = [min(p, median_price) for p in feed_in_forecast[-lookback:]]
         avg_tail = sum(clipped_tail) / len(clipped_tail)
-        terminal_price = min(feed_in_forecast[-1], avg_tail)
+        # Clamp at 0: negative feed-in tail must not penalize stored energy.
+        terminal_price = max(0.0, min(feed_in_forecast[-1], avg_tail))
     else:
         terminal_price = 0.0
     for s_idx, soc_wh in enumerate(soc_states):
@@ -369,6 +535,23 @@ def run_dp(
         float(-i * power_step_w) for i in range(discharge_steps, 0, -1)
     ]
     actions = discharge_actions + charge_actions
+
+    # Pre-compute per-action efficiencies once (mirrors optimizer.py):
+    # transition effs from the (possibly overridden) curves, cost effs from
+    # the nominal curves.
+    trans_charge_eff = {
+        a: _interpolate_efficiency(charge_curve, abs(a) / 1000.0) for a in actions
+    }
+    trans_discharge_eff = {
+        a: _interpolate_efficiency(discharge_curve, abs(a) / 1000.0) for a in actions
+    }
+    cost_charge_eff = {
+        a: _interpolate_efficiency(cost_charge_curve, abs(a) / 1000.0) for a in actions
+    }
+    cost_discharge_eff = {
+        a: _interpolate_efficiency(cost_discharge_curve, abs(a) / 1000.0)
+        for a in actions
+    }
 
     soc_max_charge_w = [
         battery_config.max_charge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
@@ -397,19 +580,35 @@ def run_dp(
                 if action_w > 0:
                     if action_w > max_chg_w:
                         continue
-                    energy_change_wh = action_w * time_step_hours * charge_eff
+                    _chg_eff = trans_charge_eff[action_w]
+                    energy_change_wh = action_w * time_step_hours * _chg_eff
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
+                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                        dc_eff = battery_config.pv_dc_efficiency
+                        headroom_wh = max(0.0, max_soc_wh - new_soc_wh)
+                        new_soc_wh += min(
+                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        )
                 elif action_w < 0:
                     if -action_w > max_dis_w:
                         continue
-                    energy_change_wh = abs(action_w) * time_step_hours / discharge_eff
+                    _dis_eff = trans_discharge_eff[action_w]
+                    energy_change_wh = abs(action_w) * time_step_hours / _dis_eff
                     new_soc_wh = soc_wh - energy_change_wh
                     if new_soc_wh < min_soc_wh:
                         continue
                 else:
-                    new_soc_wh = soc_wh
+                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                        dc_eff = battery_config.pv_dc_efficiency
+                        headroom_wh = max(0.0, max_soc_wh - soc_wh)
+                        passive_wh = min(
+                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        )
+                        new_soc_wh = soc_wh + passive_wh
+                    else:
+                        new_soc_wh = soc_wh
 
                 new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
                 if action_w != 0 and new_soc_idx == s_idx:
@@ -423,10 +622,13 @@ def run_dp(
                     feed_in_price=feed_in_price,
                     pv_production_w=pv_w,
                     consumption_w=consumption_w,
-                    rte=battery_config.round_trip_efficiency,
+                    charge_curve=cost_charge_curve,
+                    discharge_curve=cost_discharge_curve,
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    charge_eff=cost_charge_eff[action_w],
+                    discharge_eff=cost_discharge_eff[action_w],
                 )
 
                 total_cost = step_cost + V[t + 1][new_soc_idx]
@@ -435,7 +637,9 @@ def run_dp(
                     best_action = action_w
 
             if soc_wh > min_soc_wh:
-                drain_w = (soc_wh - min_soc_wh) * discharge_eff / time_step_hours
+                drain_w = _solve_drain_w(
+                    soc_wh - min_soc_wh, time_step_hours, discharge_curve, _dis_eff_seed
+                )
                 if 0 < drain_w <= max_dis_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -445,7 +649,8 @@ def run_dp(
                         feed_in_price=feed_in_price,
                         pv_production_w=pv_w,
                         consumption_w=consumption_w,
-                        rte=battery_config.round_trip_efficiency,
+                        charge_curve=cost_charge_curve,
+                        discharge_curve=cost_discharge_curve,
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
@@ -455,7 +660,9 @@ def run_dp(
                         best_cost = total_cost
                         best_action = -drain_w
             if soc_wh < max_soc_wh:
-                fill_w = (max_soc_wh - soc_wh) / (time_step_hours * charge_eff)
+                fill_w = _solve_fill_w(
+                    max_soc_wh - soc_wh, time_step_hours, charge_curve, _chg_eff_seed
+                )
                 if 0 < fill_w <= max_chg_w:
                     step_cost = calculate_step_cost(
                         time_step_hours=time_step_hours,
@@ -465,7 +672,8 @@ def run_dp(
                         feed_in_price=feed_in_price,
                         pv_production_w=pv_w,
                         consumption_w=consumption_w,
-                        rte=battery_config.round_trip_efficiency,
+                        charge_curve=cost_charge_curve,
+                        discharge_curve=cost_discharge_curve,
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
@@ -507,14 +715,29 @@ def forward_pass(
     consumption_forecast,
     degradation_cost_per_kwh,
     power_step_w,
-    charge_eff_override=None,
-    discharge_eff_override=None,
+    charge_eff_curve_override=None,
+    discharge_eff_curve_override=None,
 ):
     """Execute the forward pass via V-table re-evaluation at the actual continuous SoC."""
-    sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    charge_eff = charge_eff_override if charge_eff_override is not None else sqrt_rte
-    discharge_eff = (
-        discharge_eff_override if discharge_eff_override is not None else sqrt_rte
+    # Overrides apply to SoC TRANSITIONS only; costs use the nominal curves
+    # (mirrors optimizer.py).
+    charge_curve = (
+        charge_eff_curve_override
+        if charge_eff_curve_override is not None
+        else battery_config.charge_efficiency_curve
+    )
+    discharge_curve = (
+        discharge_eff_curve_override
+        if discharge_eff_curve_override is not None
+        else battery_config.discharge_efficiency_curve
+    )
+    cost_charge_curve = battery_config.charge_efficiency_curve
+    cost_discharge_curve = battery_config.discharge_efficiency_curve
+    _chg_eff_seed = _representative_efficiency(
+        charge_curve, battery_config.max_charge_power_kw
+    )
+    _dis_eff_seed = _representative_efficiency(
+        discharge_curve, battery_config.max_discharge_power_kw
     )
     n_soc_states = len(soc_states)
 
@@ -527,6 +750,21 @@ def forward_pass(
         float(-i * power_step_w) for i in range(discharge_steps, 0, -1)
     ]
     actions = discharge_actions + charge_actions
+
+    # Pre-compute per-action efficiencies once (mirrors optimizer.py).
+    trans_charge_eff = {
+        a: _interpolate_efficiency(charge_curve, abs(a) / 1000.0) for a in actions
+    }
+    trans_discharge_eff = {
+        a: _interpolate_efficiency(discharge_curve, abs(a) / 1000.0) for a in actions
+    }
+    cost_charge_eff = {
+        a: _interpolate_efficiency(cost_charge_curve, abs(a) / 1000.0) for a in actions
+    }
+    cost_discharge_eff = {
+        a: _interpolate_efficiency(cost_discharge_curve, abs(a) / 1000.0)
+        for a in actions
+    }
 
     INF = float("inf")
     current_soc = current_soc_kwh * 1000.0  # continuous, not snapped
@@ -557,15 +795,19 @@ def forward_pass(
             if action_w > 0:
                 if action_w > max_chg_w:
                     continue
-                new_soc_wh = current_soc + action_w * time_step_hours * charge_eff
+                _chg_eff = trans_charge_eff[action_w]
+                new_soc_wh = current_soc + action_w * time_step_hours * _chg_eff
                 if new_soc_wh > max_soc_wh:
                     continue
+                if battery_config.pv_dc_coupled and pv_dc_w > 0:
+                    dc_eff = battery_config.pv_dc_efficiency
+                    headroom_wh = max(0.0, float(max_soc_wh) - new_soc_wh)
+                    new_soc_wh += min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
             elif action_w < 0:
                 if -action_w > max_dis_w:
                     continue
-                new_soc_wh = (
-                    current_soc - abs(action_w) * time_step_hours / discharge_eff
-                )
+                _dis_eff = trans_discharge_eff[action_w]
+                new_soc_wh = current_soc - abs(action_w) * time_step_hours / _dis_eff
                 if new_soc_wh < min_soc_wh:
                     continue
             else:
@@ -589,10 +831,13 @@ def forward_pass(
                 feed_in_price=feed_in_price,
                 pv_production_w=pv_w,
                 consumption_w=consumption_w,
-                rte=battery_config.round_trip_efficiency,
+                charge_curve=cost_charge_curve,
+                discharge_curve=cost_discharge_curve,
                 degradation_cost_per_kwh=degradation_cost_per_kwh,
                 battery_config=battery_config,
                 pv_dc_production_w=pv_dc_w,
+                charge_eff=cost_charge_eff[action_w],
+                discharge_eff=cost_discharge_eff[action_w],
             )
             total_cost = step_cost + V[t + 1][new_soc_idx]
             if total_cost < best_cost:
@@ -602,7 +847,12 @@ def forward_pass(
 
         # Boundary actions: exact power to drain to min or fill to max SoC
         if current_soc > min_soc_wh:
-            drain_w = (current_soc - min_soc_wh) * discharge_eff / time_step_hours
+            drain_w = _solve_drain_w(
+                current_soc - min_soc_wh,
+                time_step_hours,
+                discharge_curve,
+                _dis_eff_seed,
+            )
             if 0 < drain_w <= max_dis_w:
                 step_cost = calculate_step_cost(
                     time_step_hours=time_step_hours,
@@ -612,7 +862,8 @@ def forward_pass(
                     feed_in_price=feed_in_price,
                     pv_production_w=pv_w,
                     consumption_w=consumption_w,
-                    rte=battery_config.round_trip_efficiency,
+                    charge_curve=cost_charge_curve,
+                    discharge_curve=cost_discharge_curve,
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
@@ -624,7 +875,9 @@ def forward_pass(
                     best_new_soc = float(min_soc_wh)
 
         if current_soc < max_soc_wh:
-            fill_w = (max_soc_wh - current_soc) / (time_step_hours * charge_eff)
+            fill_w = _solve_fill_w(
+                max_soc_wh - current_soc, time_step_hours, charge_curve, _chg_eff_seed
+            )
             if 0 < fill_w <= max_chg_w:
                 step_cost = calculate_step_cost(
                     time_step_hours=time_step_hours,
@@ -634,7 +887,8 @@ def forward_pass(
                     feed_in_price=feed_in_price,
                     pv_production_w=pv_w,
                     consumption_w=consumption_w,
-                    rte=battery_config.round_trip_efficiency,
+                    charge_curve=cost_charge_curve,
+                    discharge_curve=cost_discharge_curve,
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
@@ -962,10 +1216,10 @@ def print_whatif(
 
     print()
     print(
-        "  The actual terminal price comes from the shadow price (λ) of the previous run"
+        "  The actual terminal price comes from the feed-in forecast, not the previous"
     )
     print(
-        "  when available, otherwise from min(feed_in_forecast[-1], 6-step tail average)"
+        "  run's shadow price: max(0, min(feed_in_forecast[-1], clipped 6h tail average))"
     )
     print(f"  = {terminal_price:.4f} €/kWh")
     print(
@@ -1105,11 +1359,9 @@ def main():
         pv_forecast = [0.0] * n_steps
         pv_dc_forecast = [0.0] * n_steps
 
-    charge_eff_override = get_charge_eff_override(
-        battery.round_trip_efficiency, charge_eff_correction
-    )
-    discharge_eff_override = get_discharge_eff_override(
-        battery.round_trip_efficiency, discharge_eff_correction
+    charge_eff_curve_override = get_charge_eff_override(battery, charge_eff_correction)
+    discharge_eff_curve_override = get_discharge_eff_override(
+        battery, discharge_eff_correction
     )
 
     print(f"\nLoaded {path}" + (" [PV CURTAILED]" if args.pv_curtailed else ""))
@@ -1119,9 +1371,8 @@ def main():
         f"min_spread={min_price_spread:.3f} €/kWh"
     )
     if terminal_shadow_price is not None:
-        print(
-            f"  terminal_shadow_price (from previous run): {terminal_shadow_price:.4f} €/kWh"
-        )
+        # Informational only: the DP terminal condition uses the feed-in tail.
+        print(f"  shadow price (from diagnostics): {terminal_shadow_price:.4f} €/kWh")
 
     # Show charge/discharge efficiency calibration state if present in diagnostics
     opt_top = diag.get("data", diag).get("optimization", {})
@@ -1180,9 +1431,8 @@ def main():
         degradation_cost_per_kwh=degradation_cost,
         min_price_spread=min_price_spread,
         pv_dc_forecast=pv_dc_forecast,
-        terminal_shadow_price=terminal_shadow_price,
-        charge_eff_override=charge_eff_override,
-        discharge_eff_override=discharge_eff_override,
+        charge_eff_curve_override=charge_eff_curve_override,
+        discharge_eff_curve_override=discharge_eff_curve_override,
     )
 
     print(
@@ -1209,8 +1459,8 @@ def main():
         consumption_forecast=consumption_forecast,
         degradation_cost_per_kwh=degradation_cost,
         power_step_w=power_step_w,
-        charge_eff_override=charge_eff_override,
-        discharge_eff_override=discharge_eff_override,
+        charge_eff_curve_override=charge_eff_curve_override,
+        discharge_eff_curve_override=discharge_eff_curve_override,
     )
 
     # Recorded schedule from diagnostics

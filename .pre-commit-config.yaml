@@ -4,7 +4,10 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      # mkdocs.yml uses !!python/name: tags for the Material mermaid fence,
+      # which safe_load rejects. MkDocs loads it with its own loader.
       - id: check-yaml
+        exclude: ^mkdocs\.yml$
       - id: check-json
       - id: check-merge-conflict
       - id: check-added-large-files
@@ -12,8 +15,11 @@ repos:
       - id: debug-statements
       - id: detect-private-key
 
+  # v3.20.0 crashes on Python 3.14: it calls tokenize.cookie_re, which CPython
+  # 3.14 turned into a bytes pattern, giving "cannot use a bytes pattern on a
+  # string-like object". v3.21.2 carries its own string-based _cookie_re.
   - repo: https://github.com/asottile/pyupgrade
-    rev: v3.20.0
+    rev: v3.21.2
     hooks:
       - id: pyupgrade
         args: [--py313-plus]
@@ -23,7 +29,7 @@ repos:
     hooks:
       - id: codespell
         args:
-          - --ignore-words-list=hass,alot,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,marge,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing,thirdparty
+          - --ignore-words-list=hass,alot,als,datas,dof,dur,farenheit,hist,iff,ines,ist,lightsensor,marge,mut,nd,pres,referer,ser,serie,te,technik,ue,uint,visability,wan,wanna,withing,thirdparty
           - --skip="./.*,*.csv,*.json,*.ambr"
           - --quiet-level=2
         exclude_types: [csv, json]
@@ -39,7 +45,17 @@ repos:
     rev: v1.15.0
     hooks:
       - id: mypy
+        # Pin the interpreter: without this, pre-commit builds the hook env
+        # with whatever Python it happens to run under, and pip then silently
+        # resolves homeassistant-stubs down to the newest release that old
+        # interpreter allows. On 3.11 that is 2024.3.3, which predates
+        # ConfigEntry.runtime_data and subentries and reports ~70 false
+        # positives; on 3.13 it is 2026.2.x. Home Assistant 2026.3 onwards
+        # requires Python 3.14.2, so 3.14 is what types against current Core.
+        language_version: python3.14
         args: [--ignore-missing-imports]
         additional_dependencies:
-          - homeassistant-stubs
+          # Floor, so an environment that cannot satisfy it fails loudly
+          # instead of quietly type-checking against two-year-old stubs.
+          - homeassistant-stubs>=2025.1.0
         files: ^custom_components/battery_controller/
