@@ -83,10 +83,54 @@ jobs:
         run: |
           HA_VERSION=$(pip show homeassistant | awk '/^Version:/ {print $2}')
           echo "Python ${{ matrix.python-version }} resolved Home Assistant $HA_VERSION"
-          echo "- Python \`${{ matrix.python-version }}\` → Home Assistant \`$HA_VERSION\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Environment"
+            echo ""
+            echo "Python \`${{ matrix.python-version }}\` → Home Assistant \`$HA_VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run pytest
         run: pytest --cov=custom_components --cov-report=xml -q
+
+      # setup.cfg gates the build at 90%, but the number itself appeared
+      # nowhere on the pull request — so a run could sit just above the floor,
+      # or drift down towards it, with nothing to notice. always() matters
+      # here: the figure is most interesting on the run that just failed the
+      # gate.
+      - name: Summarise coverage
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          print("### Coverage\n")
+
+          report = Path("coverage.xml")
+          if not report.is_file():
+              print("No `coverage.xml` was produced — pytest did not get that far.")
+              raise SystemExit
+
+          root = ET.parse(report).getroot()
+          total = float(root.get("line-rate", 0)) * 100
+          floor = 90.0
+          mark = "✅" if total >= floor else "❌"
+          print(f"{mark} **{total:.1f}%** overall (floor {floor:.0f}%)\n")
+
+          files = sorted(
+              (
+                  (float(c.get("line-rate", 0)) * 100, c.get("filename", "?"))
+                  for c in root.iter("class")
+              ),
+          )
+          weakest = [f for f in files if f[0] < 95.0][:5]
+          if weakest:
+              print("Least covered files:\n")
+              print("| File | Coverage |")
+              print("| --- | ---: |")
+              for rate, name in weakest:
+                  print(f"| `{name}` | {rate:.1f}% |")
+          PY
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7
@@ -127,7 +171,27 @@ jobs:
       # this hot numeric loop, so a benchmark inside it would measure jest
       # rather than the DP.
       - name: Check DP runtime
-        run: npm run test:perf
+        run: |
+          # pipefail so the guard's exit code survives the tee; bash -e alone
+          # would report the exit status of tee instead.
+          set -o pipefail
+          npm run test:perf | tee perf-output.txt
+
+      # The benchmark prints its median on every run, but inside a job log that
+      # only gets read when something already failed. Surfacing it here makes a
+      # drift towards the ceiling visible while the check is still passing.
+      - name: Summarise DP runtime
+        if: always()
+        run: |
+          {
+            echo "### Analyzer DP runtime"
+            echo ""
+            if grep -q '^DP runtime:' perf-output.txt 2>/dev/null; then
+              sed -n 's/^DP runtime: //p' perf-output.txt
+            else
+              echo "The benchmark produced no timing — it failed before measuring."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   hassfest:
     name: Home Assistant hassfest
