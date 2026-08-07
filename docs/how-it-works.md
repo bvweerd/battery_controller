@@ -175,3 +175,9 @@ the more stable the resulting schedule.
 - **Consumption pattern learning** — the consumption model needs several weeks of kWh
   sensor history for accurate patterns. Forecasts are less accurate during the initial
   period.
+- **Sub-step resolution** — the cost function prices the *net* grid exchange over a whole
+  time step. Variation inside a step averages out, so when the meter flows both ways
+  within one step, the difference between the buying and selling price on the smaller of
+  the two directions is not seen. This needs the planned flow to sit near zero, which
+  makes it mainly a [Follow Schedule](control-modes.md#follow-schedule) concern — Hybrid
+  hands those periods to zero-grid.

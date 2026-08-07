@@ -64,6 +64,26 @@ SoC can shift how much capacity gets allocated to the current window versus a la
 This is expected rolling-horizon DP behaviour. See
 [the learning period](how-it-works.md#learning-period-give-the-optimizer-time-to-calibrate).
 
+### Why does it not re-optimize every few seconds?
+
+Two reasons, and the first is the surprising one.
+
+Within a price period the prices and the forecasts do not change. The only thing that could
+flip a decision between two ticks is the shadow price moving as the battery fills or
+empties — and it barely moves. The value function is piecewise linear in SoC, so the
+[shadow price](glossary.md) is piecewise *constant*, flat over most of the range.
+Re-evaluating it every five seconds returns the answer it returned fifteen minutes ago.
+
+The second is cost. A full solve takes roughly twenty seconds on a fast machine and runs
+four times an hour. Running it every five seconds is about a hundred and eighty times the
+processing, and not even possible, since a single solve outlasts the interval. Shortening
+the horizon scales down proportionally, but a one-hour horizon still costs several times
+the entire current optimizer — and it cannot see tomorrow evening, so its shadow price
+would be a worse signal than the one already published.
+
+Real-time correction is handled by the zero-grid controller instead, which runs every few
+seconds and needs no optimization at all.
+
 ### The optimizer stopped charging during what looked like the most profitable window
 
 Usually one of three things:
