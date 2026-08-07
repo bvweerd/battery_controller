@@ -251,6 +251,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # mode every realtime-update tick.
         self._last_hybrid_idle_decision: str = ACTION_IDLE
 
+        # Hysteresis state for the realtime idle→zero_grid upgrade in
+        # _resolve_controller_mode. The 15-min run damps its own idle/zero_grid
+        # decision (see _last_hybrid_idle_decision), but the realtime loop
+        # re-derives the controller mode from the live grid reading on every
+        # tick, so it needs its own band and memory or a surplus appearing
+        # mid-period flips idle/zero_grid until the next run.
+        self._last_idle_upgrade_decision: str = ACTION_IDLE
+
         # Hysteresis state for the hybrid charging branch: tracks whether we were
         # following the DP schedule ("charging") or capturing PV surplus only
         # ("zero_grid") so surplus hovering near the coverage threshold doesn't
@@ -879,17 +887,43 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         return should_capture
 
+    def _hybrid_deadband_w(self) -> float:
+        """Return the hysteresis band for the hybrid mode transitions, in W.
+
+        Reuses the user-tunable zero-grid deadband: the idle/zero_grid and
+        charging/zero_grid transitions address the same real-time sensor-noise
+        problem the deadband already exists to solve. Read from the live entry
+        options so the number entity takes effect without a reload.
+        """
+        entry_id = self.config.get("entry_id", "")
+        live_entry = self.hass.config_entries.async_get_entry(entry_id)
+        live_options = live_entry.options if live_entry is not None else {}
+        return float(
+            live_options.get(
+                CONF_ZERO_GRID_DEADBAND_W,
+                self.config.get(
+                    CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
+                ),
+            )
+        )
+
     def _resolve_controller_mode(
         self, effective_mode: str, current_grid_w: float
     ) -> str:
         """Map effective mode to zero_grid_controller mode.
 
-        For idle mode with PV surplus (grid < 0), upgrades to zero_grid
-        when real-time power sensors are available. Uses a 50 W hysteresis:
-        enter zero_grid when grid < 0, stay in zero_grid until grid >= 50 W.
-        This prevents oscillation when the battery successfully absorbs PV and
-        grid reads near 0 W (which would otherwise flip back to idle mode,
-        stopping the charge, causing the grid to go negative again).
+        For idle mode with PV surplus, upgrades to zero_grid when real-time
+        power sensors are available. The decision is damped with a band of
+        ±zero_grid_deadband_w (the user-tunable number entity, default 50 W)
+        around the 0 W crossing, remembered across calls: enter zero_grid only
+        once the grid exports more than the band, then stay there until it
+        climbs solidly positive.
+
+        Without that band the battery absorbing PV drives the grid to ~0 W,
+        which reads as "no surplus", which stops the charge, which sends the
+        grid negative again — an oscillation at tick rate. The setpoint
+        deadband does not damp it, because the swing between the zero_grid
+        setpoint and idle's 0 W is far larger than the deadband.
 
         In hybrid+ mode the upgrade is suppressed while surplus capture is
         blocked (exporting is worth more than storing per the shadow price),
@@ -909,23 +943,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if effective_mode == "zero_grid":
             return "zero_grid"
         # Upgrade idle → zero_grid only in zero_grid/hybrid/hybrid+ modes (not
-        # follow_schedule or manual, where idle must mean truly stop). Only when
-        # grid is actually exporting (negative), i.e. real PV surplus — not just
-        # near-zero import noise. Hybrid+ additionally requires that surplus
-        # capture is economical per the last optimizer run.
-        if (
-            effective_mode == ACTION_IDLE
-            and self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
-            and not (
-                self._control_mode == MODE_HYBRID_PLUS
-                and self._hybrid_plus_capture_blocked
-            )
-            and current_grid_w < 0
-            and has_power_sensors
-        ):
-            return "zero_grid"
+        # follow_schedule or manual, where idle must mean truly stop). Hybrid+
+        # additionally requires that surplus capture is economical per the last
+        # optimizer run.
         if effective_mode == ACTION_IDLE:
-            return ACTION_IDLE
+            upgrade_allowed = (
+                self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
+                and not (
+                    self._control_mode == MODE_HYBRID_PLUS
+                    and self._hybrid_plus_capture_blocked
+                )
+                and has_power_sensors
+            )
+            if not upgrade_allowed:
+                # Reset the memory so a later upgrade starts from the strict
+                # entry threshold rather than the sticky one.
+                self._last_idle_upgrade_decision = ACTION_IDLE
+                return ACTION_IDLE
+            band = self._hybrid_deadband_w()
+            if self._last_idle_upgrade_decision == "zero_grid":
+                # Was capturing surplus; keep doing so until the grid climbs
+                # solidly positive (the surplus has genuinely disappeared).
+                has_pv_surplus = current_grid_w < band
+            else:
+                # Was idle; only start capturing once the surplus is solid, so
+                # near-zero import noise does not trigger it.
+                has_pv_surplus = current_grid_w < -band
+            self._last_idle_upgrade_decision = (
+                "zero_grid" if has_pv_surplus else ACTION_IDLE
+            )
+            return "zero_grid" if has_pv_surplus else ACTION_IDLE
         if effective_mode == "manual":
             return "manual"
         if effective_mode in (ACTION_CHARGING, ACTION_DISCHARGING):
@@ -1975,18 +2022,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self.config.get(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD),
             )
         )
-        # Reuse the user-tunable zero-grid deadband as the hysteresis band for
-        # the hybrid-mode idle/zero_grid and charging/zero_grid transitions
-        # below: both address the same real-time sensor-noise problem the
-        # deadband already exists to solve.
-        hybrid_deadband_w = float(
-            live_options.get(
-                CONF_ZERO_GRID_DEADBAND_W,
-                self.config.get(
-                    CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
-                ),
-            )
-        )
+        hybrid_deadband_w = self._hybrid_deadband_w()
 
         # Synthesise start_times for fallback paths that have no real timestamps
         now_utc = dt_util.utcnow()
