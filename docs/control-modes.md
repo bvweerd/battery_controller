@@ -55,6 +55,26 @@ This is the mode that produces the lowest cost *if your forecasts are correct*. 
 real-time correction, so a consumption spike the forecast did not anticipate is simply
 imported from the grid.
 
+!!! warning "No real-time correction once import and export are priced separately"
+    Follow Schedule executes the planned **battery power**. The optimizer's cost model
+    prices the **grid exchange** that this power was expected to produce — so when the
+    forecast is wrong, the realised cost is not the planned one.
+
+    This is harmless while import and export net out. Once they are priced separately, it
+    costs money whenever the net flow *changes sign within a settlement interval*: a
+    passing cloud makes you export a few minutes of surplus at the feed-in price and
+    import it back minutes later at the full retail price. Both registers count it; the
+    spread on that energy is lost. Steady periods, and periods with a firmly
+    one-directional plan, are unaffected.
+
+    Exposure is largest when the planned grid flow is near zero — a planned `idle` with
+    PV roughly matching consumption, or a discharge sized to cover the house.
+    [Hybrid](#hybrid-recommended) and [Hybrid+](#hybrid) avoid this: they hand those
+    periods to zero-grid, which regulates the meter to ~0 continuously.
+
+    Choose Follow Schedule when you want a predictable setpoint — for instance when your
+    own automations build on it. Choose Hybrid when you want the cheapest realised bill.
+
 ## Hybrid (recommended)
 
 DP schedule for arbitrage, zero-grid for self-consumption.
