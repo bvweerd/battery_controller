@@ -60,12 +60,20 @@ imported from the grid.
     prices the **grid exchange** that this power was expected to produce — so when the
     forecast is wrong, the realised cost is not the planned one.
 
-    This is harmless while import and export net out. Once they are priced separately, it
-    costs money whenever the net flow *changes sign within a settlement interval*: a
-    passing cloud makes you export a few minutes of surplus at the feed-in price and
-    import it back minutes later at the full retail price. Both registers count it; the
-    spread on that energy is lost. Steady periods, and periods with a firmly
-    one-directional plan, are unaffected.
+    The meter has separate registers for import and export, and they simply accumulate:
+    nothing is ever netted between them. While a netting arrangement applies at billing
+    time this does not matter, but once each direction is billed at its own price, every
+    exported Wh that you later import back costs you the spread.
+
+    The optimizer handles that trade-off *between* time steps — storing surplus versus
+    exporting it is its core decision. What it cannot see is variation *within* one step:
+    `calculate_step_cost` prices the net exchange over the whole step, so a sub-step swing
+    that changes direction is invisible to it. A passing cloud exports a few minutes of
+    surplus at the feed-in price and imports it back minutes later at the full retail
+    price; the step's net looks unchanged. The window here is the optimizer's own time
+    step — the resolution of your price sensor, 15 or 60 minutes — not any billing
+    interval. Steady periods, and periods with a firmly one-directional plan, are
+    unaffected.
 
     Exposure is largest when the planned grid flow is near zero — a planned `idle` with
     PV roughly matching consumption, or a discharge sized to cover the house.
