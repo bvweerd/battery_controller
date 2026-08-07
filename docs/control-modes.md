@@ -55,6 +55,34 @@ This is the mode that produces the lowest cost *if your forecasts are correct*. 
 real-time correction, so a consumption spike the forecast did not anticipate is simply
 imported from the grid.
 
+!!! warning "No real-time correction once import and export are priced separately"
+    Follow Schedule executes the planned **battery power**. The optimizer's cost model
+    prices the **grid exchange** that this power was expected to produce — so when the
+    forecast is wrong, the realised cost is not the planned one.
+
+    The meter has separate registers for import and export, and they simply accumulate:
+    nothing is ever netted between them. While a netting arrangement applies at billing
+    time this does not matter, but once each direction is billed at its own price, every
+    exported Wh that you later import back costs you the spread.
+
+    The optimizer handles that trade-off *between* time steps — storing surplus versus
+    exporting it is its core decision. What it cannot see is variation *within* one step:
+    `calculate_step_cost` prices the net exchange over the whole step, so a sub-step swing
+    that changes direction is invisible to it. A passing cloud exports a few minutes of
+    surplus at the feed-in price and imports it back minutes later at the full retail
+    price; the step's net looks unchanged. The window here is the optimizer's own time
+    step — the resolution of your price sensor, 15 or 60 minutes — not any billing
+    interval. Steady periods, and periods with a firmly one-directional plan, are
+    unaffected.
+
+    Exposure is largest when the planned grid flow is near zero — a planned `idle` with
+    PV roughly matching consumption, or a discharge sized to cover the house.
+    [Hybrid](#hybrid-recommended) and [Hybrid+](#hybrid) avoid this: they hand those
+    periods to zero-grid, which regulates the meter to ~0 continuously.
+
+    Choose Follow Schedule when you want a predictable setpoint — for instance when your
+    own automations build on it. Choose Hybrid when you want the cheapest realised bill.
+
 ## Hybrid (recommended)
 
 DP schedule for arbitrage, zero-grid for self-consumption.

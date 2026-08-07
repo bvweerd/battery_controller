@@ -1003,15 +1003,16 @@ def test_resolve_controller_mode(hass):
     # zero_grid effective mode → "zero_grid"
     assert coord._resolve_controller_mode("zero_grid", 100.0) == "zero_grid"
 
-    # idle in non-follow/non-manual mode with negative grid → upgrade to zero_grid
+    # idle in non-follow/non-manual mode with a solid export surplus (beyond the
+    # deadband band) → upgrade to zero_grid
     coord._control_mode = MODE_ZERO_GRID
-    assert coord._resolve_controller_mode("idle", -50.0) == "zero_grid"
+    assert coord._resolve_controller_mode("idle", -200.0) == "zero_grid"
 
     # idle in follow_schedule mode → stays idle
     from custom_components.battery_controller.const import MODE_FOLLOW_SCHEDULE
 
     coord._control_mode = MODE_FOLLOW_SCHEDULE
-    assert coord._resolve_controller_mode("idle", -50.0) == "idle"
+    assert coord._resolve_controller_mode("idle", -200.0) == "idle"
 
     # manual mode
     assert coord._resolve_controller_mode("manual", 0.0) == "manual"
@@ -1021,6 +1022,64 @@ def test_resolve_controller_mode(hass):
 
     # discharging
     assert coord._resolve_controller_mode("discharging", 0.0) == "follow_schedule"
+
+
+def test_resolve_controller_mode_idle_upgrade_hysteresis(hass):
+    """The realtime idle→zero_grid upgrade is damped by the deadband band.
+
+    Regression: the 15-min run damps its own idle/zero_grid decision, but the
+    realtime loop re-derives the controller mode from the live grid reading on
+    every tick. With a bare `current_grid_w < 0` test, a surplus appearing
+    mid-period made the battery absorb it, which drove the grid to ~0 W, which
+    read as "no surplus", which stopped the charge — flipping every tick until
+    the next optimizer run.
+    """
+    from custom_components.battery_controller.const import MODE_HYBRID
+
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    coord._power_consumption_sensors = ["sensor.c"]
+    band = coord._hybrid_deadband_w()
+
+    # Near-zero import noise must not trigger the upgrade.
+    assert coord._resolve_controller_mode("idle", -band / 2) == "idle"
+
+    # A solid surplus does.
+    assert coord._resolve_controller_mode("idle", -band * 4) == "zero_grid"
+
+    # Now the battery absorbs it and the grid settles near zero. The mode must
+    # hold rather than flipping back — this is the oscillation being damped.
+    for grid_w in (-band / 2, 0.0, band / 2):
+        assert coord._resolve_controller_mode("idle", grid_w) == "zero_grid"
+
+    # Only once the grid climbs solidly positive has the surplus really gone.
+    assert coord._resolve_controller_mode("idle", band * 4) == "idle"
+
+    # And re-entry needs a solid surplus again, not just a dip below zero.
+    assert coord._resolve_controller_mode("idle", -band / 2) == "idle"
+
+
+def test_resolve_controller_mode_idle_upgrade_resets_when_blocked(hass):
+    """A blocked upgrade resets the memory to the strict entry threshold."""
+    from custom_components.battery_controller.const import (
+        MODE_FOLLOW_SCHEDULE,
+        MODE_HYBRID,
+    )
+
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    coord._power_consumption_sensors = ["sensor.c"]
+    band = coord._hybrid_deadband_w()
+
+    assert coord._resolve_controller_mode("idle", -band * 4) == "zero_grid"
+
+    # Switching to follow_schedule blocks the upgrade and clears the memory.
+    coord._control_mode = MODE_FOLLOW_SCHEDULE
+    assert coord._resolve_controller_mode("idle", -band * 4) == "idle"
+
+    # Back in hybrid, a grid inside the band must not resume zero_grid.
+    coord._control_mode = MODE_HYBRID
+    assert coord._resolve_controller_mode("idle", -band / 2) == "idle"
 
 
 def test_split_setpoint_no_batteries(hass):

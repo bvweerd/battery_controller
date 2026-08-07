@@ -583,8 +583,10 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
     stored in the battery right now, derived from the DP value function.
 
     Use as a decision threshold:
-    - Charge when buy_price < shadow_price / sqrt(RTE)
-    - Export/discharge when feed_in_price > shadow_price * sqrt(RTE)
+    - Charge when buy_price < shadow_price * sqrt(RTE): buying 1 kWh AC stores
+      only sqrt(RTE) kWh, each worth the shadow price.
+    - Export/discharge when feed_in_price > shadow_price / sqrt(RTE): taking
+      1 kWh out of the battery yields only sqrt(RTE) kWh at the meter.
     """
 
     _attr_translation_key = "shadow_price"
@@ -615,12 +617,15 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
         sqrt_rte_val = rte**0.5
         return {
             "shadow_price_eur_kwh": shadow_price,
-            # Minimum sell price at which discharging/exporting captures full value
-            "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte_val, 4),
-            # Maximum buy price at which charging is still economically justified
-            "charge_threshold_eur_kwh": (
+            # Minimum sell price at which discharging/exporting captures full value:
+            # 1 kWh drawn from the battery reaches the meter as sqrt(RTE) kWh, so
+            # the sell price must exceed lambda / sqrt(RTE) to beat holding it.
+            "discharge_threshold_eur_kwh": (
                 round(shadow_price / sqrt_rte_val, 4) if sqrt_rte_val > 0 else None
             ),
+            # Maximum buy price at which charging is still economically justified:
+            # 1 kWh bought stores only sqrt(RTE) kWh, worth lambda * sqrt(RTE).
+            "charge_threshold_eur_kwh": round(shadow_price * sqrt_rte_val, 4),
         }
 
 
