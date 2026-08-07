@@ -178,10 +178,12 @@ async def async_get_config_entry_diagnostics(
             "shadow_price_eur_kwh": data.get("shadow_price_eur_kwh"),
             "raw_total_cost": data.get("raw_total_cost"),
             "raw_savings": data.get("raw_savings"),
-            "discharge_threshold_eur_kwh": round(shadow_price * sqrt_rte, 4),
-            "charge_threshold_eur_kwh": round(
+            # Sell above lambda / sqrt(RTE), buy below lambda * sqrt(RTE): both
+            # conversions lose sqrt(RTE), so the sell threshold is the higher one.
+            "discharge_threshold_eur_kwh": round(
                 shadow_price / sqrt_rte if sqrt_rte > 0 else 0.0, 4
             ),
+            "charge_threshold_eur_kwh": round(shadow_price * sqrt_rte, 4),
             "commitment_state": {
                 "action": getattr(optimization_coord, "_committed_action", None),
                 "power_kw": getattr(optimization_coord, "_committed_power", None),

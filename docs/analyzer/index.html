@@ -828,8 +828,8 @@ function renderDiagnostics(raw) {
     kv('Time step', (sched.price_interval || opts.time_step_minutes) ? `${sched.price_interval || opts.time_step_minutes} min` : '—') +
     kv('Current price', opt.current_price !== undefined ? `€ ${opt.current_price.toFixed(4)}/kWh` : '—') +
     kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
-    kv('Discharge threshold (λ·√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
-    kv('Charge threshold (λ/√RTE)', chgThr !== undefined ? `€ ${chgThr.toFixed(4)}/kWh` : '—') +
+    kv('Discharge threshold (λ/√RTE)', discThr !== undefined ? `€ ${discThr.toFixed(4)}/kWh` : '—') +
+    kv('Charge threshold (λ·√RTE)', chgThr !== undefined ? `€ ${chgThr.toFixed(4)}/kWh` : '—') +
     kv('Optimizer action', opt.optimal_mode ? `${opt.optimal_mode} @ ${opt.optimal_power_kw?.toFixed(3)} kW` : '—') +
     kv('Published setpoint', publishedSetpointKw !== null && !Number.isNaN(publishedSetpointKw) ? `${publishedSetpointKw.toFixed(3)} kW` : '—');
 

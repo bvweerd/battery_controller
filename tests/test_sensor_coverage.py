@@ -469,8 +469,13 @@ class TestBatteryShadowPriceSensor:
         coord.battery_config.round_trip_efficiency = 0.81  # sqrt = 0.9
         sensor = BatteryShadowPriceSensor(coord, _make_device(), _make_entry())
         attrs = sensor.extra_state_attributes
-        assert "discharge_threshold_eur_kwh" in attrs
-        assert "charge_threshold_eur_kwh" in attrs
+        # Both conversions lose sqrt(RTE): buy below lambda * sqrt(RTE), sell
+        # above lambda / sqrt(RTE). The sell threshold is therefore the higher one.
+        assert attrs["charge_threshold_eur_kwh"] == pytest.approx(0.20 * 0.9)
+        assert attrs["discharge_threshold_eur_kwh"] == pytest.approx(
+            0.20 / 0.9, abs=1e-4
+        )
+        assert attrs["charge_threshold_eur_kwh"] < attrs["discharge_threshold_eur_kwh"]
 
 
 # ---------------------------------------------------------------------------
