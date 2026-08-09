@@ -121,12 +121,14 @@ so a correctly configured sensor that already has history populates the pattern 
 very first refresh — you do not have to wait for the integration itself to accumulate
 data.
 
-!!! warning "PV double counting"
-    Only configure *Electricity production sensors* if your consumption sensor measures
-    **net grid import** (i.e. it goes down when PV produces). If it already measures
-    gross household load — as with a sensor between the inverter and the house — leave
-    the production field empty. Filling both fields activates a correction that adds PV
-    production back on top, which would inflate the learned pattern.
+!!! warning "Fill in every term, or none"
+    Household load is derived as `import − export + PV + discharge − charge`, so a
+    missing term skews the pattern in a specific direction: without *Grid export
+    sensors* the PV you exported counts as consumption, without the battery counters
+    grid charging does. Each missing term logs its own warning.
+
+    If you have a meter between the inverter and the house, use *Household load sensors*
+    instead — that is measured directly and skips the derivation entirely.
 
 ---
 

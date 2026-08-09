@@ -28,9 +28,10 @@ automation.
 | Feed-in price sensor | Separate feed-in/export price sensor. When absent, **Fixed feed-in price** is used. |
 | Power consumption sensors | Real-time grid **import** power sensors (W), for zero-grid control |
 | Power production sensors | Real-time grid **export** power sensors (W), for zero-grid control |
-| Energy consumption sensors | Cumulative kWh sensors of **gross household load**, for consumption pattern learning |
-| Energy production sensors | Cumulative kWh sensors, for production pattern learning |
-| PV production sensors | Cumulative kWh sensors from PV inverters, used to reconstruct gross consumption |
+| Grid import sensors | Cumulative kWh drawn from the grid |
+| Grid export sensors | Cumulative kWh fed back to the grid |
+| PV production sensors | Cumulative kWh from PV inverters |
+| Household load sensors | Cumulative kWh of gross household load — optional override, see below |
 
 ### Where each sensor sits
 
@@ -40,8 +41,8 @@ flowchart LR
     PV(["PV panels"]) --> INV
     INV["Hybrid inverter<br/>+ battery"] ---|"A"| HOUSE(["House loads"])
 
-    B_LBL["<b>B — grid meter</b><br/>Power consumption sensors (W)<br/>Power production sensors (W)"]
-    A_LBL["<b>A — gross household load</b><br/>Energy consumption sensors (kWh)"]
+    B_LBL["<b>B — grid meter</b><br/>Grid import / export sensors (kWh)<br/>Power consumption / production sensors (W)"]
+    A_LBL["<b>A — gross household load</b><br/>Household load sensors (kWh)<br/><i>optional override</i>"]
 
     B_LBL -.-> GRID
     A_LBL -.-> HOUSE
@@ -51,45 +52,51 @@ flowchart LR
 ```
 
 If the house draws 3 kW while the battery charges at 4 kW, then **A** reads 3 kW and
-**B** reads 7 kW. The kWh field wants **A**; the W fields want **B**.
+**B** reads 7 kW. Most people only have **B**, which is why household load is derived
+rather than asked for.
 
-!!! danger "The two consumption fields take *different* sensors"
-    This is the single most common configuration mistake, and it is easy to make because
-    the field names look similar.
+!!! info "Household load is derived, not configured"
+    The pattern learner needs **gross household load** — everything the house draws, no
+    matter whether it came from the grid, PV or the battery. You do not configure that
+    figure. You configure the physical meters, and it is derived:
 
-    **Energy consumption sensors (kWh)** must be **gross household load** — everything
-    the house draws, no matter whether it came from the grid, PV or the battery. A sensor
-    between the inverter and the house is the right pick. The optimizer subtracts the PV
-    forecast from this value separately (`net_load = consumption − PV`), so feeding it
-    grid import instead subtracts PV **twice**.
+    ```
+    gross = import − export + PV + discharge − charge
+    ```
 
+    | Field | Sensor |
+    |-------|--------|
+    | Grid import sensors (kWh) | P1 / DSMR import |
+    | Grid export sensors (kWh) | P1 / DSMR export |
+    | PV production sensors (kWh) | your inverter's total production |
+    | Battery charged / discharged | on each **battery subentry** |
+
+    Every term matters. Drop export and the PV that went out to the grid is counted as
+    consumption the house never drew — on a sunny hour with 4 kWh of PV and a house
+    drawing 1 kWh, that reports 4 kWh instead of 1. Drop the battery counters and every
+    kWh charged from the grid is learned as household load; since the optimizer chooses
+    when to charge, the model would partly be learning its own past decisions. A warning
+    is logged for each missing term.
+
+    Without PV sensors the integration falls back to its own PV forecast history, which
+    is less accurate than a real meter.
+
+!!! tip "If you have a meter between the inverter and the house"
+    Then use **Household load sensors (kWh)** instead and leave the rest of the
+    calculation to it — when set, the derivation above is skipped entirely.
+
+    It is more accurate, because it does not accumulate the error of several meters, and
+    sometimes it is the only workable source: with DC-coupled PV and no DC-side counter,
+    production that went straight from the panels to the house appears in no term of the
+    identity at all, so the derived figure comes out too low.
+
+!!! danger "Do not confuse the kWh fields with the W fields"
     **Power consumption sensors (W)** must be your **grid meter**, positive = import. It
     feeds only the real-time zero-grid controller, which regulates the grid toward zero.
     *Power production sensors* is the export side, and stays empty if you never export.
 
-    A symptom of getting the kWh field wrong: in summer, grid import is genuinely ~0 kW
-    for most of the day, so the learner sees almost nothing and the consumption forecast
-    stays far too low.
-
-!!! warning "Only fill in production sensors when your consumption sensor is net"
-    Combining *Energy production sensors* with *PV production sensors* activates a
-    correction that adds PV back on top of the learned pattern. That is only correct when
-    your consumption sensor measures net grid import. See
-    [PV double counting](installation.md#verifying-your-consumption-sensors).
-
-    On that route, also set *Battery charged sensor* and *Battery discharged sensor* on
-    each battery subentry. The full identity is
-    `gross = import − export + PV + discharge − charge`, and without the battery terms
-    every kWh charged from the grid is learned as household load. Because the optimizer
-    chooses when to charge, the model would partly be learning its own past decisions. A
-    warning is logged when production sensors are configured without them.
-
-    Where one inverter reports a single counter covering several packs, set it on one of
-    them — the totals stay correct, and the same entity selected twice is counted once.
-
-    None of these corrections apply when your consumption sensor already measures gross
-    load — such a sensor sits between the inverter and the house, so battery charging
-    never passes it.
+    These are live power readings for real-time control. The kWh fields above are
+    cumulative counters for pattern learning. They are not interchangeable.
 
 ### Advanced
 
@@ -124,6 +131,8 @@ battery for planning, then splits the resulting setpoint across them.
 | Max SoC (%) | 90.0 | 50–100 | Upper operating limit for optimization |
 | SoC sensor | — | — | State-of-charge sensor (% or kWh) — **required** |
 | Power sensor | — | — | Real-time battery power sensor (W or kW), optional |
+| Battery charged sensor | — | — | Cumulative kWh into this battery, for the household-load derivation |
+| Battery discharged sensor | — | — | Cumulative kWh out of this battery, same purpose |
 | DC PV efficiency | 0.97 | 0.01–1.0 | Efficiency of DC-coupled PV on this inverter's DC bus |
 | High SoC charge threshold (%) | — | 50–100 | Above this SoC, charge power is derated (optional) |
 | High SoC max charge (kW) | — | 0–1000 | Charge power ceiling above the threshold |

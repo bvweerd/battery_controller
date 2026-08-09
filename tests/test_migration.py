@@ -24,6 +24,11 @@ from custom_components.battery_controller.const import (
     CONF_DISCHARGE_EFFICIENCY_CURVE,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
+    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+    CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_GRID_EXPORT_SENSORS,
+    CONF_GRID_IMPORT_SENSORS,
+    CONF_GROSS_LOAD_SENSORS,
     CONF_PRICE_SENSOR,
     CONF_ROUND_TRIP_EFFICIENCY,
     DOMAIN,
@@ -92,7 +97,7 @@ async def test_v4_entry_migrates_through_ha_setup(hass: HomeAssistant) -> None:
     await _setup(hass, entry)
 
     assert entry.state is not ConfigEntryState.MIGRATION_ERROR
-    assert entry.version == 5
+    assert entry.version == 6
     sub = next(iter(entry.subentries.values()))
     assert CONF_ROUND_TRIP_EFFICIENCY not in sub.data
     # sqrt(0.81) = 0.9 per direction
@@ -124,7 +129,7 @@ async def test_v4_migration_preserves_round_trip_efficiency(
 
     await _setup(hass, entry)
 
-    assert entry.version == 5
+    assert entry.version == 6
     sub = next(iter(entry.subentries.values()))
     charge = parse_efficiency_curve(sub.data[CONF_CHARGE_EFFICIENCY_CURVE], 5.0)
     discharge = parse_efficiency_curve(sub.data[CONF_DISCHARGE_EFFICIENCY_CURVE], 5.0)
@@ -152,7 +157,7 @@ async def test_v4_entry_with_curve_keys_is_left_alone(hass: HomeAssistant) -> No
 
     await _setup(hass, entry)
 
-    assert entry.version == 5
+    assert entry.version == 6
     sub = next(iter(entry.subentries.values()))
     assert sub.data[CONF_CHARGE_EFFICIENCY_CURVE] == "0:0.95, 5:0.90"
     assert sub.data[CONF_DISCHARGE_EFFICIENCY_CURVE] == "0.93"
@@ -176,7 +181,7 @@ async def test_v3_entry_battery_moves_to_subentry(hass: HomeAssistant) -> None:
     await _setup(hass, entry)
 
     assert entry.state is not ConfigEntryState.MIGRATION_ERROR
-    assert entry.version == 5
+    assert entry.version == 6
     # Battery keys removed from main data
     assert CONF_CAPACITY_KWH not in entry.data
     assert CONF_ROUND_TRIP_EFFICIENCY not in entry.data
@@ -212,11 +217,77 @@ async def test_migration_is_idempotent(hass: HomeAssistant) -> None:
 
     await _setup(hass, entry)
     first_data = dict(next(iter(entry.subentries.values())).data)
-    assert entry.version == 5
+    assert entry.version == 6
 
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     await _setup(hass, entry)
 
-    assert entry.version == 5
+    assert entry.version == 6
     assert dict(next(iter(entry.subentries.values())).data) == first_data
+
+
+async def test_v5_consumption_field_splits_by_whether_export_was_set(
+    hass: HomeAssistant,
+) -> None:
+    """v5 -> v6: the old consumption field meant grid import when export was set.
+
+    That is the same branch the consumption model itself took, so the split is
+    exact rather than a guess.
+    """
+    entry = _make_entry(
+        hass,
+        version=5,
+        data={
+            CONF_PRICE_SENSOR: "sensor.price",
+            CONF_ELECTRICITY_CONSUMPTION_SENSORS: ["sensor.import"],
+            CONF_ELECTRICITY_PRODUCTION_SENSORS: ["sensor.export"],
+        },
+    )
+
+    await _setup(hass, entry)
+
+    assert entry.state is not ConfigEntryState.MIGRATION_ERROR
+    assert entry.version == 6
+    merged = {**entry.data, **entry.options}
+    assert merged[CONF_GRID_IMPORT_SENSORS] == ["sensor.import"]
+    assert merged[CONF_GRID_EXPORT_SENSORS] == ["sensor.export"]
+    assert CONF_GROSS_LOAD_SENSORS not in merged
+    assert CONF_ELECTRICITY_CONSUMPTION_SENSORS not in merged
+    assert CONF_ELECTRICITY_PRODUCTION_SENSORS not in merged
+
+
+async def test_v5_consumption_without_export_becomes_gross_load(
+    hass: HomeAssistant,
+) -> None:
+    """No export configured meant the field held gross household load."""
+    entry = _make_entry(
+        hass,
+        version=5,
+        data={
+            CONF_PRICE_SENSOR: "sensor.price",
+            CONF_ELECTRICITY_CONSUMPTION_SENSORS: ["sensor.house_load"],
+        },
+    )
+
+    await _setup(hass, entry)
+
+    merged = {**entry.data, **entry.options}
+    assert merged[CONF_GROSS_LOAD_SENSORS] == ["sensor.house_load"]
+    assert CONF_GRID_IMPORT_SENSORS not in merged
+
+
+async def test_v5_without_energy_sensors_migrates_cleanly(hass: HomeAssistant) -> None:
+    """Nothing configured must not invent empty keys."""
+    entry = _make_entry(hass, version=5, data={CONF_PRICE_SENSOR: "sensor.price"})
+
+    await _setup(hass, entry)
+
+    assert entry.version == 6
+    merged = {**entry.data, **entry.options}
+    for key in (
+        CONF_GRID_IMPORT_SENSORS,
+        CONF_GRID_EXPORT_SENSORS,
+        CONF_GROSS_LOAD_SENSORS,
+    ):
+        assert key not in merged

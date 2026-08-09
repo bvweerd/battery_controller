@@ -94,6 +94,17 @@ CONF_BATTERY_POWER_SENSOR = "battery_power_sensor"
 # the totals stay correct, only per-pack use of the figure is unavailable.
 CONF_BATTERY_ENERGY_CHARGED_SENSOR = "battery_energy_charged_sensor"
 CONF_BATTERY_ENERGY_DISCHARGED_SENSOR = "battery_energy_discharged_sensor"
+# Household load is derived, not configured: gross = import - export + PV
+# + discharge - charge. Each field below is one physical measurement.
+CONF_GRID_IMPORT_SENSORS = "grid_import_sensors"
+CONF_GRID_EXPORT_SENSORS = "grid_export_sensors"
+# Optional override: a meter between inverter and house measures gross load
+# directly. More accurate than summing five meters, and the only workable
+# source when the component set is incomplete (e.g. DC-coupled PV with no DC
+# counter). When set, the reconstruction is skipped entirely.
+CONF_GROSS_LOAD_SENSORS = "gross_load_sensors"
+
+# Legacy keys, retained for the v5 -> v6 migration only.
 CONF_ELECTRICITY_CONSUMPTION_SENSORS = "electricity_consumption_sensors"
 CONF_ELECTRICITY_PRODUCTION_SENSORS = "electricity_production_sensors"
 # kWh total-energy sensors from PV inverters (used to reconstruct gross consumption)

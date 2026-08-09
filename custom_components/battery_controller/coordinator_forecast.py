@@ -16,8 +16,9 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_BATTERY_ENERGY_CHARGED_SENSOR,
     CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
-    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
-    CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_GRID_EXPORT_SENSORS,
+    CONF_GRID_IMPORT_SENSORS,
+    CONF_GROSS_LOAD_SENSORS,
     CONF_PV_FORECAST_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
     DC_TO_AC_INVERTER_EFFICIENCY,
@@ -123,8 +124,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         self.consumption_model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=config.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS, []),
-            production_sensors=config.get(CONF_ELECTRICITY_PRODUCTION_SENSORS, []),
+            grid_import_sensors=config.get(CONF_GRID_IMPORT_SENSORS, []),
+            grid_export_sensors=config.get(CONF_GRID_EXPORT_SENSORS, []),
+            gross_load_sensors=config.get(CONF_GROSS_LOAD_SENSORS, []),
             history_days=14,
             base_consumption_kw=0.5,
             pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),

@@ -25,6 +25,9 @@ from .const import (
     CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_GRID_EXPORT_SENSORS,
+    CONF_GRID_IMPORT_SENSORS,
+    CONF_GROSS_LOAD_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
     CONF_FIXED_FEED_IN_PRICE,
@@ -349,20 +352,20 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 description={"suggested_value": d.get(CONF_POWER_PRODUCTION_SENSORS)},
             ): power_selector,
             vol.Optional(
-                CONF_ELECTRICITY_CONSUMPTION_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS)
-                },
+                CONF_GRID_IMPORT_SENSORS,
+                description={"suggested_value": d.get(CONF_GRID_IMPORT_SENSORS)},
             ): energy_selector,
             vol.Optional(
-                CONF_ELECTRICITY_PRODUCTION_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_ELECTRICITY_PRODUCTION_SENSORS)
-                },
+                CONF_GRID_EXPORT_SENSORS,
+                description={"suggested_value": d.get(CONF_GRID_EXPORT_SENSORS)},
             ): energy_selector,
             vol.Optional(
                 CONF_PV_PRODUCTION_SENSORS,
                 description={"suggested_value": d.get(CONF_PV_PRODUCTION_SENSORS)},
+            ): energy_selector,
+            vol.Optional(
+                CONF_GROSS_LOAD_SENSORS,
+                description={"suggested_value": d.get(CONF_GROSS_LOAD_SENSORS)},
             ): energy_selector,
         }
     )
@@ -426,12 +429,9 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_FEED_IN_PRICE_SENSOR: _g(opt, CONF_FEED_IN_PRICE_SENSOR),
         CONF_POWER_CONSUMPTION_SENSORS: _g(opt, CONF_POWER_CONSUMPTION_SENSORS, []),
         CONF_POWER_PRODUCTION_SENSORS: _g(opt, CONF_POWER_PRODUCTION_SENSORS, []),
-        CONF_ELECTRICITY_CONSUMPTION_SENSORS: _g(
-            opt, CONF_ELECTRICITY_CONSUMPTION_SENSORS, []
-        ),
-        CONF_ELECTRICITY_PRODUCTION_SENSORS: _g(
-            opt, CONF_ELECTRICITY_PRODUCTION_SENSORS, []
-        ),
+        CONF_GRID_IMPORT_SENSORS: _g(opt, CONF_GRID_IMPORT_SENSORS, []),
+        CONF_GRID_EXPORT_SENSORS: _g(opt, CONF_GRID_EXPORT_SENSORS, []),
+        CONF_GROSS_LOAD_SENSORS: _g(opt, CONF_GROSS_LOAD_SENSORS, []),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
         # Advanced
         CONF_FIXED_FEED_IN_PRICE: float(
@@ -627,7 +627,7 @@ async def async_migrate_entry(
 
     from homeassistant.config_entries import ConfigSubentry
 
-    if config_entry.version > 5:
+    if config_entry.version > 6:
         # Downgrade from a future version is not supported.
         return False
 
@@ -677,13 +677,47 @@ async def async_migrate_entry(
             version=5,
         )
 
+    if config_entry.version == 5:
+        # v5 -> v6: household load became a derived quantity. The old
+        # electricity_consumption_sensors field meant grid import when
+        # electricity_production_sensors was also set, and gross household load
+        # when it was not — the same branch the consumption model took, so the
+        # split is exact rather than a guess.
+        legacy = (
+            CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+            CONF_ELECTRICITY_PRODUCTION_SENSORS,
+        )
+        merged = {**config_entry.data, **config_entry.options}
+        old_consumption = merged.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS) or []
+        old_production = merged.get(CONF_ELECTRICITY_PRODUCTION_SENSORS) or []
+
+        migrated: dict[str, Any] = {}
+        if old_production:
+            migrated[CONF_GRID_EXPORT_SENSORS] = old_production
+        if old_consumption:
+            if old_production:
+                migrated[CONF_GRID_IMPORT_SENSORS] = old_consumption
+            else:
+                migrated[CONF_GROSS_LOAD_SENSORS] = old_consumption
+
+        data = {k: v for k, v in config_entry.data.items() if k not in legacy}
+        options = {k: v for k, v in config_entry.options.items() if k not in legacy}
+        options.update(migrated)
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=data,
+            options=options,
+            version=6,
+        )
+
     return True
 
 
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Battery Controller."""
 
-    VERSION = 5
+    VERSION = 6
 
     @classmethod
     @callback

@@ -73,9 +73,9 @@ discharging beats doing nothing in this step.
 
 ### Net load
 
-`consumption − PV`. What the house needs from the grid or the battery. The optimizer
-computes it itself, which is why the configured consumption sensor must measure **gross**
-household load rather than grid import.
+`consumption − PV`. What the house needs from the grid or the battery. The consumption
+term is **gross** household load, which the integration derives from your meters as
+`import − export + PV + discharge − charge` rather than asking you for it.
 
 ### Oscillation filter
 
