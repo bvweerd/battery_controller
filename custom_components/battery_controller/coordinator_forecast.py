@@ -14,8 +14,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_BATTERY_ENERGY_CHARGED_SENSORS,
-    CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_FORECAST_SENSORS,
@@ -34,6 +34,21 @@ from .forecast_models import (
 from .helpers import extract_pv_forecast_series
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _battery_energy_sensors(config: dict[str, Any], key: str) -> list[str]:
+    """Collect one battery energy counter per subentry that has it configured.
+
+    Deduplicated: where a single inverter reports one counter for several packs,
+    the same entity may legitimately be selected on more than one subentry, and
+    counting it twice would distort the reconstruction.
+    """
+    seen: list[str] = []
+    for _subentry_id, data in config.get("battery_subentries", []):
+        entity_id = data.get(key)
+        if entity_id and entity_id not in seen:
+            seen.append(entity_id)
+    return seen
 
 
 class ForecastCoordinator(DataUpdateCoordinator):
@@ -114,9 +129,11 @@ class ForecastCoordinator(DataUpdateCoordinator):
             base_consumption_kw=0.5,
             pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),
             entry_id=config.get("entry_id"),
-            battery_charge_sensors=config.get(CONF_BATTERY_ENERGY_CHARGED_SENSORS, []),
-            battery_discharge_sensors=config.get(
-                CONF_BATTERY_ENERGY_DISCHARGED_SENSORS, []
+            battery_charge_sensors=_battery_energy_sensors(
+                config, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+            ),
+            battery_discharge_sensors=_battery_energy_sensors(
+                config, CONF_BATTERY_ENERGY_DISCHARGED_SENSOR
             ),
         )
 

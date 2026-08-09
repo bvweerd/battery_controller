@@ -77,11 +77,15 @@ If the house draws 3 kW while the battery charges at 4 kW, then **A** reads 3 kW
     your consumption sensor measures net grid import. See
     [PV double counting](installation.md#verifying-your-consumption-sensors).
 
-    On that route, also fill in *Battery charged* and *Battery discharged*. The full
-    identity is `gross = import − export + PV + discharge − charge`, and without the
-    battery terms every kWh charged from the grid is learned as household load. Because
-    the optimizer chooses when to charge, the model would partly be learning its own past
-    decisions. A warning is logged when production sensors are configured without them.
+    On that route, also set *Battery charged sensor* and *Battery discharged sensor* on
+    each battery subentry. The full identity is
+    `gross = import − export + PV + discharge − charge`, and without the battery terms
+    every kWh charged from the grid is learned as household load. Because the optimizer
+    chooses when to charge, the model would partly be learning its own past decisions. A
+    warning is logged when production sensors are configured without them.
+
+    Where one inverter reports a single counter covering several packs, set it on one of
+    them — the totals stay correct, and the same entity selected twice is counted once.
 
     None of these corrections apply when your consumption sensor already measures gross
     load — such a sensor sits between the inverter and the house, so battery charging

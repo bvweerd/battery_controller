@@ -16,8 +16,8 @@ import voluptuous as vol
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
-    CONF_BATTERY_ENERGY_CHARGED_SENSORS,
-    CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
@@ -144,6 +144,18 @@ def _build_battery_subentry_schema(
                 description={"suggested_value": d.get(CONF_BATTERY_POWER_SENSOR)},
             ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
             vol.Optional(
+                CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR)
+                },
+            ): selector({"entity": {"domain": "sensor", "device_class": "energy"}}),
+            vol.Optional(
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR)
+                },
+            ): selector({"entity": {"domain": "sensor", "device_class": "energy"}}),
+            vol.Optional(
                 CONF_PV_DC_EFFICIENCY,
                 default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
                 description={"suggested_value": d.get(CONF_PV_DC_EFFICIENCY)},
@@ -227,8 +239,13 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     )
-    if validated.get(CONF_BATTERY_POWER_SENSOR):
-        result[CONF_BATTERY_POWER_SENSOR] = validated[CONF_BATTERY_POWER_SENSOR]
+    for optional_sensor in (
+        CONF_BATTERY_POWER_SENSOR,
+        CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+        CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
+    ):
+        if validated.get(optional_sensor):
+            result[optional_sensor] = validated[optional_sensor]
     # SoC-dependent derating: only store when explicitly provided
     for key, default in (
         (CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT, DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT),
@@ -347,18 +364,6 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_PV_PRODUCTION_SENSORS,
                 description={"suggested_value": d.get(CONF_PV_PRODUCTION_SENSORS)},
             ): energy_selector,
-            vol.Optional(
-                CONF_BATTERY_ENERGY_CHARGED_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_BATTERY_ENERGY_CHARGED_SENSORS)
-                },
-            ): energy_selector,
-            vol.Optional(
-                CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSORS)
-                },
-            ): energy_selector,
         }
     )
 
@@ -428,12 +433,6 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
             opt, CONF_ELECTRICITY_PRODUCTION_SENSORS, []
         ),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
-        CONF_BATTERY_ENERGY_CHARGED_SENSORS: _g(
-            opt, CONF_BATTERY_ENERGY_CHARGED_SENSORS, []
-        ),
-        CONF_BATTERY_ENERGY_DISCHARGED_SENSORS: _g(
-            opt, CONF_BATTERY_ENERGY_DISCHARGED_SENSORS, []
-        ),
         # Advanced
         CONF_FIXED_FEED_IN_PRICE: float(
             _g(adv, CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)

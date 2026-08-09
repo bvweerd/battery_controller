@@ -88,14 +88,17 @@ CONF_PRICE_SENSOR = "price_sensor"
 CONF_FEED_IN_PRICE_SENSOR = "feed_in_price_sensor"
 CONF_BATTERY_SOC_SENSOR = "battery_soc_sensor"
 CONF_BATTERY_POWER_SENSOR = "battery_power_sensor"
+# kWh total-energy counters per battery subentry. Grid charging passes the grid
+# meter, so without these it is reconstructed as household load. Where one
+# inverter reports a single counter for several packs, set it on one of them:
+# the totals stay correct, only per-pack use of the figure is unavailable.
+CONF_BATTERY_ENERGY_CHARGED_SENSOR = "battery_energy_charged_sensor"
+CONF_BATTERY_ENERGY_DISCHARGED_SENSOR = "battery_energy_discharged_sensor"
 CONF_ELECTRICITY_CONSUMPTION_SENSORS = "electricity_consumption_sensors"
 CONF_ELECTRICITY_PRODUCTION_SENSORS = "electricity_production_sensors"
 # kWh total-energy sensors from PV inverters (used to reconstruct gross consumption)
 CONF_PV_PRODUCTION_SENSORS = "pv_production_sensors"
-# kWh total-energy sensors for battery charge/discharge. Grid charging passes the
-# grid meter, so without these it is reconstructed as household load.
-CONF_BATTERY_ENERGY_CHARGED_SENSORS = "battery_energy_charged_sensors"
-CONF_BATTERY_ENERGY_DISCHARGED_SENSORS = "battery_energy_discharged_sensors"
+# Configuration keys - Battery subentry
 CONF_POWER_CONSUMPTION_SENSORS = "power_consumption_sensors"
 CONF_POWER_PRODUCTION_SENSORS = "power_production_sensors"
 
