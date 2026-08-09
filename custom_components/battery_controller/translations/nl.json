@@ -29,10 +29,8 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
-              "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
-              "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
-              "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh)",
-              "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
+              "electricity_consumption_sensors": "Verbruikssensoren (kWh — bruto huisverbruik, of netinvoer)",
+              "electricity_production_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)"
             }
           },
           "advanced": {
@@ -101,10 +99,8 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
-              "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
-              "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
-              "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh)",
-              "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
+              "electricity_consumption_sensors": "Verbruikssensoren (kWh — bruto huisverbruik, of netinvoer)",
+              "electricity_production_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)"
             }
           },
           "advanced": {
