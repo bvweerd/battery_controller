@@ -14,6 +14,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BATTERY_ENERGY_CHARGED_SENSORS,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_PV_FORECAST_SENSORS,
@@ -112,6 +114,10 @@ class ForecastCoordinator(DataUpdateCoordinator):
             base_consumption_kw=0.5,
             pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),
             entry_id=config.get("entry_id"),
+            battery_charge_sensors=config.get(CONF_BATTERY_ENERGY_CHARGED_SENSORS, []),
+            battery_discharge_sensors=config.get(
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSORS, []
+            ),
         )
 
         self.net_load_model = NetLoadForecast(

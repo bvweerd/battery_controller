@@ -174,6 +174,71 @@ class TestAsyncUpdatePattern:
         assert (10, 0) in model._hourly_pattern
         assert model._hourly_pattern[(10, 0)] == pytest.approx(2.0)
 
+    async def test_battery_correction_completes_the_identity(self):
+        """Battery charge is subtracted and discharge added back.
+
+        gross = import - export + pv + discharge - charge. Without this,
+        charging from the grid is learned as household consumption.
+        """
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+            production_sensors=["sensor.production"],
+            pv_production_sensors=["sensor.pv_total"],
+            battery_charge_sensors=["sensor.batt_in"],
+            battery_discharge_sensors=["sensor.batt_out"],
+        )
+        # import 4.0, export 1.5, pv 1.5, charged 2.0, discharged 0.5
+        # gross = 4.0 - 1.5 + 1.5 + 0.5 - 2.0 = 2.5
+        base_stats = self._base_stats(4.0, 1.5)
+        pv_stats = {"sensor.pv_total": [{"start": self._TS, "change": 1.5}]}
+        battery_stats = {
+            "sensor.batt_in": [{"start": self._TS, "change": 2.0}],
+            "sensor.batt_out": [{"start": self._TS, "change": 0.5}],
+        }
+
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            side_effect=[base_stats, pv_stats, battery_stats]
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model._hourly_pattern[(10, 0)] == pytest.approx(2.5)
+
+    async def test_battery_correction_skipped_for_gross_load_input(self):
+        """Without production_sensors the input is gross load already.
+
+        A gross-load sensor sits between inverter and house, so grid-to-battery
+        charging never passes it and must not be corrected for.
+        """
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            consumption_sensors=["sensor.consumption"],
+            battery_charge_sensors=["sensor.batt_in"],
+            battery_discharge_sensors=["sensor.batt_out"],
+        )
+        base_stats = {"sensor.consumption": [{"start": self._TS, "change": 2.0}]}
+
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(side_effect=[base_stats])
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # Untouched: exactly one statistics query, no battery correction.
+        assert mock_instance.async_add_executor_job.await_count == 1
+        assert model._hourly_pattern[(10, 0)] == pytest.approx(2.0)
+
     async def test_layer2_uses_entity_registry_fallback(self):
         """Layer 2: own pv_forecast entity used when pv_production_sensors absent."""
         hass = MagicMock()

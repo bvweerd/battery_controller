@@ -16,6 +16,8 @@ import voluptuous as vol
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
+    CONF_BATTERY_ENERGY_CHARGED_SENSORS,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
     CONF_BATTERY_POWER_SENSOR,
     CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
@@ -345,6 +347,18 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_PV_PRODUCTION_SENSORS,
                 description={"suggested_value": d.get(CONF_PV_PRODUCTION_SENSORS)},
             ): energy_selector,
+            vol.Optional(
+                CONF_BATTERY_ENERGY_CHARGED_SENSORS,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_CHARGED_SENSORS)
+                },
+            ): energy_selector,
+            vol.Optional(
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSORS,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSORS)
+                },
+            ): energy_selector,
         }
     )
 
@@ -414,6 +428,12 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
             opt, CONF_ELECTRICITY_PRODUCTION_SENSORS, []
         ),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
+        CONF_BATTERY_ENERGY_CHARGED_SENSORS: _g(
+            opt, CONF_BATTERY_ENERGY_CHARGED_SENSORS, []
+        ),
+        CONF_BATTERY_ENERGY_DISCHARGED_SENSORS: _g(
+            opt, CONF_BATTERY_ENERGY_DISCHARGED_SENSORS, []
+        ),
         # Advanced
         CONF_FIXED_FEED_IN_PRICE: float(
             _g(adv, CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)

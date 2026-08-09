@@ -92,6 +92,10 @@ CONF_ELECTRICITY_CONSUMPTION_SENSORS = "electricity_consumption_sensors"
 CONF_ELECTRICITY_PRODUCTION_SENSORS = "electricity_production_sensors"
 # kWh total-energy sensors from PV inverters (used to reconstruct gross consumption)
 CONF_PV_PRODUCTION_SENSORS = "pv_production_sensors"
+# kWh total-energy sensors for battery charge/discharge. Grid charging passes the
+# grid meter, so without these it is reconstructed as household load.
+CONF_BATTERY_ENERGY_CHARGED_SENSORS = "battery_energy_charged_sensors"
+CONF_BATTERY_ENERGY_DISCHARGED_SENSORS = "battery_energy_discharged_sensors"
 CONF_POWER_CONSUMPTION_SENSORS = "power_consumption_sensors"
 CONF_POWER_PRODUCTION_SENSORS = "power_production_sensors"
 
