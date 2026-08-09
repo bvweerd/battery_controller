@@ -8,8 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+from custom_components.battery_controller.const import (
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+)
 from custom_components.battery_controller.coordinator_forecast import (
     ForecastCoordinator,
+    _battery_energy_sensors,
 )
 
 
@@ -1197,3 +1201,50 @@ async def test_net_load_unchanged_for_ac_only_system(hass):
         result = await coord._async_update_data()
 
     assert result["net_load_forecast_kw"][0] == pytest.approx(2.0 - 3.0)
+
+
+class TestBatteryEnergySensors:
+    """Collecting the per-subentry battery energy counters."""
+
+    def test_empty_without_subentries(self):
+        assert (
+            _battery_energy_sensors(
+                _minimal_config(), CONF_BATTERY_ENERGY_CHARGED_SENSOR
+            )
+            == []
+        )
+
+    def test_collects_one_per_subentry(self):
+        config = _minimal_config(
+            battery_subentries=[
+                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
+                ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_b_in"}),
+            ]
+        )
+        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
+            "sensor.pack_a_in",
+            "sensor.pack_b_in",
+        ]
+
+    def test_skips_subentries_without_the_sensor(self):
+        config = _minimal_config(
+            battery_subentries=[
+                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
+                ("b", {}),
+            ]
+        )
+        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
+            "sensor.pack_a_in"
+        ]
+
+    def test_deduplicates_a_shared_inverter_counter(self):
+        """One inverter counter selected on several packs must count once."""
+        config = _minimal_config(
+            battery_subentries=[
+                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
+                ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
+            ]
+        )
+        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
+            "sensor.inverter_in"
+        ]

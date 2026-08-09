@@ -29,6 +29,8 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
+              "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
               "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh)",
               "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
             }
@@ -99,6 +101,8 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
+              "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
               "electricity_consumption_sensors": "Elektriciteitsverbruik sensoren (kWh)",
               "electricity_production_sensors": "Elektriciteitsproductie sensoren (kWh, bijv. DSMR)"
             }
@@ -157,6 +161,8 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+            "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
+            "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
           },
           "data_description": {
@@ -178,6 +184,8 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Batterij SoC sensor",
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+            "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
+            "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
             "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
           },
           "data_description": {

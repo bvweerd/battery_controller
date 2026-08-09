@@ -129,6 +129,13 @@ class ConsumptionForecastModel:
     1. pv_production_sensors: real kWh sensors from inverter(s) → add back to net
     2. own pv_forecast sensor history (via entry_id lookup) → self-consistent correction
     3. Warning log when production_sensors configured without a correction method
+
+    Battery correction: battery_discharge_sensors are added back and
+    battery_charge_sensors subtracted, completing the identity
+    gross = import - export + pv + discharge - charge. Without it, charging from
+    the grid is learned as household load. Like the PV correction it only applies
+    when production_sensors is set, since that is what marks the consumption
+    input as net grid exchange rather than gross load.
     """
 
     def __init__(
@@ -140,6 +147,8 @@ class ConsumptionForecastModel:
         base_consumption_kw: float = 0.5,
         pv_production_sensors: list[str] | None = None,
         entry_id: str | None = None,
+        battery_charge_sensors: list[str] | None = None,
+        battery_discharge_sensors: list[str] | None = None,
     ):
         """Initialize consumption forecast model."""
         self.hass = hass
@@ -148,6 +157,8 @@ class ConsumptionForecastModel:
         self.history_days = history_days
         self.base_consumption_kw = base_consumption_kw
         self.pv_production_sensors = pv_production_sensors or []
+        self.battery_charge_sensors = battery_charge_sensors or []
+        self.battery_discharge_sensors = battery_discharge_sensors or []
         self._entry_id = entry_id
         # Non-seasonal pattern (hour, day_of_week) → average kW
         self._hourly_pattern: dict[tuple[int, int], float] = {}
@@ -318,6 +329,59 @@ class ConsumptionForecastModel:
                     "but no PV correction could be applied. This may cause double-counting "
                     "of PV in the consumption forecast. Configure 'pv_production_sensors' "
                     "with your inverter's total energy sensor(s) to fix this."
+                )
+
+            # Battery correction: complete the identity
+            #   gross = import - export + pv + discharge - charge
+            # Charging from the grid passes the grid meter, so without this it is
+            # reconstructed as household load; discharging displaces import, so
+            # without this the load it served goes missing. Both errors are
+            # concentrated in specific hours, which is exactly the axis the
+            # pattern is learned on.
+            battery_ids = set(self.battery_charge_sensors) | set(
+                self.battery_discharge_sensors
+            )
+            if self.production_sensors and battery_ids:
+                battery_stats = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    battery_ids,
+                    "hour",
+                    None,
+                    {"change"},
+                )
+                # Both are non-negative cumulative counters; clamp so a bogus
+                # negative change cannot flip the correction's direction.
+                for sensor_id in self.battery_discharge_sensors:
+                    for stat in battery_stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + max(
+                                0.0, val
+                            )
+                for sensor_id in self.battery_charge_sensors:
+                    for stat in battery_stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - max(
+                                0.0, val
+                            )
+                _LOGGER.debug(
+                    "Battery correction applied from %d charge and %d discharge sensor(s)",
+                    len(self.battery_charge_sensors),
+                    len(self.battery_discharge_sensors),
+                )
+            elif self.production_sensors:
+                _LOGGER.warning(
+                    "electricity_production_sensors are configured, so consumption is "
+                    "reconstructed from net grid exchange, but no battery energy sensors "
+                    "are set. Grid charging will be learned as household consumption. "
+                    "Configure 'battery_energy_charged_sensors' and "
+                    "'battery_energy_discharged_sensors' to fix this."
                 )
 
             # Group by (hour, day_of_week) and also (hour, day_of_week, season).
