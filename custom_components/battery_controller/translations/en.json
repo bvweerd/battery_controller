@@ -20,7 +20,7 @@
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, gross household load)",
               "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
               "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
             },
@@ -28,7 +28,7 @@
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors for grid import. Used to learn household consumption patterns over time.",
+              "electricity_consumption_sensors": "Cumulative kWh sensors for gross household load — everything the house draws, from grid, PV or battery alike. Not grid import: the PV forecast is subtracted separately, so a grid meter here subtracts PV twice. Used to learn consumption patterns over time.",
               "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
               "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
             }
@@ -126,7 +126,7 @@
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
               "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
               "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, e.g. DSMR tariff 1+2)",
+              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, gross household load)",
               "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
               "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
             },
@@ -134,7 +134,7 @@
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors for grid import. Used to learn household consumption patterns over time.",
+              "electricity_consumption_sensors": "Cumulative kWh sensors for gross household load — everything the house draws, from grid, PV or battery alike. Not grid import: the PV forecast is subtracted separately, so a grid meter here subtracts PV twice. Used to learn consumption patterns over time.",
               "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
               "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
             }
