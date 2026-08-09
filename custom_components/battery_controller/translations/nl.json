@@ -29,8 +29,9 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
-              "electricity_consumption_sensors": "Verbruikssensoren (kWh — bruto huisverbruik, of netinvoer)",
-              "electricity_production_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)"
+              "grid_import_sensors": "Netinvoer sensoren (kWh, bijv. DSMR)",
+              "grid_export_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)",
+              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)"
             }
           },
           "advanced": {
@@ -99,8 +100,9 @@
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
               "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
-              "electricity_consumption_sensors": "Verbruikssensoren (kWh — bruto huisverbruik, of netinvoer)",
-              "electricity_production_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)"
+              "grid_import_sensors": "Netinvoer sensoren (kWh, bijv. DSMR)",
+              "grid_export_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)",
+              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)"
             }
           },
           "advanced": {

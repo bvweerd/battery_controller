@@ -20,16 +20,18 @@
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
               "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
               "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
-              "electricity_consumption_sensors": "Consumption sensors (kWh — gross household load, or grid import)",
-              "electricity_production_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "grid_import_sensors": "Grid import sensors (kWh, e.g. DSMR)",
+              "grid_export_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "gross_load_sensors": "Household load sensors (kWh, optional override)",
               "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors the consumption pattern is learned from. What the model needs is gross household load — everything the house draws, from grid, PV or battery alike. Either point this at a sensor that measures it directly (between inverter and house) and leave the rest empty, or point it at grid import, in which case gross load is reconstructed as import − export + PV + discharge − charge, needing the two fields below plus the energy counters on each battery. Grid import on its own is not household load: it misses the PV and the battery output that served the house.",
-              "electricity_production_sensors": "Cumulative kWh sensors for grid export — the export term of the reconstruction gross = import − export + PV + discharge − charge. Without it, PV that went out to the grid is counted as consumption the house never drew. Leave empty when the consumption field above already measures gross load.",
+              "grid_import_sensors": "Cumulative kWh drawn from the grid. Household load is not configured but derived: gross = import − export + PV + discharge − charge, using this field, the export and PV fields below, and the energy counters on each battery.",
+              "grid_export_sensors": "Cumulative kWh fed back to the grid. Without it, PV that went out to the grid would be counted as consumption the house never drew.",
+              "gross_load_sensors": "Only if you have a meter between the inverter and the house. It measures household load directly, so when set the calculation above is skipped entirely. More accurate than summing several meters, and the only workable source when a term is unmeasurable — for example DC-coupled PV with no DC counter. Leave empty otherwise.",
               "pv_production_sensors": "Cumulative kWh from PV inverters — the PV term of that same reconstruction, covering the production that served the house rather than the grid. Without it the integration falls back to its own PV forecast history, which is less accurate."
             }
           },
@@ -126,16 +128,18 @@
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
               "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
               "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
-              "electricity_consumption_sensors": "Consumption sensors (kWh — gross household load, or grid import)",
-              "electricity_production_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "grid_import_sensors": "Grid import sensors (kWh, e.g. DSMR)",
+              "grid_export_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "gross_load_sensors": "Household load sensors (kWh, optional override)",
               "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors the consumption pattern is learned from. What the model needs is gross household load — everything the house draws, from grid, PV or battery alike. Either point this at a sensor that measures it directly (between inverter and house) and leave the rest empty, or point it at grid import, in which case gross load is reconstructed as import − export + PV + discharge − charge, needing the two fields below plus the energy counters on each battery. Grid import on its own is not household load: it misses the PV and the battery output that served the house.",
-              "electricity_production_sensors": "Cumulative kWh sensors for grid export — the export term of the reconstruction gross = import − export + PV + discharge − charge. Without it, PV that went out to the grid is counted as consumption the house never drew. Leave empty when the consumption field above already measures gross load.",
+              "grid_import_sensors": "Cumulative kWh drawn from the grid. Household load is not configured but derived: gross = import − export + PV + discharge − charge, using this field, the export and PV fields below, and the energy counters on each battery.",
+              "grid_export_sensors": "Cumulative kWh fed back to the grid. Without it, PV that went out to the grid would be counted as consumption the house never drew.",
+              "gross_load_sensors": "Only if you have a meter between the inverter and the house. It measures household load directly, so when set the calculation above is skipped entirely. More accurate than summing several meters, and the only workable source when a term is unmeasurable — for example DC-coupled PV with no DC counter. Leave empty otherwise.",
               "pv_production_sensors": "Cumulative kWh from PV inverters — the PV term of that same reconstruction, covering the production that served the house rather than the grid. Without it the integration falls back to its own PV forecast history, which is less accurate."
             }
           },

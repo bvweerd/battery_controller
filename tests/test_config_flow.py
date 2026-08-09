@@ -299,8 +299,9 @@ def test_extract_main_data_prefers_sections_and_defaults() -> None:
     assert data["feed_in_price_sensor"] is None
     assert data["power_consumption_sensors"] == []
     assert data["power_production_sensors"] == []
-    assert data["electricity_consumption_sensors"] == []
-    assert data["electricity_production_sensors"] == []
+    assert data["grid_import_sensors"] == []
+    assert data["grid_export_sensors"] == []
+    assert data["gross_load_sensors"] == []
     assert data["pv_production_sensors"] == []
     assert data["fixed_feed_in_price"] == 0.11
     assert data["zero_grid_enabled"] is True
@@ -1305,8 +1306,9 @@ async def test_options_flow_partial_submit_applies_defaults_and_empty_lists(
     assert v4_config_entry.options["feed_in_price_sensor"] is None
     assert v4_config_entry.options["power_consumption_sensors"] == []
     assert v4_config_entry.options["power_production_sensors"] == []
-    assert v4_config_entry.options["electricity_consumption_sensors"] == []
-    assert v4_config_entry.options["electricity_production_sensors"] == []
+    assert v4_config_entry.options["grid_import_sensors"] == []
+    assert v4_config_entry.options["grid_export_sensors"] == []
+    assert v4_config_entry.options["gross_load_sensors"] == []
     assert v4_config_entry.options["pv_production_sensors"] == []
     assert v4_config_entry.options["fixed_feed_in_price"] == 0.04
     assert v4_config_entry.options["zero_grid_enabled"] is True
