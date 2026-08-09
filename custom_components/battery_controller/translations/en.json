@@ -18,11 +18,11 @@
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
-              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
-              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+              "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
+              "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
+              "electricity_consumption_sensors": "Consumption sensors (kWh — gross household load, or grid import)",
+              "electricity_production_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
@@ -124,11 +124,11 @@
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
-              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
-              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+              "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
+              "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
+              "electricity_consumption_sensors": "Consumption sensors (kWh — gross household load, or grid import)",
+              "electricity_production_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
