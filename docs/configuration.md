@@ -90,6 +90,27 @@ rather than asked for.
     production that went straight from the panels to the house appears in no term of the
     identity at all, so the derived figure comes out too low.
 
+!!! warning "DC-coupled PV: match the PV sensor to the battery counter"
+    With PV on the battery inverter's DC bus, the derivation is exact only when the PV
+    sensor and the charged counter sit on the **same side of the DC bus**. Either both
+    count DC production, or neither does.
+
+    Take 5 kWh of DC production, 3 kWh of it charging the battery and 2 kWh reaching the
+    house — so the true household load is 2 kWh:
+
+    | PV sensor reports | Charged counter reports | Derived load | |
+    |-------------------|-------------------------|--------------|---|
+    | 5 kWh — total panel output | 3 kWh — includes DC charging | 2 kWh | correct |
+    | AC arrays only | AC-side charging only | 0 kWh | 2 kWh too low |
+    | 5 kWh | AC-side charging only | 5 kWh | 3 kWh too high |
+
+    Row two only looks harmless: it is correct just as long as no DC production reaches
+    the house directly, which on a hybrid inverter it normally does. So in practice, pair
+    a DC-side PV sensor with a charged counter that includes DC charging.
+
+    If your hardware does not report that pair, use **Household load sensors** instead —
+    it measures the answer directly and sidesteps the question.
+
 !!! danger "Do not confuse the kWh fields with the W fields"
     **Power consumption sensors (W)** must be your **grid meter**, positive = import. It
     feeds only the real-time zero-grid controller, which regulates the grid toward zero.
