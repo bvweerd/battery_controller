@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -351,7 +352,10 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     if not configs:
         return BatteryConfig()
     if len(configs) == 1:
-        return configs[0]
+        # Deep-copied, not returned as-is: the caller overlays entry-level
+        # settings (DC coupling, grid cap) onto the aggregate, and sharing the
+        # object would mutate the single battery's own config through it.
+        return copy.deepcopy(configs[0])
 
     total_cap = sum(c.capacity_kwh for c in configs)
 
@@ -375,15 +379,27 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     combined_min_pct = total_min_kwh / total_cap * 100.0
     combined_max_pct = total_max_kwh / total_cap * 100.0
 
-    # DC PV: aggregate across all batteries
-    dc_configs = [c for c in configs if c.pv_dc_coupled]
-    pv_dc_coupled = bool(dc_configs)
+    # DC PV: aggregate across all batteries.
+    #
+    # pv_dc_coupled is an entry-level flag (it lives on the PV-array subentries)
+    # that the caller overlays afterwards, so it is never set on the inputs
+    # here.  The MPPT efficiency, by contrast, IS configured per battery
+    # subentry.  Weighting it by pv_dc_peak_power_kwp — also unset on battery
+    # subentries — therefore always found a zero total and silently fell back
+    # to the hard-coded default, discarding the configured values whenever more
+    # than one battery was present (a single battery kept them, because that
+    # path returns the config unchanged).  Weight by usable capacity instead:
+    # it is always populated, and it is what determines how much DC PV each
+    # inverter can actually absorb.
+    pv_dc_coupled = any(c.pv_dc_coupled for c in configs)
     pv_dc_peak = sum(c.pv_dc_peak_power_kwp for c in configs)
+    eff_weights = [max(0.0, c.max_soc_kwh - c.min_soc_kwh) for c in configs]
+    total_eff_weight = sum(eff_weights)
     pv_dc_eff = (
-        sum(c.pv_dc_efficiency * c.pv_dc_peak_power_kwp for c in dc_configs)
-        / sum(c.pv_dc_peak_power_kwp for c in dc_configs)
-        if dc_configs and sum(c.pv_dc_peak_power_kwp for c in dc_configs) > 0
-        else 0.97
+        sum(c.pv_dc_efficiency * w for c, w in zip(configs, eff_weights))
+        / total_eff_weight
+        if total_eff_weight > 0
+        else sum(c.pv_dc_efficiency for c in configs) / len(configs)
     )
 
     # Feed-in cap: sum of individual caps (0 = unlimited for any → unlimited overall)
@@ -392,19 +408,58 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         0.0 if any(cap == 0.0 for cap in feed_in_caps) else sum(feed_in_caps)
     )
 
-    # SoC-dependent derating: capacity-weighted average thresholds, summed derated powers.
-    # If no battery has derating configured (kw == 0), the combined value is also 0
-    # (disabled), so defaults are preserved correctly.
-    combined_high_threshold = (
-        sum(c.high_soc_charge_threshold_pct * c.capacity_kwh for c in configs)
-        / total_cap
-    )
-    combined_high_max_charge_kw = sum(c.high_soc_max_charge_kw for c in configs)
-    combined_low_threshold = (
-        sum(c.low_soc_discharge_threshold_pct * c.capacity_kwh for c in configs)
-        / total_cap
-    )
-    combined_low_max_discharge_kw = sum(c.low_soc_max_discharge_kw for c in configs)
+    # SoC-dependent derating.  The fleet is assumed to sit at a common relative
+    # SoC, so above the fleet threshold the combined limit is the sum of what
+    # each battery can still do there: its own derated limit if it derates,
+    # its full rating if it does not.
+    #
+    # The threshold is the FIRST one reached (lowest for charge, highest for
+    # discharge), not a capacity-weighted average.  Averaging mixed the
+    # thresholds of batteries that derate with the disabling sentinels of
+    # batteries that do not (100 % / 0 %), and pairing that average with a sum
+    # of only the derated powers capped the whole fleet at one battery's
+    # reduced rating — a 5 kW pack without derating lost 5 kW of charge power
+    # because its neighbour throttles above 90 %.  Applying the first
+    # threshold to the summed per-battery limits is conservative in timing
+    # (derating may start slightly early for some packs) but never understates
+    # the power the fleet can deliver.
+    charge_derated = [c for c in configs if c.high_soc_max_charge_kw > 0]
+    if charge_derated:
+        combined_high_threshold = min(
+            c.high_soc_charge_threshold_pct for c in charge_derated
+        )
+        combined_high_max_charge_kw = sum(
+            c.high_soc_max_charge_kw
+            if c.high_soc_max_charge_kw > 0
+            else c.max_charge_power_kw
+            for c in configs
+        )
+    else:
+        # No battery derates: keep the disabled sentinel (kw == 0) so
+        # max_charge_at_soc returns the nominal rating at every SoC.
+        combined_high_threshold = (
+            sum(c.high_soc_charge_threshold_pct * c.capacity_kwh for c in configs)
+            / total_cap
+        )
+        combined_high_max_charge_kw = 0.0
+
+    discharge_derated = [c for c in configs if c.low_soc_max_discharge_kw > 0]
+    if discharge_derated:
+        combined_low_threshold = max(
+            c.low_soc_discharge_threshold_pct for c in discharge_derated
+        )
+        combined_low_max_discharge_kw = sum(
+            c.low_soc_max_discharge_kw
+            if c.low_soc_max_discharge_kw > 0
+            else c.max_discharge_power_kw
+            for c in configs
+        )
+    else:
+        combined_low_threshold = (
+            sum(c.low_soc_discharge_threshold_pct * c.capacity_kwh for c in configs)
+            / total_cap
+        )
+        combined_low_max_discharge_kw = 0.0
 
     return BatteryConfig._from_aggregated(
         capacity_kwh=total_cap,

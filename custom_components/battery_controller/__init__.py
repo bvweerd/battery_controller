@@ -54,6 +54,9 @@ _MANIFEST: dict[str, Any] = json.loads(
     (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
 )
 SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION = "reset_charge_efficiency_calibration"
+SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION = (
+    "reset_discharge_efficiency_calibration"
+)
 SERVICE_ENTRY_ID = "entry_id"
 SERVICE_RESET_SCHEMA = vol.Schema({vol.Optional(SERVICE_ENTRY_ID): cv.string})
 
@@ -85,10 +88,10 @@ class BatteryControllerData:
     pv_devices: dict[str, DeviceInfo]  # keyed by subentry_id
 
 
-async def _async_handle_reset_charge_efficiency_calibration(
-    hass: HomeAssistant, call: ServiceCall
+async def _async_handle_reset_efficiency_calibration(
+    hass: HomeAssistant, call: ServiceCall, direction: str
 ) -> None:
-    """Reset charge-efficiency calibration for one or more entries."""
+    """Reset charge- or discharge-efficiency calibration for one or more entries."""
     requested_entry_id = call.data.get(SERVICE_ENTRY_ID)
     entries = hass.config_entries.async_entries(DOMAIN)
 
@@ -99,7 +102,8 @@ async def _async_handle_reset_charge_efficiency_calibration(
     ]
     if not matched:
         _LOGGER.warning(
-            "Charge efficiency reset requested for unknown entry_id=%s",
+            "%s efficiency reset requested for unknown entry_id=%s",
+            direction.capitalize(),
             requested_entry_id,
         )
         return
@@ -108,11 +112,30 @@ async def _async_handle_reset_charge_efficiency_calibration(
         runtime_data = getattr(entry, "runtime_data", None)
         if runtime_data is None:
             _LOGGER.warning(
-                "Skipping charge efficiency reset for entry %s: runtime_data missing",
+                "Skipping %s efficiency reset for entry %s: runtime_data missing",
+                direction,
                 entry.entry_id,
             )
             continue
-        await runtime_data.optimization_coordinator.async_reset_charge_eff_calibration()
+        coordinator = runtime_data.optimization_coordinator
+        if direction == "charge":
+            await coordinator.async_reset_charge_eff_calibration()
+        else:
+            await coordinator.async_reset_discharge_eff_calibration()
+
+
+async def _async_handle_reset_charge_efficiency_calibration(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Reset charge-efficiency calibration for one or more entries."""
+    await _async_handle_reset_efficiency_calibration(hass, call, "charge")
+
+
+async def _async_handle_reset_discharge_efficiency_calibration(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Reset discharge-efficiency calibration for one or more entries."""
+    await _async_handle_reset_efficiency_calibration(hass, call, "discharge")
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
@@ -120,13 +143,25 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION):
         return
 
-    async def _handle_service(call: ServiceCall) -> None:
+    async def _handle_charge_service(call: ServiceCall) -> None:
         await _async_handle_reset_charge_efficiency_calibration(hass, call)
+
+    async def _handle_discharge_service(call: ServiceCall) -> None:
+        await _async_handle_reset_discharge_efficiency_calibration(hass, call)
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
-        _handle_service,
+        _handle_charge_service,
+        schema=SERVICE_RESET_SCHEMA,
+    )
+    # The discharge-side correction is persisted the same way as the charge-side
+    # one, so it needs the same escape hatch: without it a bad calibration can
+    # only be cleared by editing .storage by hand.
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
+        _handle_discharge_service,
         schema=SERVICE_RESET_SCHEMA,
     )
 
@@ -328,11 +363,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             for cfg_entry in hass.config_entries.async_entries(DOMAIN)
             if cfg_entry.entry_id != entry.entry_id
         ]
-        if not remaining_entries and hass.services.has_service(
-            DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION
-        ):
-            hass.services.async_remove(
-                DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION
-            )
+        if not remaining_entries:
+            for service in (
+                SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
+                SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
+            ):
+                if hass.services.has_service(DOMAIN, service):
+                    hass.services.async_remove(DOMAIN, service)
 
     return unload_ok

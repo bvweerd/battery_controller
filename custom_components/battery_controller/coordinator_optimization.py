@@ -42,6 +42,8 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
+    CONF_MAX_GRID_POWER_KW,
+    DEFAULT_MAX_GRID_POWER_KW,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
@@ -133,7 +135,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
+        self._apply_entry_level_config()
 
         # Per-battery state cache (updated by get_current_battery_state)
         self._per_battery_states: dict[str, BatteryState] = {}
@@ -812,7 +814,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         battery_setpoints = self._split_setpoint(
-            control_action["target_power_kw"], control_action["mode"]
+            control_action["target_power_kw"], self._control_mode
         )
         self.async_set_updated_data(
             {
@@ -1223,6 +1225,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def _split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
         """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
 
+        ``mode`` is the user-selected CONTROL mode (``self._control_mode``), not
+        the resolved zero-grid-controller mode. The controller only ever reports
+        ``zero_grid`` / ``follow_schedule`` / ``idle`` / ``manual``, so passing
+        that made the hybrid branch below unreachable and put hybrid runs on the
+        directional (charge/discharge) selection criterion, which switches
+        inverters whenever the schedule reverses direction.
+
         Uses SoC-gap triggered concentration:
         - Gap < _SOC_SPLIT_THRESHOLD: concentrate on one battery. Avoids
           splitting tiny setpoints across inverters and provides stable
@@ -1454,16 +1463,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
+        self._apply_entry_level_config()
+        # The zero-grid controller clamps every real-time setpoint with these
+        # limits. It holds its own reference, so rebinding self.battery_config
+        # above would otherwise leave it clamping on the configuration captured
+        # at integration setup — SoC limits and power ratings changed in a
+        # battery subentry would reach the DP but not the ~5 s control loop.
+        self.zero_grid_controller.battery_config = self.battery_config
 
-    def _apply_dc_pv_config(self) -> None:
-        """Overlay entry-level DC-PV configuration onto the aggregated battery config.
+    def _apply_entry_level_config(self) -> None:
+        """Overlay entry-level settings onto the aggregated battery config.
 
-        DC coupling is configured on the PV-array subentries, not on the battery
-        subentries, so BatteryConfig.from_subentry can never set pv_dc_coupled.
-        Without this overlay the optimizer always sees pv_dc_coupled=False and
-        never models passive DC MPPT charging.
+        Two groups of settings live on the config entry rather than on a
+        battery subentry, so ``BatteryConfig.from_subentry`` (the only factory
+        the coordinator uses) can never populate them:
+
+        - **DC coupling** is configured on the PV-array subentries. Without
+          this overlay the optimizer always sees ``pv_dc_coupled=False`` and
+          never models passive DC MPPT charging.
+        - **The grid capacity cap** is a property of the house connection, not
+          of any single battery. ``aggregate_battery_configs`` treats an
+          unset per-battery cap as "unlimited", so without this overlay the
+          configured cap silently never reaches ``calculate_step_cost`` and the
+          optimizer plans (and the baseline credits) grid flows beyond the
+          physical connection.
         """
+        self.battery_config.max_grid_power_kw = float(
+            self.config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
+        )
         if not self.config.get(CONF_PV_DC_COUPLED):
             return
         self.battery_config.pv_dc_coupled = True
@@ -2656,7 +2683,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
         battery_setpoints = self._split_setpoint(
-            combined_setpoint_kw, control_action["mode"]
+            combined_setpoint_kw, self._control_mode
         )
 
         return {

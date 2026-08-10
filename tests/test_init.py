@@ -157,9 +157,11 @@ async def test_async_unload_entry_with_runtime_data():
     entry.runtime_data.forecast_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.optimization_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.weather_coordinator.async_shutdown.assert_called_once()
-    mock_hass.services.async_remove.assert_called_once_with(
-        DOMAIN, "reset_charge_efficiency_calibration"
-    )
+    removed = {call.args for call in mock_hass.services.async_remove.call_args_list}
+    assert removed == {
+        (DOMAIN, "reset_charge_efficiency_calibration"),
+        (DOMAIN, "reset_discharge_efficiency_calibration"),
+    }
 
 
 @pytest.mark.asyncio
@@ -237,7 +239,7 @@ async def test_async_setup_entry_no_subentries():
     assert entry.runtime_data.optimization_coordinator is mock_opt_coord
     assert entry.runtime_data.battery_devices == {}
     assert entry.runtime_data.pv_devices == {}
-    mock_hass.services.async_register.assert_called_once()
+    assert mock_hass.services.async_register.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -370,9 +372,17 @@ def test_register_services_only_once():
     _async_register_services(mock_hass)
     _async_register_services(mock_hass)
 
-    mock_hass.services.async_register.assert_called_once()
-    handler = mock_hass.services.async_register.call_args.args[2]
-    assert inspect.iscoroutinefunction(handler)
+    # Both services registered by the first call; the second call is a no-op.
+    assert mock_hass.services.async_register.call_count == 2
+    registered = {
+        call.args[1] for call in mock_hass.services.async_register.call_args_list
+    }
+    assert registered == {
+        "reset_charge_efficiency_calibration",
+        "reset_discharge_efficiency_calibration",
+    }
+    for call in mock_hass.services.async_register.call_args_list:
+        assert inspect.iscoroutinefunction(call.args[2])
 
 
 @pytest.mark.asyncio

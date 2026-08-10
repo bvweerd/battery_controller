@@ -184,7 +184,22 @@ class TestAggregateBatteryConfigs:
     def test_single_config_passthrough(self):
         config = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
         result = aggregate_battery_configs([config])
-        assert result is config
+        assert result == config
+
+    def test_single_config_is_a_copy(self):
+        """The aggregate must not alias the single input config.
+
+        The coordinator overlays entry-level settings (DC coupling, grid cap)
+        onto the aggregate; sharing the object would write them straight into
+        the individual battery's own config.
+        """
+        config = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        result = aggregate_battery_configs([config])
+        assert result is not config
+        result.pv_dc_coupled = True
+        result.max_grid_power_kw = 17.0
+        assert config.pv_dc_coupled is False
+        assert config.max_grid_power_kw == 0.0
 
     def test_empty_returns_default(self):
         result = aggregate_battery_configs([])

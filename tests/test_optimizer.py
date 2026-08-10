@@ -2011,14 +2011,19 @@ class TestOptimizeWithMultiplePacks:
     # ------------------------------------------------------------------
 
     def test_derating_one_pack_only_limits_combined_power(self):
-        """When only one of two packs has high-SoC derating, the combined derated
-        power is the sum of individual derated powers (0 + 0.45 = 0.45 kW).
+        """When only one of two packs derates, the other keeps its full rating.
 
-        The combined threshold is a capacity-weighted average:
-          (100.0 * 5 + 95.0 * 5) / 10 = 97.5 %  →  9.75 kWh of 10 kWh
+        Above the fleet threshold each pack contributes what it can still do
+        there: the derating pack its reduced limit (0.45 kW), the plain pack its
+        nominal rating (1.2 kW) → 1.65 kW combined, not 0.45 kW.
+
+        The threshold is the first one reached, i.e. the lowest of the packs
+        that actually derate (95 %), not a capacity-weighted average that mixes
+        in the disabling 100 % sentinel of the plain pack →  9.5 kWh of 10 kWh.
 
         Starting at 9.8 kWh (98 %) puts us above the combined threshold, so the
-        DP must respect the 0.45 kW derated limit instead of the nominal 2.4 kW.
+        DP must respect the 1.65 kW combined limit instead of the nominal
+        2.4 kW.
         """
         from custom_components.battery_controller.battery_model import (
             aggregate_battery_configs,
@@ -2046,16 +2051,16 @@ class TestOptimizeWithMultiplePacks:
         )
         combined = aggregate_battery_configs([plain, derated])
 
-        # Only the derated pack contributes → combined derated kw = 0 + 0.45 = 0.45
-        assert combined.high_soc_max_charge_kw == pytest.approx(0.45)
-        # Capacity-weighted threshold: (100*5 + 95*5)/10 = 97.5 %
-        assert combined.high_soc_charge_threshold_pct == pytest.approx(97.5)
+        # Plain pack keeps its nominal 1.2 kW, derated pack contributes 0.45 kW
+        assert combined.high_soc_max_charge_kw == pytest.approx(1.65)
+        # Threshold = lowest threshold among the packs that actually derate
+        assert combined.high_soc_charge_threshold_pct == pytest.approx(95.0)
 
         combined_threshold_kwh = (
             combined.high_soc_charge_threshold_pct / 100.0 * combined.capacity_kwh
-        )  # = 9.75 kWh
+        )  # = 9.5 kWh
 
-        # Start at 9.8 kWh (98 %), clearly above the 97.5 % threshold
+        # Start at 9.8 kWh (98 %), clearly above the 95 % threshold
         start_soc = 9.8
         result = self._run(
             combined,
@@ -2063,7 +2068,7 @@ class TestOptimizeWithMultiplePacks:
             price_forecast=[0.05] * 4 + [0.30] * 4,
         )
         # Any charge step while SoC is at or above the combined threshold must
-        # not exceed the derated limit (0.45 kW).
+        # not exceed the combined derated limit (1.65 kW).
         for i, (mode, power) in enumerate(
             zip(result.mode_schedule, result.power_schedule_kw)
         ):
@@ -2071,9 +2076,24 @@ class TestOptimizeWithMultiplePacks:
                 mode == "charging"
                 and result.soc_schedule_kwh[i] >= combined_threshold_kwh
             ):
-                assert power <= 0.46, (
-                    f"step {i}: charge {power:.3f} kW exceeds derated limit 0.45 kW"
+                assert power <= 1.66, (
+                    f"step {i}: charge {power:.3f} kW exceeds derated limit 1.65 kW"
                 )
+
+    def test_derating_absent_on_all_packs_stays_disabled(self):
+        """With no pack derating, the combined config must keep derating off."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        a = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        b = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=2.0)
+        combined = aggregate_battery_configs([a, b])
+
+        assert combined.high_soc_max_charge_kw == 0.0
+        assert combined.low_soc_max_discharge_kw == 0.0
+        # Sentinel of 0 kW means "no derating": full rating at every SoC.
+        assert combined.max_charge_at_soc(combined.max_soc_kwh) == pytest.approx(3.2)
 
     # ------------------------------------------------------------------
     # 7. Floating-point SoC boundary regression (known bug #3)

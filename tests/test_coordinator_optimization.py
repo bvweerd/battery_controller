@@ -16,6 +16,7 @@ from custom_components.battery_controller.const import (
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
+    CONF_MAX_GRID_POWER_KW,
     CONF_MAX_SOC_PERCENT,
     CONF_MIN_SOC_PERCENT,
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
@@ -4320,3 +4321,81 @@ def test_resolve_controller_mode_hybrid_plus_blocks_surplus_upgrade(hass):
     coord._control_mode = MODE_HYBRID
     coord._hybrid_plus_capture_blocked = True
     assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
+
+
+# ---------------------------------------------------------------------------
+# Entry-level configuration overlay (grid cap, DC coupling)
+# ---------------------------------------------------------------------------
+
+
+def test_entry_level_grid_cap_reaches_optimizer_config(hass):
+    """The grid capacity cap lives on the entry, not on a battery subentry.
+
+    BatteryConfig.from_subentry cannot read it and aggregate_battery_configs
+    treats an unset per-battery cap as "unlimited", so without the overlay the
+    configured cap silently never reached calculate_step_cost.
+    """
+    coordinator = _make_coordinator(hass)
+    assert coordinator.battery_config.max_grid_power_kw == 0.0
+
+    coordinator.config[CONF_MAX_GRID_POWER_KW] = 17.0
+    coordinator._apply_entry_level_config()
+
+    assert coordinator.battery_config.max_grid_power_kw == pytest.approx(17.0)
+
+
+def test_entry_level_grid_cap_survives_config_refresh(hass, monkeypatch):
+    """_refresh_battery_config rebuilds the aggregate; the cap must be re-applied."""
+    coordinator = _make_coordinator(hass)
+    coordinator.config[CONF_MAX_GRID_POWER_KW] = 17.0
+
+    subentry = MagicMock()
+    subentry.data = {
+        CONF_MAX_CHARGE_POWER_KW: 1.2,
+        CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+        CONF_MIN_SOC_PERCENT: 10.0,
+        CONF_MAX_SOC_PERCENT: 100.0,
+    }
+    entry = MagicMock()
+    entry.subentries = {"bat1": subentry}
+    monkeypatch.setattr(
+        coordinator.hass.config_entries, "async_get_entry", lambda _id: entry
+    )
+
+    coordinator._refresh_battery_config()
+
+    assert coordinator.battery_config.max_grid_power_kw == pytest.approx(17.0)
+
+
+def test_refresh_battery_config_updates_zero_grid_controller(hass, monkeypatch):
+    """The real-time controller must clamp with the refreshed limits.
+
+    It holds its own reference, so rebinding coordinator.battery_config alone
+    left the ~5 s control loop clamping on setup-time SoC limits and power
+    ratings for as long as the integration stayed loaded.
+    """
+    coordinator = _make_coordinator(hass)
+    assert coordinator.zero_grid_controller.battery_config is coordinator.battery_config
+
+    subentry = MagicMock()
+    subentry.data = {
+        CONF_MAX_CHARGE_POWER_KW: 3.5,
+        CONF_MAX_DISCHARGE_POWER_KW: 3.5,
+        CONF_MIN_SOC_PERCENT: 20.0,
+        CONF_MAX_SOC_PERCENT: 80.0,
+    }
+    entry = MagicMock()
+    entry.subentries = {"bat1": subentry}
+    monkeypatch.setattr(
+        coordinator.hass.config_entries, "async_get_entry", lambda _id: entry
+    )
+
+    coordinator._refresh_battery_config()
+
+    controller_cfg = coordinator.zero_grid_controller.battery_config
+    assert controller_cfg is coordinator.battery_config
+    assert controller_cfg.max_charge_power_kw == pytest.approx(3.5)
+    # A setpoint above the new rating must now be clamped to it.
+    assert coordinator.zero_grid_controller._calculate_follow_schedule(
+        5000.0, controller_cfg.min_soc_kwh + 1.0
+    ) == pytest.approx(3500.0)
