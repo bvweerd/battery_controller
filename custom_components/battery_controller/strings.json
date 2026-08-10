@@ -18,19 +18,21 @@
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
-              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, gross household load)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
-              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+              "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
+              "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
+              "grid_import_sensors": "Grid import sensors (kWh, e.g. DSMR)",
+              "grid_export_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "gross_load_sensors": "Household load sensors (kWh, optional override)",
+              "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors for gross household load — everything the house draws, from grid, PV or battery alike. Not grid import: the PV forecast is subtracted separately, so a grid meter here subtracts PV twice. Used to learn consumption patterns over time.",
-              "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
-              "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
+              "grid_import_sensors": "Cumulative kWh drawn from the grid. Household load is not configured but derived: gross = import − export + PV + discharge − charge, using this field, the export and PV fields below, and the energy counters on each battery.",
+              "grid_export_sensors": "Cumulative kWh fed back to the grid. Without it, PV that went out to the grid would be counted as consumption the house never drew.",
+              "gross_load_sensors": "Only if you have a meter between the inverter and the house. It measures household load directly, so when set the calculation above is skipped entirely. More accurate than summing several meters, and the only workable source when a term is unmeasurable — for example DC-coupled PV with no DC counter. Leave empty otherwise.",
+              "pv_production_sensors": "Cumulative kWh from PV inverters — the PV term of that same reconstruction, covering the production that served the house rather than the grid. Without it the integration falls back to its own PV forecast history, which is less accurate."
             }
           },
           "advanced": {
@@ -124,19 +126,21 @@
             "name": "Optional Sensors",
             "data": {
               "feed_in_price_sensor": "Feed-in price sensor (if different from buy price)",
-              "power_consumption_sensors": "Power consumption sensors (W, e.g. DSMR - for real-time grid balance)",
-              "power_production_sensors": "Power production sensors (W, e.g. DSMR - for real-time grid balance)",
-              "electricity_consumption_sensors": "Electricity consumption sensors (kWh, gross household load)",
-              "electricity_production_sensors": "Electricity production sensors (kWh, e.g. DSMR)",
-              "pv_production_sensors": "PV inverter production sensors (kWh) – corrects double-counting when combined with grid export sensors above"
+              "power_consumption_sensors": "Grid import power sensors (W, e.g. DSMR — for real-time balance)",
+              "power_production_sensors": "Grid export power sensors (W, e.g. DSMR — for real-time balance)",
+              "grid_import_sensors": "Grid import sensors (kWh, e.g. DSMR)",
+              "grid_export_sensors": "Grid export sensors (kWh, e.g. DSMR)",
+              "gross_load_sensors": "Household load sensors (kWh, optional override)",
+              "pv_production_sensors": "PV production sensors (kWh)"
             },
             "data_description": {
               "feed_in_price_sensor": "Optional separate sensor for the export/feed-in price. If absent, the fixed feed-in price below is used.",
               "power_consumption_sensors": "Sum of all grid import power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
               "power_production_sensors": "Sum of all grid export power sensors. Used by the zero-grid controller for real-time balance (~5 s updates).",
-              "electricity_consumption_sensors": "Cumulative kWh sensors for gross household load — everything the house draws, from grid, PV or battery alike. Not grid import: the PV forecast is subtracted separately, so a grid meter here subtracts PV twice. Used to learn consumption patterns over time.",
-              "electricity_production_sensors": "Cumulative kWh sensors for grid export. Used for production tracking.",
-              "pv_production_sensors": "Cumulative kWh from PV inverters. Prevents double-counting consumption when grid export sensors already include PV production."
+              "grid_import_sensors": "Cumulative kWh drawn from the grid. Household load is not configured but derived: gross = import − export + PV + discharge − charge, using this field, the export and PV fields below, and the energy counters on each battery.",
+              "grid_export_sensors": "Cumulative kWh fed back to the grid. Without it, PV that went out to the grid would be counted as consumption the house never drew.",
+              "gross_load_sensors": "Only if you have a meter between the inverter and the house. It measures household load directly, so when set the calculation above is skipped entirely. More accurate than summing several meters, and the only workable source when a term is unmeasurable — for example DC-coupled PV with no DC counter. Leave empty otherwise.",
+              "pv_production_sensors": "Cumulative kWh from PV inverters — the PV term of that same reconstruction, covering the production that served the house rather than the grid. Without it the integration falls back to its own PV forecast history, which is less accurate."
             }
           },
           "advanced": {
@@ -183,6 +187,8 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
             "battery_power_sensor": "Battery power sensor (optional)",
+            "battery_energy_charged_sensor": "Battery charged sensor (kWh, optional)",
+            "battery_energy_discharged_sensor": "Battery discharged sensor (kWh, optional)",
             "pv_dc_efficiency": "DC coupling efficiency (0–1, for DC-coupled PV on this inverter)",
             "high_soc_charge_threshold_pct": "High-SoC charge derating threshold (%, optional)",
             "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
@@ -197,6 +203,8 @@
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
             "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Positive = charging, negative = discharging (this is the opposite sign convention from the power sensors the integration creates, e.g. Battery Setpoint). Optional; improves real-time charge/discharge mode detection.",
+            "battery_energy_charged_sensor": "Cumulative kWh charged into this battery. Used to reconstruct gross household load when the consumption sensor measures grid import, because charging from the grid passes the meter and would otherwise be learned as household consumption. If one inverter reports a single counter for several packs, set it on one of them.",
+            "battery_energy_discharged_sensor": "Cumulative kWh discharged from this battery. Added back for the same reconstruction, because discharging displaces grid import and would otherwise hide the load it served.",
             "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
             "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
             "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",
@@ -218,6 +226,8 @@
             "max_soc_percent": "Maximum SoC (%)",
             "battery_soc_sensor": "Battery SoC sensor",
             "battery_power_sensor": "Battery power sensor (optional)",
+            "battery_energy_charged_sensor": "Battery charged sensor (kWh, optional)",
+            "battery_energy_discharged_sensor": "Battery discharged sensor (kWh, optional)",
             "pv_dc_efficiency": "DC coupling efficiency (0–1)",
             "high_soc_charge_threshold_pct": "High-SoC charge derating threshold (%, optional)",
             "high_soc_max_charge_kw": "Derated charge power above threshold (kW, optional)",
@@ -232,6 +242,8 @@
             "max_soc_percent": "Optimizer will not charge above this level. Keeping below 100% extends battery life.",
             "battery_soc_sensor": "Sensor reporting state of charge (0–100 %) or energy in kWh. Required.",
             "battery_power_sensor": "Sensor reporting instantaneous battery power (W or kW). Positive = charging, negative = discharging (this is the opposite sign convention from the power sensors the integration creates, e.g. Battery Setpoint). Optional; improves real-time charge/discharge mode detection.",
+            "battery_energy_charged_sensor": "Cumulative kWh charged into this battery. Used to reconstruct gross household load when the consumption sensor measures grid import, because charging from the grid passes the meter and would otherwise be learned as household consumption. If one inverter reports a single counter for several packs, set it on one of them.",
+            "battery_energy_discharged_sensor": "Cumulative kWh discharged from this battery. Added back for the same reconstruction, because discharging displaces grid import and would otherwise hide the load it served.",
             "pv_dc_efficiency": "Efficiency from PV panels to the inverter's DC bus (typically 0.97 for MPPT conversion losses only). Only relevant when DC-coupled PV arrays are configured.",
             "high_soc_charge_threshold_pct": "Above this SoC the battery's accepted charge power is reduced. Leave empty if not applicable.",
             "high_soc_max_charge_kw": "Maximum charge power allowed above the high-SoC threshold. Leave empty if not applicable.",

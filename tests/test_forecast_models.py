@@ -47,7 +47,7 @@ class TestConsumptionForecastModel:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.electricity_consumed_tariff_1"],
+            grid_import_sensors=["sensor.electricity_consumed_tariff_1"],
             base_consumption_kw=0.5,
         )
         # Inject a learned pattern
@@ -59,7 +59,7 @@ class TestConsumptionForecastModel:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=[],
+            grid_import_sensors=[],
             base_consumption_kw=0.5,
         )
         result = model.get_current_consumption()
@@ -152,8 +152,8 @@ class TestAsyncUpdatePattern:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
-            production_sensors=["sensor.production"],
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
             pv_production_sensors=["sensor.pv_total"],
         )
         # net = 2.0 - 1.5 = 0.5 kWh; after correction +1.5 → 2.0 (gross consumption)
@@ -174,13 +174,82 @@ class TestAsyncUpdatePattern:
         assert (10, 0) in model._hourly_pattern
         assert model._hourly_pattern[(10, 0)] == pytest.approx(2.0)
 
+    async def test_battery_correction_completes_the_identity(self):
+        """Battery charge is subtracted and discharge added back.
+
+        gross = import - export + pv + discharge - charge. Without this,
+        charging from the grid is learned as household consumption.
+        """
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
+            pv_production_sensors=["sensor.pv_total"],
+            battery_charge_sensors=["sensor.batt_in"],
+            battery_discharge_sensors=["sensor.batt_out"],
+        )
+        # import 4.0, export 1.5, pv 1.5, charged 2.0, discharged 0.5
+        # gross = 4.0 - 1.5 + 1.5 + 0.5 - 2.0 = 2.5
+        base_stats = self._base_stats(4.0, 1.5)
+        pv_stats = {"sensor.pv_total": [{"start": self._TS, "change": 1.5}]}
+        battery_stats = {
+            "sensor.batt_in": [{"start": self._TS, "change": 2.0}],
+            "sensor.batt_out": [{"start": self._TS, "change": 0.5}],
+        }
+
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            side_effect=[base_stats, pv_stats, battery_stats]
+        )
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        assert model._hourly_pattern[(10, 0)] == pytest.approx(2.5)
+
+    async def test_measured_mode_applies_no_corrections(self):
+        """gross_load_sensors is taken as-is: no PV and no battery correction.
+
+        Such a meter sits between inverter and house, so neither PV that served
+        the house nor grid-to-battery charging ever passes it.
+        """
+        hass = MagicMock()
+        model = ConsumptionForecastModel(
+            hass=hass,
+            gross_load_sensors=["sensor.house_load"],
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
+            pv_production_sensors=["sensor.pv_total"],
+            battery_charge_sensors=["sensor.batt_in"],
+            battery_discharge_sensors=["sensor.batt_out"],
+        )
+        base_stats = {"sensor.house_load": [{"start": self._TS, "change": 2.0}]}
+
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(side_effect=[base_stats])
+
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+
+        # Exactly one statistics query: the override short-circuits everything,
+        # even though every reconstruction input is also configured.
+        assert mock_instance.async_add_executor_job.await_count == 1
+        assert model._hourly_pattern[(10, 0)] == pytest.approx(2.0)
+
     async def test_layer2_uses_entity_registry_fallback(self):
         """Layer 2: own pv_forecast entity used when pv_production_sensors absent."""
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
-            production_sensors=["sensor.production"],
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
             entry_id="myentry",
         )
         base_stats = self._base_stats(2.0, 1.5)
@@ -210,12 +279,12 @@ class TestAsyncUpdatePattern:
         assert model._hourly_pattern[(10, 0)] == pytest.approx(2.0)
 
     async def test_layer3_warning_when_no_correction(self, caplog):
-        """Layer 3: warning logged when production_sensors present but no correction."""
+        """Layer 3: warning logged when grid_export_sensors present but no correction."""
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
-            production_sensors=["sensor.production"],
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
             # No pv_production_sensors, no entry_id
         )
         base_stats = self._base_stats(2.0, 1.5)
@@ -234,14 +303,14 @@ class TestAsyncUpdatePattern:
         ):
             await model.async_update_pattern()
 
-        assert "double-counting" in caplog.text
+        assert "no PV correction could be applied" in caplog.text
 
     async def test_no_warning_without_production_sensors(self, caplog):
-        """No double-counting warning when production_sensors not configured."""
+        """No double-counting warning when grid_export_sensors not configured."""
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         base_stats = {"sensor.consumption": [{"start": self._TS, "change": 2.0}]}
         mock_instance = MagicMock()
@@ -274,7 +343,7 @@ class TestAsyncUpdatePattern:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         dt_start = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
         expected_local = dt_util.as_local(dt_start)
@@ -807,7 +876,7 @@ class TestConsumptionForecastModelEmptyStats:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         mock_instance = MagicMock()
         mock_instance.async_add_executor_job = AsyncMock(return_value={})
@@ -841,7 +910,7 @@ class TestConsumptionForecastModelTsAndValueNone:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         # 'change' is None → _ts_and_value returns None → entry skipped
         stats = {
@@ -873,7 +942,7 @@ class TestConsumptionForecastModelSeasonalMinSamples:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         # Use multiple timestamps in the same (hour, weekday, season) bucket
         # 2024-01-01, 2024-01-08, 2024-01-15 are all Mondays in winter, hour=10
@@ -910,7 +979,7 @@ class TestConsumptionForecastModelImportError:
         hass = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
 
         with (
@@ -942,7 +1011,7 @@ class TestConsumptionForecastModelGenericException:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         mock_instance = MagicMock()
         mock_instance.async_add_executor_job = AsyncMock(
@@ -1134,8 +1203,8 @@ class TestConsumptionForecastModelLayer2Exception:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
-            production_sensors=["sensor.production"],
+            grid_import_sensors=["sensor.consumption"],
+            grid_export_sensors=["sensor.production"],
             entry_id="myentry",
             # No pv_production_sensors → layer 2 path
         )
@@ -1183,7 +1252,7 @@ class TestConsumptionForecastModelNullDatetimeParse:
         hass = MagicMock()
         model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=["sensor.consumption"],
+            grid_import_sensors=["sensor.consumption"],
         )
         # start=None + change=1.0: _ts_and_value returns ("", 1.0)
         # hourly_net[""] = 1.0, but parse_datetime("") = None → line 314 continue
@@ -1307,7 +1376,7 @@ class TestAsyncUpdatePatternStartFormats:
     async def _run(self, start_value):
         hass = MagicMock()
         model = ConsumptionForecastModel(
-            hass=hass, consumption_sensors=["sensor.consumption"]
+            hass=hass, grid_import_sensors=["sensor.consumption"]
         )
         stats = {"sensor.consumption": [{"start": start_value, "change": 2.5}]}
         mock_instance = MagicMock()
@@ -1366,7 +1435,7 @@ class TestConsumptionOutlierRejection:
         """Run the learner over a list of (hour_offset, change_kwh)."""
         hass = MagicMock()
         model = ConsumptionForecastModel(
-            hass=hass, consumption_sensors=["sensor.consumption"]
+            hass=hass, grid_import_sensors=["sensor.consumption"]
         )
         rows = [
             {"start": (self._DT + timedelta(days=7 * i)).timestamp(), "change": v}

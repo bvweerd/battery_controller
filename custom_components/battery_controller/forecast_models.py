@@ -122,32 +122,55 @@ class ConsumptionForecastModel:
     """Model for household consumption forecasting.
 
     Uses DSMR-style energy sensors (kWh, total_increasing) for pattern learning.
-    Net consumption = sum(consumption_sensors) - sum(production_sensors).
     Hourly kWh change from HA statistics equals average kW during that hour.
 
-    PV double-counting correction (three layers, first available wins):
-    1. pv_production_sensors: real kWh sensors from inverter(s) → add back to net
-    2. own pv_forecast sensor history (via entry_id lookup) → self-consistent correction
-    3. Warning log when production_sensors configured without a correction method
+    What the pattern must represent is gross household load: everything the house
+    draws, whatever served it. There are two ways to arrive at that, and which one
+    applies is explicit rather than inferred from which fields happen to be set.
+
+    **Measured** — gross_load_sensors is set. A meter between the inverter and the
+    house reports the figure directly, so it is used as-is and no correction of any
+    kind applies. More accurate than summing several meters, and the only workable
+    source when the component set is incomplete (e.g. DC-coupled PV with no DC
+    counter, where the reconstruction would silently under-report).
+
+    **Reconstructed** — otherwise, from the physical measurements:
+
+        gross = import - export + pv + discharge - charge
+
+    grid_import_sensors and grid_export_sensors give the first two. For PV there
+    are three layers, first available wins:
+    1. pv_production_sensors: real kWh sensors from inverter(s)
+    2. own pv_forecast sensor history (via entry_id lookup) → self-consistent
+    3. Warning log when neither is available
+    Battery charge and discharge come from the per-subentry energy counters; a
+    warning is logged when they are missing, since grid charging would otherwise
+    be learned as household load.
     """
 
     def __init__(
         self,
         hass: HomeAssistant,
-        consumption_sensors: list[str] | None = None,
-        production_sensors: list[str] | None = None,
+        grid_import_sensors: list[str] | None = None,
+        grid_export_sensors: list[str] | None = None,
         history_days: int = 14,
         base_consumption_kw: float = 0.5,
         pv_production_sensors: list[str] | None = None,
         entry_id: str | None = None,
+        battery_charge_sensors: list[str] | None = None,
+        battery_discharge_sensors: list[str] | None = None,
+        gross_load_sensors: list[str] | None = None,
     ):
         """Initialize consumption forecast model."""
         self.hass = hass
-        self.consumption_sensors = consumption_sensors or []
-        self.production_sensors = production_sensors or []
+        self.grid_import_sensors = grid_import_sensors or []
+        self.grid_export_sensors = grid_export_sensors or []
+        self.gross_load_sensors = gross_load_sensors or []
         self.history_days = history_days
         self.base_consumption_kw = base_consumption_kw
         self.pv_production_sensors = pv_production_sensors or []
+        self.battery_charge_sensors = battery_charge_sensors or []
+        self.battery_discharge_sensors = battery_discharge_sensors or []
         self._entry_id = entry_id
         # Non-seasonal pattern (hour, day_of_week) → average kW
         self._hourly_pattern: dict[tuple[int, int], float] = {}
@@ -161,19 +184,18 @@ class ConsumptionForecastModel:
     async def async_update_pattern(self) -> None:
         """Update consumption pattern from historical energy data.
 
-        Queries HA recorder statistics for hourly energy changes (kWh).
-        Net consumption = sum(consumption) - sum(production) per hour.
-        kWh per hour equals average kW, so values map directly to power.
+        Queries HA recorder statistics for hourly energy changes (kWh). kWh per
+        hour equals average kW, so values map directly to power.
 
-        If electricity_production_sensors are configured alongside a PV model,
-        the learned value is net grid exchange (import - export = consumption - PV).
-        To avoid double-counting when the optimizer subtracts PV forecast again,
-        we add back the historical PV production (three-layer fallback):
-          1. pv_production_sensors: real inverter kWh sensors (most accurate)
-          2. own pv_forecast sensor history from HA recorder (self-consistent)
-          3. Warning log if no correction is possible
+        Measured mode (gross_load_sensors set) takes the figure as-is.
+        Otherwise it is reconstructed as import - export + pv + discharge - charge;
+        see the class docstring for the PV fallback layers.
         """
-        all_sensors = self.consumption_sensors + self.production_sensors
+        measured = bool(self.gross_load_sensors)
+        if measured:
+            all_sensors = list(self.gross_load_sensors)
+        else:
+            all_sensors = self.grid_import_sensors + self.grid_export_sensors
         if not all_sensors:
             return
 
@@ -228,25 +250,27 @@ class ConsumptionForecastModel:
                     start_dt = parsed
                 return start_dt, float(value)
 
-            for sensor_id in self.consumption_sensors:
+            positive = self.gross_load_sensors if measured else self.grid_import_sensors
+            for sensor_id in positive:
                 for stat in stats.get(sensor_id, []):
                     result = _ts_and_value(stat, "change")
                     if result:
                         stat_dt, val = result
                         hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + val
 
-            for sensor_id in self.production_sensors:
-                for stat in stats.get(sensor_id, []):
-                    result = _ts_and_value(stat, "change")
-                    if result:
-                        stat_dt, val = result
-                        hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - val
+            if not measured:
+                for sensor_id in self.grid_export_sensors:
+                    for stat in stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - val
 
             # PV correction: add back historical PV production so that the
             # stored pattern represents gross household consumption.
             # This prevents double-counting when the optimizer subtracts pv_forecast.
             pv_corrected = False
-            if self.production_sensors and self.pv_production_sensors:
+            if not measured and self.pv_production_sensors:
                 # Layer 1: real PV inverter kWh sensors
                 pv_stats = await get_instance(self.hass).async_add_executor_job(
                     statistics_during_period,
@@ -271,7 +295,7 @@ class ConsumptionForecastModel:
                     "PV correction applied from %d production sensor(s)",
                     len(self.pv_production_sensors),
                 )
-            elif self.production_sensors and self._entry_id:
+            elif not measured and self._entry_id:
                 # Layer 2: own pv_forecast sensor history (state_class=MEASUREMENT)
                 try:
                     from homeassistant.helpers import entity_registry as er
@@ -311,13 +335,65 @@ class ConsumptionForecastModel:
                         "Could not apply PV correction from forecast sensor: %s", err
                     )
 
-            if self.production_sensors and not pv_corrected:
+            if not measured and not pv_corrected:
                 # Layer 3: warn that double-counting may occur
                 _LOGGER.warning(
-                    "electricity_production_sensors are configured alongside a PV model "
-                    "but no PV correction could be applied. This may cause double-counting "
-                    "of PV in the consumption forecast. Configure 'pv_production_sensors' "
+                    "Household load is reconstructed from grid import and export, but "
+                    "no PV correction could be applied. PV that served the house is "
+                    "then missing from the pattern. Configure 'pv_production_sensors' "
                     "with your inverter's total energy sensor(s) to fix this."
+                )
+
+            # Battery correction: complete the identity
+            #   gross = import - export + pv + discharge - charge
+            # Charging from the grid passes the grid meter, so without this it is
+            # reconstructed as household load; discharging displaces import, so
+            # without this the load it served goes missing. Both errors are
+            # concentrated in specific hours, which is exactly the axis the
+            # pattern is learned on.
+            battery_ids = set(self.battery_charge_sensors) | set(
+                self.battery_discharge_sensors
+            )
+            if not measured and battery_ids:
+                battery_stats = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    battery_ids,
+                    "hour",
+                    None,
+                    {"change"},
+                )
+                # Both are non-negative cumulative counters; clamp so a bogus
+                # negative change cannot flip the correction's direction.
+                for sensor_id in self.battery_discharge_sensors:
+                    for stat in battery_stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) + max(
+                                0.0, val
+                            )
+                for sensor_id in self.battery_charge_sensors:
+                    for stat in battery_stats.get(sensor_id, []):
+                        result = _ts_and_value(stat, "change")
+                        if result:
+                            stat_dt, val = result
+                            hourly_net[stat_dt] = hourly_net.get(stat_dt, 0.0) - max(
+                                0.0, val
+                            )
+                _LOGGER.debug(
+                    "Battery correction applied from %d charge and %d discharge sensor(s)",
+                    len(self.battery_charge_sensors),
+                    len(self.battery_discharge_sensors),
+                )
+            elif not measured:
+                _LOGGER.warning(
+                    "Household load is reconstructed from grid import and export, but "
+                    "no battery energy counters are set. Grid charging will be learned "
+                    "as household consumption. Set the charged and discharged sensors "
+                    "on each battery to fix this."
                 )
 
             # Group by (hour, day_of_week) and also (hour, day_of_week, season).

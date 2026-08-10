@@ -103,9 +103,10 @@ file as an empty `consumption_hourly_pattern`.
   statistics **type**. A `state_class` of `measurement` instead of `total_increasing` is
   the usual cause — see
   [verifying your consumption sensors](installation.md#verifying-your-consumption-sensors).
-- If the sensor is correct but measures **grid import** rather than gross household load,
-  the learner sees almost nothing during sunny periods. The kWh field needs gross load —
-  see [the two consumption fields](configuration.md#optional-sensors).
+- If *Grid import sensors* is set but *Grid export sensors*, *PV production sensors* or
+  the battery counters are missing, the derived household load is wrong — each missing
+  term logs its own warning. See
+  [household load is derived](configuration.md#optional-sensors).
 
 **Step 3 — do not wait.** Waiting does not help in any of these cases. Once the sensor is
 configured correctly, the learner picks up the **existing** 14 days of recorder history
@@ -113,9 +114,9 @@ at the next refresh, within 15 minutes. Re-adding the integration does not affec
 either way.
 
 !!! note "If the pattern is consistently too *high*"
-    That points the other way: an *Energy production sensors* entry combined with *PV
-    production sensors* adds PV back into the pattern. That correction is only correct
-    when your consumption sensor measures net grid import.
+    Check the battery counters. Without them, every kWh charged from the grid is derived
+    as household load, so a nightly grid charge shows up as a large phantom night-time
+    consumption.
 
 ## The PV forecast is always zero
 

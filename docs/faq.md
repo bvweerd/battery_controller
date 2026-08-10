@@ -101,31 +101,40 @@ individual charge and discharge decision, including the ones it declined to make
 
 ## Sensors and forecasts
 
-### What is the difference between "Energy consumption sensors" and "Power consumption sensors"?
+### Where do I put my P1 meter, and why is there no "consumption" field?
 
-They take different kinds of sensor, and this is the source of most configuration
-confusion.
+Your P1 import and export go in **Grid import sensors** and **Grid export sensors** (kWh)
+for pattern learning, and in **Power consumption / production sensors** (W) for real-time
+control. Same meter, two fields, because one is a cumulative counter and the other a live
+reading.
 
-| Field | Unit | What it must measure | What it is used for |
-|-------|------|----------------------|---------------------|
-| Energy consumption sensors | kWh, cumulative | **Gross household load** — everything the house draws, from any source | Learning the consumption pattern |
-| Power consumption sensors | W, live | **Grid import**, positive = import | Real-time zero-grid control only |
+There is no consumption field because household load is derived, not configured:
+
+```
+gross = import − export + PV + discharge − charge
+```
+
+| Field | Unit | What it must measure |
+|-------|------|----------------------|
+| Grid import / export sensors | kWh, cumulative | Your P1 registers |
+| PV production sensors | kWh, cumulative | Inverter total production |
+| Battery charged / discharged | kWh, cumulative | Per battery subentry |
+| Power consumption / production sensors | W, live | Grid meter, for zero-grid control |
+| Household load sensors | kWh, cumulative | *Optional override* — only if you have a meter between inverter and house |
 
 ```mermaid
 flowchart LR
-    GRID(["Grid"]) ---|"B — grid meter<br/><i>Power consumption sensors (W)</i>"| INV
+    GRID(["Grid"]) ---|"B — grid meter<br/><i>Grid import / export sensors</i>"| INV
     PV(["PV"]) --> INV
-    INV["Inverter<br/>+ battery"] ---|"A — gross load<br/><i>Energy consumption sensors (kWh)</i>"| HOUSE(["House"])
+    INV["Inverter<br/>+ battery"] ---|"A — gross load<br/><i>Household load sensors (optional)</i>"| HOUSE(["House"])
 
     style INV fill:#0f766e22,stroke:#0f766e
 ```
 
-The optimizer computes `net_load = consumption − PV` itself. If you feed grid import into
-the kWh field, PV is subtracted twice: once by physics (it never passed the meter) and
-once by the optimizer.
-
-A sensor between the inverter and the house is the right pick for the kWh field. Your
-grid meter is the right pick for the W field.
+If you do have a meter at **A** — between the inverter and the house — put it in
+*Household load sensors* and the derivation is skipped entirely. That is more accurate,
+and it is the only workable route when a term cannot be measured, such as DC-coupled PV
+with no DC-side counter.
 
 ### My consumption forecast is far too low
 

@@ -14,8 +14,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
-    CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
+    CONF_GRID_EXPORT_SENSORS,
+    CONF_GRID_IMPORT_SENSORS,
+    CONF_GROSS_LOAD_SENSORS,
     CONF_PV_FORECAST_SENSORS,
     CONF_PV_PRODUCTION_SENSORS,
     DC_TO_AC_INVERTER_EFFICIENCY,
@@ -32,6 +35,21 @@ from .forecast_models import (
 from .helpers import extract_pv_forecast_series
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _battery_energy_sensors(config: dict[str, Any], key: str) -> list[str]:
+    """Collect one battery energy counter per subentry that has it configured.
+
+    Deduplicated: where a single inverter reports one counter for several packs,
+    the same entity may legitimately be selected on more than one subentry, and
+    counting it twice would distort the reconstruction.
+    """
+    seen: list[str] = []
+    for _subentry_id, data in config.get("battery_subentries", []):
+        entity_id = data.get(key)
+        if entity_id and entity_id not in seen:
+            seen.append(entity_id)
+    return seen
 
 
 class ForecastCoordinator(DataUpdateCoordinator):
@@ -106,12 +124,19 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
         self.consumption_model = ConsumptionForecastModel(
             hass=hass,
-            consumption_sensors=config.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS, []),
-            production_sensors=config.get(CONF_ELECTRICITY_PRODUCTION_SENSORS, []),
+            grid_import_sensors=config.get(CONF_GRID_IMPORT_SENSORS, []),
+            grid_export_sensors=config.get(CONF_GRID_EXPORT_SENSORS, []),
+            gross_load_sensors=config.get(CONF_GROSS_LOAD_SENSORS, []),
             history_days=14,
             base_consumption_kw=0.5,
             pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),
             entry_id=config.get("entry_id"),
+            battery_charge_sensors=_battery_energy_sensors(
+                config, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+            ),
+            battery_discharge_sensors=_battery_energy_sensors(
+                config, CONF_BATTERY_ENERGY_DISCHARGED_SENSOR
+            ),
         )
 
         self.net_load_model = NetLoadForecast(
