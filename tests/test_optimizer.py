@@ -11,7 +11,10 @@ from custom_components.battery_controller.const import (
     ACTION_IDLE,
     MAX_SOC_STATES,
 )
-from custom_components.battery_controller.efficiency_curve import EfficiencyCurve
+from custom_components.battery_controller.efficiency_curve import (
+    EfficiencyCurve,
+    interpolate_efficiency,
+)
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
     _filter_micro_cycles,
@@ -2989,3 +2992,141 @@ class TestArbitrageHurdleInObjective:
         )
         stored_kwh = 1.0 * math.sqrt(0.90)
         assert charge - charge_free == pytest.approx(stored_kwh * hurdle)
+
+
+class TestSocGridExactFit:
+    """The DP SoC grid must land exactly on max_soc_kwh."""
+
+    @pytest.mark.parametrize(
+        "capacity_kwh, min_pct, max_pct",
+        [
+            (10.0, 10.0, 90.0),  # 8000 Wh: whole multiple of the 10 Wh target
+            (10.005, 10.0, 90.0),  # 8004 Wh: not a whole multiple
+            (7.68, 15.0, 95.0),
+            (55.0, 5.0, 95.0),  # coarsened by the MAX_SOC_STATES budget
+        ],
+    )
+    def test_top_state_is_max_soc(self, capacity_kwh, min_pct, max_pct):
+        cfg = BatteryConfig(
+            capacity_kwh=capacity_kwh,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=min_pct,
+            max_soc_percent=max_pct,
+        )
+        min_wh = round(cfg.min_soc_kwh * 1000)
+        max_wh = round(cfg.max_soc_kwh * 1000)
+        res = compute_soc_resolution_wh(min_wh, max_wh)
+        n = int(round((max_wh - min_wh) / res)) + 1
+        assert n <= MAX_SOC_STATES + 1
+        exact_res = (max_wh - min_wh) / (n - 1)
+        top = min_wh + (n - 1) * exact_res
+        assert top == pytest.approx(max_wh, abs=1e-6)
+
+    def test_fill_to_max_reaches_max_soc(self):
+        """The fill-to-max boundary action must end exactly at max_soc."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.005,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=cfg.max_soc_kwh - 0.05,
+            price_forecast=[0.01, 0.90, 0.90],
+            feed_in_forecast=[0.005, 0.45, 0.45],
+            pv_forecast=[0.0] * 3,
+            consumption_forecast=[0.0] * 3,
+            step_durations_hours=[1.0] * 3,
+            degradation_cost_per_kwh=0.001,
+            min_price_spread=0.0,
+        )
+        assert max(result.soc_schedule_kwh) <= cfg.max_soc_kwh + 1e-6
+
+
+class TestStepCostCacheInvariant:
+    """The per-step cost cache relies on step cost being SoC-independent.
+
+    simulate_diagnostics.py has no such cache, so tests/test_cross_impl.py is
+    the end-to-end check that it changes no result. These tests pin the
+    precondition the cache is built on.
+    """
+
+    @staticmethod
+    def _cfg(dc_coupled):
+        return BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve="0:0.88, 5:0.96",
+            discharge_efficiency_curve="0:0.86, 5:0.95",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=dc_coupled,
+            pv_dc_efficiency=0.97,
+        )
+
+    def _cost(self, cfg, soc_wh, action_w, pv_dc_w):
+        return calculate_step_cost(
+            time_step_hours=0.25,
+            soc_wh=soc_wh,
+            action_w=action_w,
+            grid_price=0.22,
+            feed_in_price=0.08,
+            pv_production_w=300.0,
+            consumption_w=700.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.003,
+            battery_config=cfg,
+            pv_dc_production_w=pv_dc_w,
+            arbitrage_cost_per_kwh=0.02,
+        )
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0, 0.0, 100.0, 3000.0])
+    def test_soc_independent_without_dc_pv(self, action_w):
+        """No DC PV: cost is the same at every SoC, so one probe covers all."""
+        cfg = self._cfg(dc_coupled=False)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 0.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 9000.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0])
+    def test_discharge_soc_independent_with_dc_pv(self, action_w):
+        """Discharging never reads the SoC, DC PV or not."""
+        cfg = self._cfg(dc_coupled=True)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 2000.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 8999.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [0.0, 1000.0])
+    def test_charge_and_idle_soc_independent_below_headroom_limit(self, action_w):
+        """With DC PV, charge/idle cost is constant until headroom clips it."""
+        cfg = self._cfg(dc_coupled=True)
+        pv_dc_w = 2000.0
+        max_soc_wh = cfg.max_soc_kwh * 1000
+        charge_eff = interpolate_efficiency(
+            cfg.charge_efficiency_curve_parsed, abs(action_w) / 1000.0
+        )
+        ac_stored_wh = action_w * 0.25 * charge_eff if action_w > 0 else 0.0
+        passive_full_wh = pv_dc_w * cfg.pv_dc_efficiency * 0.25
+        limit = max_soc_wh - ac_stored_wh - passive_full_wh
+
+        below = [
+            self._cost(cfg, soc_wh, action_w, pv_dc_w)
+            for soc_wh in (1000.0, 3000.0, limit - 1.0, limit)
+        ]
+        assert below == pytest.approx([below[0]] * len(below))
+
+        # Above the limit the headroom clips the passive charge, so the cost
+        # genuinely does depend on SoC and the cache must not be used.
+        clipped = self._cost(cfg, limit + 200.0, action_w, pv_dc_w)
+        assert clipped != pytest.approx(below[0])

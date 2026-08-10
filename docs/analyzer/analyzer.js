@@ -220,11 +220,15 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
   // Coarsen the SoC grid for large batteries so the state count stays
   // bounded (mirrors optimizer.py).
-  const socResWh  = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
-  const alignedStepW = socResWh / fullStepH;
+  const socResTargetWh = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
+  const alignedStepW = socResTargetWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
-  const nSocStates = Math.round((maxSocWh - minSocWh) / socResWh) + 1;
+  const nSocStates = Math.round((maxSocWh - minSocWh) / socResTargetWh) + 1;
+  // Exact-fit grid so the top state IS maxSocWh (mirrors optimizer.py).
+  const socResWh = nSocStates > 1
+    ? (maxSocWh - minSocWh) / (nSocStates - 1)
+    : socResTargetWh;
   const socStates  = [];
   for (let i = 0; i < nSocStates; i++) socStates.push(minSocWh + i * socResWh);
 

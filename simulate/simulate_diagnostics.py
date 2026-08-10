@@ -518,6 +518,9 @@ def run_dp(
     )
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
+    if n_soc_states > 1:
+        # Exact-fit grid so the top state IS max_soc_wh (mirrors optimizer.py).
+        soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     INF = float("inf")
