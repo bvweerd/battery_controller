@@ -684,8 +684,10 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
   const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
-  const breakeven = (terminalPrice + degrad) / sqrtRte;
-  const breakevenChg = (terminalPrice - degrad) * sqrtRte;
+  const arbCost      = Math.max(0, opts.min_price_spread ?? 0) / 2;
+  const decisionCost = degrad + arbCost;
+  const breakeven    = (terminalPrice + decisionCost) / sqrtRte;
+  const breakevenChg = (terminalPrice - decisionCost) * sqrtRte;
 
   document.getElementById('terminal-price-label').textContent    = terminalPrice.toFixed(4);
   document.getElementById('breakeven-discharge-label').textContent= breakeven.toFixed(4);
@@ -701,8 +703,8 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
     const cons   = consumFc && consumFc[t] !== undefined ? consumFc[t] : 0;
     const pvSurplus = pv - cons;
     const effChargePrice = pvSurplus > MIN_PV_SURPLUS_KW ? feedIn : price;
-    const chgProfit  = terminalPrice - effChargePrice / sqrtRte - degrad;
-    const discProfit = price * sqrtRte - terminalPrice - degrad;
+    const chgProfit  = terminalPrice - effChargePrice / sqrtRte - decisionCost;
+    const discProfit = price * sqrtRte - terminalPrice - decisionCost;
     const mode = modes[t] || 'idle';
     const soc  = socKwh[t] || 0;
     const pw   = powerKw[t] || 0;
@@ -1151,13 +1153,22 @@ function getSimParams() {
   const minSocPct = g('sp-min-soc');
   const maxSocPct = g('sp-max-soc');
   const rte       = g('sp-rte');
+  const maxChargeKw    = g('sp-charge-kw');
+  const maxDischargeKw = g('sp-discharge-kw');
+  // Flat per-direction curves at sqrt(RTE), the same derivation BatteryConfig
+  // uses for a scalar RTE. Without them runOptimizer read undefined curves,
+  // interpolateEfficiency returned 1.0 for every power, and the simulator
+  // silently ignored the round-trip efficiency the user entered.
+  const perDirEff = Math.sqrt(Math.max(1e-6, rte));
   return {
     rte,
+    chargeCurve:    [[0, perDirEff], [maxChargeKw, perDirEff]],
+    dischargeCurve: [[0, perDirEff], [maxDischargeKw, perDirEff]],
     capacityKwh:   capacity,
     minSocKwh:     capacity * minSocPct / 100,
     maxSocKwh:     capacity * maxSocPct / 100,
-    maxChargeKw:   g('sp-charge-kw'),
-    maxDischargeKw:g('sp-discharge-kw'),
+    maxChargeKw,
+    maxDischargeKw,
     pvDcCoupled:   false,
     pvDcEfficiency:0.97,
     maxGridPowerKw:0,
@@ -1291,16 +1302,23 @@ function runSimulator() {
       tbody.innerHTML = '';
       const sqrtRte = Math.sqrt(p.rte);
       const degrad  = degradPerKwhSim;
+      // The DP charges min_price_spread / 2 per kWh of commanded throughput, so
+      // the break-even columns must include it or they claim actions are
+      // profitable that the optimizer correctly refused.
+      const arbCostSim    = Math.max(0, p.minPriceSpread || 0) / 2;
+      const decisionCost  = degrad + arbCostSim;
       for (let t = 0; t < res.powerKw.length; t++) {
         const feedIn2 = feedIn[t] || price[t];
         const pvSurp  = (pv[t]||0) - (consump[t]||0);
         const effCp   = pvSurp > MIN_PV_SURPLUS_KW ? feedIn2 : price[t];
-        const discP   = price[t] * sqrtRte - res.terminalPrice - degrad;
-        const chgP    = res.terminalPrice - effCp / sqrtRte - degrad;
+        const discP   = price[t] * sqrtRte - res.terminalPrice - decisionCost;
+        const chgP    = res.terminalPrice - effCp / sqrtRte - decisionCost;
         const stepCost= calculateStepCost(
           stepH, res.socKwh[t]*1000, -res.powerKw[t]*1000, price[t], feedIn2,
-          (pv[t]||0)*1000, (consump[t]||0)*1000, p.rte, degrad,
-          false, 0, 0.97, 0, p.maxSocKwh * 1000
+          (pv[t]||0)*1000, (consump[t]||0)*1000,
+          p.chargeCurve, p.dischargeCurve, degrad,
+          p.pvDcCoupled, 0, p.pvDcEfficiency, p.maxGridPowerKw, p.maxSocKwh * 1000,
+          null, null, arbCostSim
         );
         const mode = res.modes[t];
         const tr = document.createElement('tr');

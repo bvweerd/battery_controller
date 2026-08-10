@@ -954,9 +954,16 @@ def profitability_analysis(
     battery_config,
     degradation_cost_per_kwh,
     terminal_price,
+    arbitrage_cost_per_kwh=0.0,
 ):
-    """For each step, compute the profitability of charging/discharging."""
+    """For each step, compute the profitability of charging/discharging.
+
+    arbitrage_cost_per_kwh (= min_price_spread / 2) is part of the DP objective,
+    so break-even prices must include it or this report says an action was
+    profitable that the optimizer correctly refused.
+    """
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+    decision_cost = degradation_cost_per_kwh + arbitrage_cost_per_kwh
     rows = []
 
     for t, (price, feed_in, dt, pv, cons) in enumerate(
@@ -1021,10 +1028,12 @@ def print_schedule(
     recorded_power=None,
     recorded_mode=None,
     recorded_soc=None,
+    arbitrage_cost=0.0,
 ):
     """Print a detailed schedule table."""
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    breakeven_discharge = (terminal_price + degradation_cost) / sqrt_rte
+    decision_cost = degradation_cost + arbitrage_cost
+    breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
 
     print()
     print("=" * 110)
@@ -1063,8 +1072,8 @@ def print_schedule(
         soc_before = soc_schedule_kwh[t]
         pv_surplus = pv - cons
         eff_charge_price = feed_in if pv_surplus > MIN_PV_SURPLUS_KW else price
-        charge_profit = terminal_price - eff_charge_price / sqrt_rte - degradation_cost
-        discharge_profit = price * sqrt_rte - terminal_price - degradation_cost
+        charge_profit = terminal_price - eff_charge_price / sqrt_rte - decision_cost
+        discharge_profit = price * sqrt_rte - terminal_price - decision_cost
 
         # Mark interesting steps
         marker = ""
@@ -1126,11 +1135,13 @@ def print_summary(
     degradation_cost,
     price_forecast,
     feed_in_forecast,
+    arbitrage_cost=0.0,
 ):
     sqrt_rte = math.sqrt(battery.round_trip_efficiency)
-    breakeven_discharge = (terminal_price + degradation_cost) / sqrt_rte
+    decision_cost = degradation_cost + arbitrage_cost
+    breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
     breakeven_charge = (
-        terminal_price - degradation_cost
+        terminal_price - decision_cost
     ) * sqrt_rte  # max price to charge at
 
     print()
@@ -1150,6 +1161,14 @@ def print_summary(
     print(
         f"  Degradation cost:         {degradation_cost:.4f} €/kWh"
         f"  ({degradation_cost * usable_kwh_disp:.4f} €/cycle, usable={usable_kwh_disp:.3f} kWh)"
+    )
+    print(
+        f"  Arbitrage hurdle:         {arbitrage_cost:.4f} €/kWh"
+        f"  (min_price_spread / 2, charged on commanded throughput)"
+    )
+    print(
+        f"  Decision cost per kWh:    {decision_cost:.4f} €/kWh"
+        f"  (degradation + hurdle; drives every break-even below)"
     )
     print()
     print(f"  Terminal price (last step): {terminal_price:.4f} €/kWh")
@@ -1171,14 +1190,10 @@ def print_summary(
     print()
 
     discharge_profitable = [
-        p
-        for p in price_forecast
-        if p * sqrt_rte - terminal_price - degradation_cost > 0
+        p for p in price_forecast if p * sqrt_rte - terminal_price - decision_cost > 0
     ]
     charge_profitable = [
-        p
-        for p in price_forecast
-        if terminal_price - p / sqrt_rte - degradation_cost > 0
+        p for p in price_forecast if terminal_price - p / sqrt_rte - decision_cost > 0
     ]
     print(f"  Steps where discharge is profitable: {len(discharge_profitable)}")
     print(f"  Steps where charging is profitable:  {len(charge_profitable)}")
@@ -1215,6 +1230,7 @@ def print_whatif(
     """Show what would happen with different terminal price assumptions."""
     sqrt_rte = math.sqrt(battery.round_trip_efficiency)
     max_price = max(price_forecast)
+    decision_cost = degradation_cost + max(0.0, min_price_spread) / 2.0
 
     print()
     print("=" * 70)
@@ -1232,10 +1248,10 @@ def print_whatif(
         terminal_price,
         terminal_price * 0.8,
         terminal_price * 0.6,
-        (max_price * sqrt_rte - degradation_cost) * 0.99,  # just profitable
+        (max_price * sqrt_rte - decision_cost) * 0.99,  # just profitable
     ]:
         tp = round(tp, 4)
-        breakeven = (tp + degradation_cost) / sqrt_rte
+        breakeven = (tp + decision_cost) / sqrt_rte
         possible = "YES ✓" if max_price >= breakeven else "NO ✗"
         marker = " ← actual" if abs(tp - terminal_price) < 1e-6 else ""
         print(
@@ -1497,6 +1513,7 @@ def main():
     rec_mode = sched.get("mode_schedule")
     rec_soc = sched.get("soc_schedule_kwh")
 
+    arbitrage_cost = max(0.0, min_price_spread) / 2.0
     print_summary(
         battery,
         current_soc_kwh,
@@ -1504,6 +1521,7 @@ def main():
         degradation_cost,
         price_forecast,
         feed_in_forecast,
+        arbitrage_cost=arbitrage_cost,
     )
 
     # Raw vs processed cost comparison from diagnostics
@@ -1537,6 +1555,7 @@ def main():
         recorded_power=rec_power,
         recorded_mode=rec_mode,
         recorded_soc=rec_soc,
+        arbitrage_cost=arbitrage_cost,
     )
 
     print_min_spread_analysis(
