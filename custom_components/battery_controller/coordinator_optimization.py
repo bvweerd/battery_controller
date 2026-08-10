@@ -47,9 +47,7 @@ from .const import (
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
-    CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_DEADBAND_W,
-    DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_HYBRID_PLUS,
@@ -447,11 +445,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._power_consumption_sensors or self._power_production_sensors
         )
         if has_power_sensors:
-            interval_s = float(
-                self.config.get(
-                    CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-                )
-            )
+            # Single source: create_zero_grid_controller already parsed this
+            # from the config, so re-reading it here could drift.
+            interval_s = self.zero_grid_controller.config.response_time_s
             self._unsub_realtime = async_track_time_interval(
                 self.hass,
                 self._handle_realtime_update,
@@ -676,10 +672,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # controller in an over-committed setpoint (e.g. the battery left
         # discharging after a Quooker/kettle spike), which only the next full
         # optimizer run would clear. Instead the flag is handled per-mode below.
-        stale_limit_s = STALE_SENSOR_MULTIPLIER * float(
-            self.config.get(
-                CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-            )
+        stale_limit_s = (
+            STALE_SENSOR_MULTIPLIER * self.zero_grid_controller.config.response_time_s
         )
         grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
 

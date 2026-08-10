@@ -244,9 +244,12 @@ CONF_MAX_GRID_POWER_KW = "max_grid_power_kw"
 DEFAULT_MAX_GRID_POWER_KW = 0.0  # kW, 0 = no cap
 
 # Algorithm thresholds
-MIN_PV_SURPLUS_KW = (
-    0.05  # kW (50 W) — minimum surplus to apply PV opportunity-cost pricing
-)
+# kW (50 W) — minimum surplus to apply PV opportunity-cost pricing.
+# Not read by the integration: the DP prices PV surplus through the feed-in
+# forecast directly. It is the authoritative copy of the value the diagnostic
+# analyzer applies in docs/analyzer/index.html, kept here so the two do not
+# drift apart silently.
+MIN_PV_SURPLUS_KW = 0.05
 POWER_IDLE_THRESHOLD_KW = (
     0.001  # kW (1 W) — power below this is treated as idle in the schedule
 )
@@ -268,10 +271,6 @@ WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this 
 # Such a sample is unbounded in magnitude — observed values reach 10^8 kW — and
 # a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
 MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
-
-SOC_UNCERTAINTY_RESERVE_FRACTION = (
-    0.10  # max fraction of capacity reserved for solar forecast uncertainty
-)
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode

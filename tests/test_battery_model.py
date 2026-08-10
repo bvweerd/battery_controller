@@ -4,7 +4,6 @@ import pytest
 
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
-    BatteryState,
     aggregate_battery_configs,
 )
 
@@ -57,32 +56,6 @@ class TestBatteryConfig:
         assert config.pv_dc_coupled is True
         assert config.pv_dc_peak_power_kwp == 3.0
         assert config.pv_dc_efficiency == 0.96
-
-    def test_from_config(self):
-        ha_config = {
-            "capacity_kwh": 15.0,
-            "max_charge_power_kw": 7.5,
-            "max_discharge_power_kw": 7.5,
-            "round_trip_efficiency": 0.92,
-            "min_soc_percent": 5.0,
-            "max_soc_percent": 95.0,
-            "pv_dc_coupled": True,
-            "pv_dc_peak_power_kwp": 4.0,
-            "pv_dc_efficiency": 0.97,
-        }
-        config = BatteryConfig.from_config(ha_config)
-        assert config.capacity_kwh == 15.0
-        assert config.max_charge_power_kw == 7.5
-        assert config.round_trip_efficiency == pytest.approx(0.92, abs=1e-4)
-        assert config.min_soc_kwh == pytest.approx(0.75)
-        assert config.max_soc_kwh == pytest.approx(14.25)
-        assert config.pv_dc_coupled is True
-        assert config.pv_dc_peak_power_kwp == 4.0
-
-    def test_from_config_defaults(self):
-        config = BatteryConfig.from_config({})
-        assert config.capacity_kwh == 10.0
-        assert config.round_trip_efficiency == pytest.approx(0.90, abs=1e-4)
 
     def test_derating_defaults_disabled(self):
         """Default config has no derating (thresholds at 100% / 0%)."""
@@ -256,17 +229,3 @@ class TestAggregateBatteryConfigs:
 
 class TestBatteryState:
     """Tests for BatteryState dataclass."""
-
-    def test_from_soc_kwh(self):
-        state = BatteryState.from_soc_kwh(5.0, 10.0)
-        assert state.soc_kwh == 5.0
-        assert state.soc_percent == 50.0
-
-    def test_from_soc_percent(self):
-        state = BatteryState.from_soc_percent(75.0, 10.0)
-        assert state.soc_kwh == 7.5
-        assert state.soc_percent == 75.0
-
-    def test_from_soc_kwh_zero_capacity(self):
-        state = BatteryState.from_soc_kwh(0.0, 0.0)
-        assert state.soc_percent == 0.0

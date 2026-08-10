@@ -47,7 +47,6 @@ class ZeroGridController:
         self.config = config
         self.battery_config = battery_config
         self._last_target_w = 0.0
-        self._setpoint_w = 0.0  # Target grid power (0 = zero-grid)
 
     @property
     def last_target_w(self) -> float:
@@ -62,7 +61,6 @@ class ZeroGridController:
         rejected.
         """
         self._last_target_w = value_w
-        self._setpoint_w = value_w
 
     def calculate_battery_setpoint(
         self,
