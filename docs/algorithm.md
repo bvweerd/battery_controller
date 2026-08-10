@@ -216,7 +216,10 @@ When charging at AC setpoint `P` (W):
 
 3. **Remaining DC PV** not absorbed by the battery flows to AC through the inverter at 96% efficiency.
 
-4. **Throughput**: `(ac_stored_wh + passive_charge_wh) / 1000` kWh (for degradation).
+4. **Throughput**: tracked in two buckets — `ac_stored_wh / 1000` kWh commanded
+   by the setpoint and `passive_charge_wh / 1000` kWh absorbed passively by the
+   MPPT. Degradation applies to both; the arbitrage hurdle (§4.5) only to the
+   commanded part.
 
 ### 4.3 Discharging (`action_w < 0`)
 
@@ -256,10 +259,35 @@ grid_cost = energy_kwh × grid_price      (if net_grid_w > 0: buying)
           = -energy_kwh × feed_in_price  (if net_grid_w < 0: selling)
 
 degradation_cost_per_kwh = degradation_cost_per_cycle / (2 × usable_kwh)  (conversion in coordinator; a full cycle = 2 × usable_kwh throughput)
-degradation_cost = throughput_kwh × degradation_cost_per_kwh
+degradation_cost = (ac_throughput_kwh + passive_throughput_kwh) × degradation_cost_per_kwh
 
-step_cost = grid_cost + degradation_cost
+arbitrage_cost_per_kwh = min_price_spread / 2
+arbitrage_cost = ac_throughput_kwh × arbitrage_cost_per_kwh
+
+step_cost = grid_cost + degradation_cost + arbitrage_cost
 ```
+
+**Arbitrage hurdle.** `min_price_spread` is the user's "do not bother below this"
+threshold. Charging half of it per kWh of **commanded** throughput in each
+direction makes one full cycle carry `2 × degradation + min_price_spread` — the
+same threshold the oscillation filter (§8.1) applies, but now inside the
+objective the DP minimises.
+
+Passive DC-PV charging is exempt: the MPPT absorbs it whatever the AC setpoint
+is, so it is not an arbitrage decision and must not be discouraged. That is why
+throughput is tracked in two buckets.
+
+The hurdle steers decisions but is not money: `total_cost`, `raw_total_cost` and
+`savings` are all recomputed over the resulting schedule with
+`arbitrage_cost_per_kwh = 0`, so reported figures stay comparable to the
+battery-free baseline.
+
+Applying the hurdle only afterwards, as the filter used to do on its own, meant
+the DP solved a different problem than the one configured and a window
+heuristic then thinned out the answer. On quarter-hourly prices that cost 12 %
+to 61 % of the achievable savings in measured scenarios; with the hurdle in the
+objective the same filter removes 0.1 % to 1 %, because there is little left for
+it to find.
 
 ---
 
@@ -377,7 +405,10 @@ After the forward pass, two filters clean up the schedule.
 
 ### 8.1 Oscillation Filter
 
-The DP sometimes schedules rapid charge↔discharge switches that are technically cost-optimal within the discrete state space but produce excessive battery cycling with little financial benefit.
+Since `min_price_spread` moved into the DP objective (§4.5), the schedule
+reaching this filter already respects the arbitrage threshold. The filter is now
+a safety net for discretisation artefacts rather than the mechanism that
+enforces the threshold, and it typically changes nothing.
 
 **Minimum profitable spread**: For arbitrage to be worthwhile, the discharge price must exceed the charge price by at least:
 

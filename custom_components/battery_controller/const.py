@@ -168,7 +168,24 @@ DEFAULT_PV_DC_EFFICIENCY = 0.97
 # Default values - Advanced settings
 DEFAULT_TIME_STEP_MINUTES = 15
 DEFAULT_OPTIMIZATION_INTERVAL_MINUTES = 15
-DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.04  # EUR per full charge+discharge cycle
+# EUR per full charge+discharge cycle, derived rather than guessed:
+#
+#   replacement cost      250 EUR/kWh   (installed LFP home battery)
+#   cycle life           6000 cycles    (at 80 % depth of discharge)
+#   usable capacity          8 kWh      (the 10 kWh default at 10-90 % SoC)
+#
+#   per kWh throughput = 250 / 6000 / (2 x 0.8) = 0.026 EUR/kWh
+#   per cycle          = 0.026 x 2 x 8          = 0.42 EUR/cycle
+#
+# The coordinator converts back with degradation / (2 x usable_kwh), so the
+# per-kWh figure the optimizer sees is independent of battery size; only the
+# per-cycle presentation scales with the default capacity.
+#
+# The previous default of 0.04 EUR/cycle worked out at 0.0025 EUR/kWh, an order
+# of magnitude below any plausible replacement cost, which left the DP with
+# almost no reason to avoid cycling. Users who set their own value keep it;
+# this only changes the starting point.
+DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.42
 DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
 
 # Default values - Manual control

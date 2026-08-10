@@ -196,8 +196,13 @@ describe('runOptimizer', () => {
       pvDcFc: null,
       terminalShadowPrice: 0.25,
     };
-    const nominal = runOptimizer(makeCfg(), 1.0, baseInputs);
-    const corrected = runOptimizer(makeCfg(), 1.0, {
+    // Cap the charge rating at what the nominal run already commands, so the
+    // correction cannot be compensated by simply raising the setpoint. Without
+    // the cap the DP charges harder instead of reaching a lower SoC, which is
+    // correct behaviour but does not test what this case is about.
+    const cfg = () => makeCfg({ maxChargeKw: 1.1 });
+    const nominal = runOptimizer(cfg(), 1.0, baseInputs);
+    const corrected = runOptimizer(cfg(), 1.0, {
       ...baseInputs,
       chargeEffCorrection: 0.7,
     });

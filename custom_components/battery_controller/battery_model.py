@@ -501,28 +501,3 @@ class BatteryState:
         """Create BatteryState from SoC in percent."""
         soc_kwh = (soc_percent / 100.0) * capacity_kwh
         return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)
-
-
-def calculate_degradation_cost_per_kwh(
-    replacement_cost_per_kwh: float = 500.0,
-    lifecycle_cycles: int = 6000,
-    dod_factor: float = 0.8,
-) -> float:
-    """Calculate degradation cost per kWh throughput.
-
-    Args:
-        replacement_cost_per_kwh: Battery replacement cost per kWh capacity
-        lifecycle_cycles: Number of cycles at given DoD
-        dod_factor: Depth of discharge factor (0-1)
-
-    Returns:
-        Degradation cost per kWh throughput (EUR/kWh)
-    """
-    # Cost per cycle = replacement_cost / lifecycle_cycles
-    cost_per_cycle = replacement_cost_per_kwh / lifecycle_cycles
-
-    # Energy per cycle = 2 * capacity * DoD (charge + discharge)
-    # Cost per kWh = cost_per_cycle / (2 * DoD)
-    cost_per_kwh = cost_per_cycle / (2 * dod_factor)
-
-    return cost_per_kwh

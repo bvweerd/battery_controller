@@ -6,7 +6,6 @@ from custom_components.battery_controller.battery_model import (
     BatteryConfig,
     BatteryState,
     aggregate_battery_configs,
-    calculate_degradation_cost_per_kwh,
 )
 
 
@@ -271,26 +270,3 @@ class TestBatteryState:
     def test_from_soc_kwh_zero_capacity(self):
         state = BatteryState.from_soc_kwh(0.0, 0.0)
         assert state.soc_percent == 0.0
-
-
-class TestDegradationCost:
-    """Tests for calculate_degradation_cost_per_kwh function."""
-
-    def test_default_values(self):
-        cost = calculate_degradation_cost_per_kwh()
-        # 500 / 6000 / (2 * 0.8) = 0.052
-        assert cost == pytest.approx(0.052, abs=0.001)
-
-    def test_cheap_battery(self):
-        cost = calculate_degradation_cost_per_kwh(
-            replacement_cost_per_kwh=200.0,
-            lifecycle_cycles=10000,
-        )
-        assert cost < 0.02
-
-    def test_expensive_battery(self):
-        cost = calculate_degradation_cost_per_kwh(
-            replacement_cost_per_kwh=800.0,
-            lifecycle_cycles=3000,
-        )
-        assert cost > 0.10

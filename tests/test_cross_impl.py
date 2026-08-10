@@ -157,6 +157,7 @@ def test_simulator_matches_fixture(case: dict) -> None:
         inp["consumption"],
         inp["degradation_cost_per_kwh"],
         power_step_w,
+        arbitrage_cost_per_kwh=max(0.0, inp["min_price_spread"]) / 2.0,
     )
     expected = case["expected"]
     assert power == pytest.approx(expected["power_schedule_kw"], abs=1e-9)
