@@ -1049,7 +1049,10 @@ def calculate_pv_forecast(
         deviation = min(abs(orientation_deg - 180), abs(orientation_deg - 180 + 360))
         orientation_factor = max(0.5, 1.0 - deviation / 180)
 
-    tilt_factor = 1.0 - abs(tilt_deg - 35) * 0.01
+    # Clamped: the linear penalty goes negative past 135° of tilt, which would
+    # turn the fallback estimate into negative production. The UI cannot reach
+    # that, but this function is public and also serves the diagnostics path.
+    tilt_factor = max(0.1, 1.0 - abs(tilt_deg - 35) * 0.01)
 
     forecast = []
     for radiation in solar_radiation_wm2:

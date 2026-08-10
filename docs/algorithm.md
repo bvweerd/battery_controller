@@ -467,6 +467,8 @@ This flag is a manual override, intended to be toggled by a Home Assistant autom
 
 Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
 
+Step 0 is sized on the reference (full) interval rather than its own, shortened duration. It covers only the remainder of the current price period and can be as little as a minute, so measuring it on that duration judged an action by when the optimizer happened to run rather than by its economics — the same correction the oscillation filter applies to its lookahead window.
+
 ---
 
 ## 9. Shadow Price Calculation

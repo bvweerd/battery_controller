@@ -556,26 +556,28 @@ class TestPriceForecastModelForecast:
     def test_uses_weather_pattern_when_available(self):
         model = self._model_with_data()
         # GHI=600 → bin 3, wind=10 → bin 2 → weather pattern [0.08, 0.12]
-        # avg=0.10, std=0.02, below overall(0.25) → 0.10 - 0.5*0.02 = 0.09
+        # avg=0.10, sample std=0.0283, n=2 → shrink 0.5
+        # below overall(0.25) → 0.10 - 0.5*0.5*0.0283 = 0.0929
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
             ghi_forecast=[600.0],
             wind_forecast=[10.0],
         )
-        assert result[0] == pytest.approx(0.09)
+        assert result[0] == pytest.approx(0.0929, abs=5e-5)
 
     def test_falls_back_to_simple_when_weather_bin_sparse(self):
         model = self._model_with_data()
         # GHI=10 → bin 0, wind=1 → bin 0 → no weather pattern for (10,0,0,0) → simple
-        # simple [0.28, 0.32]: avg=0.30, std=0.02, above overall(0.25) → 0.30 + 0.5*0.02 = 0.31
+        # simple [0.28, 0.32]: avg=0.30, sample std=0.0283, n=2 → shrink 0.5
+        # above overall(0.25) → 0.30 + 0.5*0.5*0.0283 = 0.3071
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
             ghi_forecast=[10.0],
             wind_forecast=[1.0],
         )
-        assert result[0] == pytest.approx(0.31)
+        assert result[0] == pytest.approx(0.3071, abs=5e-5)
 
     def test_falls_back_to_overall_avg_when_no_pattern(self):
         model = self._model_with_data()
@@ -589,12 +591,13 @@ class TestPriceForecastModelForecast:
     def test_no_weather_args_uses_simple_pattern(self):
         model = self._model_with_data()
         # No GHI/wind provided → skips weather lookup → uses simple pattern
-        # simple [0.28, 0.32]: avg=0.30, std=0.02, above overall(0.25) → 0.30 + 0.5*0.02 = 0.31
+        # simple [0.28, 0.32]: avg=0.30, sample std=0.0283, n=2 → shrink 0.5
+        # above overall(0.25) → 0.30 + 0.5*0.5*0.0283 = 0.3071
         result = model.forecast(
             hours=1,
             start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
         )
-        assert result[0] == pytest.approx(0.31)
+        assert result[0] == pytest.approx(0.3071, abs=5e-5)
 
     def test_forecast_24_hours(self):
         hass = MagicMock()
@@ -1481,3 +1484,53 @@ class TestConsumptionOutlierRejection:
             await self._run([0.4, 93972250.55])
         assert "implausible" in caplog.text.lower()
         assert "1 " in caplog.text
+
+
+class TestPriceSharpeningShrinkage:
+    """The std amplification must shrink towards the mean at small n."""
+
+    @staticmethod
+    def _model(hass=None):
+        model = PriceForecastModel(
+            hass=hass or MagicMock(), price_sensor_id="sensor.price"
+        )
+        model._overall_avg = 0.25
+        return model
+
+    def test_two_samples_are_damped(self):
+        """At n=2 the spread of two draws is not evidence of a peak."""
+        model = self._model()
+        model._simple_pattern = {(10, 0): [0.28, 0.32]}
+        result = model.forecast(
+            hours=1, start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+        )
+        # sample std = 0.02828, shrink = (2-1)/2 = 0.5
+        assert result[0] == pytest.approx(0.30 + 0.5 * 0.5 * 0.02828, abs=5e-5)
+
+    def test_more_samples_relax_towards_full_amplification(self):
+        """The same spread with more observations is sharpened harder."""
+        model = self._model()
+        few = [0.28, 0.32]
+        many = [0.28, 0.32] * 8
+        model._simple_pattern = {(10, 0): few}
+        low_n = model.forecast(
+            hours=1, start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+        )[0]
+        model._simple_pattern = {(10, 0): many}
+        high_n = model.forecast(
+            hours=1, start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+        )[0]
+        assert high_n > low_n
+        # Both stay above the plain average, which is what sharpening is for.
+        assert low_n > 0.30
+
+    def test_single_sample_has_no_correction(self):
+        """One observation carries no spread information at all."""
+        model = self._model()
+        assert model._MIN_SAMPLES == 2  # single-sample bins are not selected
+        model._simple_pattern = {(10, 0): [0.28]}
+        result = model.forecast(
+            hours=1, start_time=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+        )
+        # Bin has too few samples → falls through to the overall average
+        assert result[0] == pytest.approx(0.25)

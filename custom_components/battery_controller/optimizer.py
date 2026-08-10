@@ -1557,6 +1557,18 @@ def _filter_micro_cycles(
     filtered_mode = list(mode_schedule)
     any_filtered = False
 
+    # Step 0 is artificially shortened to align with the current price-period
+    # boundary, and can be as little as one minute. Measuring the block on that
+    # duration judged an action by when the optimizer happened to run rather
+    # than by its economics, so an isolated first step was suppressed purely for
+    # starting late in a period. Size it on the reference (full) interval
+    # instead — the same correction the oscillation filter already applies.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
+
     i = 0
     while i < len(filtered_mode):
         current_dir = filtered_mode[i]
@@ -1568,11 +1580,12 @@ def _filter_micro_cycles(
         j = i
         total_energy_kwh = 0.0
         while j < len(filtered_mode) and filtered_mode[j] == current_dir:
-            step_h = (
-                step_durations_hours[j]
-                if j < len(step_durations_hours)
-                else step_durations_hours[-1]
-            )
+            if j == 0:
+                step_h = ref_step_h
+            elif j < len(step_durations_hours):
+                step_h = step_durations_hours[j]
+            else:
+                step_h = step_durations_hours[-1]
             total_energy_kwh += abs(filtered_power[j]) * step_h
             j += 1
 

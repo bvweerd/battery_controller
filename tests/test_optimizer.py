@@ -3130,3 +3130,49 @@ class TestStepCostCacheInvariant:
         # genuinely does depend on SoC and the cache must not be used.
         clipped = self._cost(cfg, limit + 200.0, action_w, pv_dc_w)
         assert clipped != pytest.approx(below[0])
+
+
+class TestMicroCycleFirstStep:
+    """The shortened first step must not be judged as a micro-cycle."""
+
+    def test_short_first_step_is_sized_on_the_reference_interval(self):
+        """A one-minute step 0 is a full-period action seen late, not a micro-cycle.
+
+        Step 0 covers only the remainder of the current price period, so a
+        2 kW action there moves 0.03 kWh on paper and used to be suppressed for
+        falling under MIN_CYCLE_KWH — purely because the optimizer happened to
+        run just before a period boundary.
+        """
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[2.0, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 2 kW over the 0.25 h reference interval = 0.5 kWh > 0.2 kWh
+        assert mode[0] == ACTION_CHARGING
+        assert power[0] == pytest.approx(2.0)
+
+    def test_genuine_micro_cycle_is_still_removed(self):
+        """A block that is small on its own full interval is still suppressed."""
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[0.2, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 0.2 kW over 0.25 h = 0.05 kWh < 0.2 kWh
+        assert mode[0] == ACTION_IDLE
+        assert power[0] == pytest.approx(0.0)

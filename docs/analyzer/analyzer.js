@@ -663,13 +663,19 @@ function filterMicroCycles(powerKw, modes, stepDurations) {
 
   const filtPow  = [...powerKw];
   const filtMode = [...modes];
+  // Step 0 is shortened to the remainder of the current price period; size the
+  // block on the reference interval so an action is not suppressed merely for
+  // starting late in a period (mirrors optimizer.py).
+  const refStepH = stepDurations.length > 1
+    ? stepDurations[1]
+    : (stepDurations[0] || 0.25);
   let i = 0;
   while (i < filtMode.length) {
     const dir = filtMode[i];
     if (dir !== 'charging' && dir !== 'discharging') { i++; continue; }
     let j = i, totalEnergy = 0;
     while (j < filtMode.length && filtMode[j] === dir) {
-      const stepH = stepDurations[j] || 0.25;
+      const stepH = j === 0 ? refStepH : (stepDurations[j] || 0.25);
       totalEnergy += Math.abs(filtPow[j]) * stepH;
       j++;
     }
