@@ -119,8 +119,11 @@ def run_sweep(diag_path: str) -> list[dict]:
                 pv_dc_forecast=pv_dc_forecast,
             )
 
+            # forward_pass re-evaluates the V table at the actual continuous
+            # SoC; it takes V (not policy) and the same economics the backward
+            # pass used, including the arbitrage hurdle.
             power_schedule, mode_schedule, soc_schedule = forward_pass(
-                policy=policy,
+                V=V,
                 soc_states=soc_states,
                 current_soc_kwh=soc,
                 step_durations_hours=step_durations_out,
@@ -129,6 +132,13 @@ def run_sweep(diag_path: str) -> list[dict]:
                 n_steps=n_steps,
                 battery_config=battery,
                 pv_dc_forecast=pv_dc_forecast,
+                price_forecast=price_forecast,
+                feed_in_forecast=feed_in_forecast,
+                pv_forecast=pv_forecast,
+                consumption_forecast=consumption_forecast,
+                degradation_cost_per_kwh=degradation_cost,
+                power_step_w=power_step_w,
+                arbitrage_cost_per_kwh=max(0.0, min_price_spread) / 2.0,
             )
 
             step0_action_w = power_schedule[0] * 1000

@@ -981,18 +981,16 @@ def profitability_analysis(
         # Net profit of charging 1 kWh into battery now (vs idle)
         # vs gaining terminal_price per kWh at end
         charge_grid_cost = effective_charge_price / sqrt_rte  # EUR per kWh stored
-        charge_profit_vs_terminal = (
-            terminal_price - charge_grid_cost - degradation_cost_per_kwh
-        )
+        charge_profit_vs_terminal = terminal_price - charge_grid_cost - decision_cost
 
         # Net profit of discharging 1 kWh from battery (vs using terminal value)
         discharge_revenue = price * sqrt_rte  # EUR per kWh discharged
         discharge_profit_vs_terminal = (
-            discharge_revenue - terminal_price - degradation_cost_per_kwh
+            discharge_revenue - terminal_price - decision_cost
         )
 
         # Break-even discharge price needed to beat terminal value
-        breakeven_discharge = (terminal_price + degradation_cost_per_kwh) / sqrt_rte
+        breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
 
         rows.append(
             {
