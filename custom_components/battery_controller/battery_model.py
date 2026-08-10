@@ -308,7 +308,11 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         else sum(c.pv_dc_efficiency for c in configs) / len(configs)
     )
 
-    # Feed-in cap: sum of individual caps (0 = unlimited for any → unlimited overall)
+    # Grid cap: sum of individual caps (0 = unlimited for any → unlimited
+    # overall). In the integration this is always overwritten afterwards by
+    # OptimizationCoordinator._apply_entry_level_config, because the cap is a
+    # property of the house connection rather than of any battery; the
+    # aggregation below only matters to direct callers of this function.
     feed_in_caps = [c.max_grid_power_kw for c in configs]
     combined_feed_in_kw = (
         0.0 if any(cap == 0.0 for cap in feed_in_caps) else sum(feed_in_caps)

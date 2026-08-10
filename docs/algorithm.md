@@ -72,7 +72,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `consumption_forecast[t]` | kW | Expected household consumption for each step |
 | `step_durations_hours[t]` | h | Duration of each time step (typically 0.25 h = 15 min) |
 | `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ (2 × usable_kwh)` — one cycle is charge + discharge throughput) |
-| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage |
+| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage. Enters the DP objective as `min_price_spread / 2` per kWh of commanded throughput (see §4.5), so a full cycle must clear `2 × degradation + min_price_spread` |
 
 **Battery configuration:**
 
@@ -102,9 +102,10 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
-n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
-soc_states[i] = min_soc_wh + i × soc_resolution_wh
+soc_res_target   = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
+n_soc_states     = round((max_soc_wh - min_soc_wh) / soc_res_target) + 1
+soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)   # exact fit
+soc_states[i]    = min_soc_wh + i × soc_resolution_wh
 ```
 
 - **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the base grid constant; the power step is derived from it.
@@ -112,6 +113,7 @@ soc_states[i] = min_soc_wh + i × soc_resolution_wh
 - The cap engages only above 10 kWh of usable range (`MAX_SOC_STATES × SOC_RESOLUTION_WH`). Typical home batteries keep the exact 10 Wh grid and are unaffected.
 - At the cap the resolution is 0.1% of usable capacity (e.g. 44 Wh on a 44 kWh range), well below SoC sensor accuracy (~1%). Changing the grid does shift which SoC levels are representable, so realized savings move by a few percent in either direction — this is discretization jitter, not a systematic loss, and is inherent to any grid choice.
 - Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
+- The resolution is shrunk so the grid divides the usable range exactly, making the top state exactly `max_soc_wh`. With a fixed resolution a range that is not a whole multiple of it left the last few Wh unreachable, and the fill-to-max boundary action then charged to a SoC that the state it was credited to did not represent. Shrinking the step rather than adding a state keeps the `MAX_SOC_STATES` budget intact.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
@@ -535,6 +537,8 @@ Several implementation details prevent subtle correctness bugs:
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | Efficiency curve scalar | `round_trip_efficiency = chg_eff_repr × dis_eff_repr`, each the mean of its curve over 5..95 % of nominal power — never the zero-power value, which is the worst point of a realistic curve |
 | Derating precomputed outside `t`-loop | `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are arrays computed once from `soc_states` before the backward pass, avoiding repeated method calls in the tight inner loop |
+| Step cost recomputed per SoC state | The step cost only depends on SoC through the DC-PV headroom term. Each step precomputes one cost per action plus the SoC below which it is valid: unbounded without DC PV and for every discharge action, the headroom threshold for charge/idle under DC PV. Roughly a 3.4x solve-time reduction; results are unchanged, which `tests/test_cross_impl.py` proves because `simulate_diagnostics.py` has no such cache |
+| Forecast series anchored elsewhere | PV, consumption and feed-in are projected onto the DP's own step windows with `resample_to_steps` rather than resampled by interval length, which assumed both series started at the same instant and shifted them by up to 45 minutes on hourly prices |
 
 ## 12. Variable Price Intervals (15-min / 30-min / hourly)
 
@@ -646,6 +650,10 @@ Output: power_schedule_kw, mode_schedule, soc_schedule_kwh,
 ## 12. Multi-Battery Dispatch
 
 The DP optimizer treats all configured batteries as a single aggregated virtual battery (`aggregate_battery_configs`). After the optimizer produces a combined setpoint, `_split_setpoint` distributes it across the individual inverters.
+
+**Aggregating SoC-dependent derating.** The fleet is assumed to sit at a common relative SoC, so above the fleet threshold the combined limit is the sum of what each pack can still do there: its own derated limit if it derates, its full rating if it does not. The threshold is the first one reached — the lowest of the packs that actually derate for charging, the highest for discharging — not a capacity-weighted average, which would mix real thresholds with the 100 %/0 % sentinels of packs that do not derate and, paired with a sum of only the derated powers, cap the whole fleet at one pack's reduced rating.
+
+Entry-level settings (the grid capacity cap, DC coupling) are not battery properties and are overlaid onto the aggregate by the coordinator's `_apply_entry_level_config`.
 
 ### SoC-gap triggered concentration
 
