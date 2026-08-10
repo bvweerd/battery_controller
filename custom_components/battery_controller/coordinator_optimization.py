@@ -68,10 +68,10 @@ from .forecast_models import PriceForecastModel
 from .helpers import (
     synthesize_timestamps,
     compute_step_durations_hours,
-    extract_price_forecast_with_interval,
     extract_price_forecast_with_timestamps,
     get_sensor_value,
     resample_forecast,
+    resample_to_steps,
 )
 from .optimizer import optimize_battery_schedule, OptimizationResult
 from .zero_grid_controller import create_zero_grid_controller
@@ -2008,13 +2008,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Native interval of the feed-in forecast; may differ from the grid
         # price sensor (e.g. hourly feed-in vs 15-min grid prices).
         feed_in_interval = price_interval
+        # Anchor of feed_in_forecast[0]. A fixed price has no timeline of its
+        # own, so it inherits the run time and lines up with step 0 by
+        # construction; a sensor forecast carries its own period starts.
+        feed_in_start: datetime = dt_util.utcnow()
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
         if feed_in_sensor:
             feed_in_state = self.hass.states.get(feed_in_sensor)
             if feed_in_state and feed_in_state.state not in ("unknown", "unavailable"):
-                feed_in_forecast, feed_in_interval = (
-                    extract_price_forecast_with_interval(feed_in_state)
+                feed_in_forecast, feed_in_starts, feed_in_interval = (
+                    extract_price_forecast_with_timestamps(feed_in_state)
                 )
+                if feed_in_starts:
+                    feed_in_start = feed_in_starts[0]
                 feed_in_is_dynamic = True
             else:
                 # Sensor unavailable - fall back to fixed price
@@ -2130,18 +2136,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         for ts in price_start_times[1 : len(resampled_prices)]:
             step_start_times_iso.append(ts.isoformat())
 
+        # Absolute step windows, used to project every other series onto the
+        # DP's own time grid. Step 0 runs from now to the next price boundary;
+        # each later step spans one full price period.
+        step_starts: list[datetime] = [now_utc] + list(
+            price_start_times[1 : len(resampled_prices)]
+        )
+        while len(step_starts) < len(resampled_prices):
+            step_starts.append(
+                step_starts[-1] + timedelta(minutes=price_interval)
+                if step_starts
+                else now_utc
+            )
+
         resampled_feed_in = None
         if feed_in_forecast:
-            # Resample from the feed-in sensor's own interval to the grid price
-            # interval. Using price_interval for both would silently misalign
-            # the feed-in series whenever the two sensors publish at different
-            # resolutions (e.g. hourly feed-in with 15-min grid prices).
-            resampled_feed_in = resample_forecast(
-                feed_in_forecast, feed_in_interval, price_interval
+            # Project the feed-in series onto the DP step windows using its own
+            # start time. Resampling by interval alone assumed both series began
+            # at the same instant, which silently shifted the feed-in prices by
+            # up to one grid-price period whenever the two sensors publish at
+            # different resolutions (e.g. hourly feed-in with 15-min prices).
+            resampled_feed_in = resample_to_steps(
+                feed_in_forecast,
+                feed_in_start,
+                feed_in_interval,
+                step_starts,
+                step_durations_hours,
             )
             if not resampled_feed_in:
-                # Downsampling a feed-in series shorter than one grid-price
-                # period yields an empty list. An empty feed-in forecast must
+                # A feed-in series that does not reach the first step window
+                # yields an empty list. An empty feed-in forecast must
                 # never reach the optimizer: each step would fall back to the
                 # grid buy price and the terminal value of stored energy would
                 # become 0, making PV arbitrage look unprofitable. Fall back to
@@ -2153,17 +2177,26 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 resampled_feed_in = [fixed_price] * len(resampled_prices)
 
-        # Resample PV / consumption forecasts from the forecast pipeline's
-        # native interval (15 min; 60 for data produced by older versions)
-        # to the price sensor's native interval.
+        # Project PV / consumption onto the DP step windows. The forecast
+        # pipeline anchors its series to the current quarter hour, the DP steps
+        # to price-period boundaries; with hourly prices those differ by up to
+        # 45 minutes, so resampling by interval length alone shifted the whole
+        # series (see resample_to_steps).
         fc_interval = int(forecast_data.get("forecast_interval_minutes", 60))
-        pv_forecast = resample_forecast(
-            forecast_data.get("pv_forecast_kw", []), fc_interval, price_interval
-        )
-        consumption_forecast = resample_forecast(
-            forecast_data.get("consumption_forecast_kw", []),
+        fc_start = forecast_data.get("forecast_start_utc") or now_utc
+        pv_forecast = resample_to_steps(
+            forecast_data.get("pv_forecast_kw", []),
+            fc_start,
             fc_interval,
-            price_interval,
+            step_starts,
+            step_durations_hours,
+        )
+        consumption_forecast = resample_to_steps(
+            forecast_data.get("consumption_forecast_kw", []),
+            fc_start,
+            fc_interval,
+            step_starts,
+            step_durations_hours,
         )
 
         # Horizon = length of price forecast (the binding constraint)
@@ -2174,7 +2207,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if forecast_data.get("pv_dc_coupled"):
             raw_dc = forecast_data.get("pv_dc_forecast_kw", [])
             if raw_dc and any(v > 0 for v in raw_dc):
-                pv_dc_forecast = resample_forecast(raw_dc, fc_interval, price_interval)
+                pv_dc_forecast = resample_to_steps(
+                    raw_dc, fc_start, fc_interval, step_starts, step_durations_hours
+                )
 
         # PV curtailment override: zero out all PV when the switch is active.
         # The optimizer then plans charging from the grid instead of relying on

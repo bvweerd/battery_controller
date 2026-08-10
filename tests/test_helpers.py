@@ -8,6 +8,7 @@ from custom_components.battery_controller.helpers import (
     clamp,
     safe_float,
     resample_forecast,
+    resample_to_steps,
     calculate_pv_forecast,
     calculate_consumption_pattern,
     extract_pv_forecast_series,
@@ -1550,3 +1551,87 @@ class TestExtractPvForecastSeries:
             (ts, pytest.approx(3.5)),
             (ts + timedelta(hours=1), pytest.approx(1.5)),
         ]
+
+
+# ---------------------------------------------------------------------------
+# resample_to_steps — time-anchored projection onto the DP step windows
+# ---------------------------------------------------------------------------
+
+
+class TestResampleToSteps:
+    """Tests for resample_to_steps."""
+
+    @staticmethod
+    def _dt(hour, minute=0):
+        return datetime(2026, 3, 21, hour, minute, tzinfo=timezone.utc)
+
+    def test_identical_grid_is_passthrough(self):
+        """Aligned quarter-hour source and quarter-hour steps: values unchanged."""
+        values = [1.0, 2.0, 3.0, 4.0]
+        starts = [self._dt(10, 15 * i) for i in range(4)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [0.25] * 4)
+        assert result == pytest.approx(values)
+
+    def test_hourly_steps_average_quarter_hour_source(self):
+        """One hourly step averages the four quarters it covers."""
+        values = [1.0, 2.0, 3.0, 4.0, 10.0, 10.0, 10.0, 10.0]
+        starts = [self._dt(10), self._dt(11)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [1.0, 1.0])
+        assert result == pytest.approx([2.5, 10.0])
+
+    def test_offset_source_is_not_shifted_onto_later_steps(self):
+        """A source anchored mid-period must not slide onto the next step.
+
+        This is the hourly-price regression: the forecast pipeline anchors to
+        the current quarter (10:30) while DP steps land on hour boundaries.
+        Interval-only resampling built [avg(10:30..11:30), avg(11:30..12:30)]
+        and handed the first entry to the 10:30-11:00 step and the second to
+        the 11:00-12:00 step — a 30-minute shift on every step.
+        """
+        # Quarter-hourly source starting at 10:30.
+        values = [1.0, 1.0, 5.0, 5.0, 5.0, 5.0, 9.0, 9.0]  # 10:30 .. 12:30
+        # Step 0 is the remainder of the current hour, then full hours.
+        starts = [self._dt(10, 30), self._dt(11), self._dt(12)]
+        result = resample_to_steps(
+            values, self._dt(10, 30), 15, starts, [0.5, 1.0, 1.0]
+        )
+        # 10:30-11:00 -> 1.0, 11:00-12:00 -> 5.0, 12:00-12:30 -> 9.0 (partial)
+        assert result == pytest.approx([1.0, 5.0, 9.0])
+
+    def test_partial_first_step_takes_only_its_own_window(self):
+        """A one-minute step 0 reads the value covering that minute, not an hour."""
+        values = [2.0, 8.0]  # two hourly values from 10:00
+        starts = [self._dt(10, 59), self._dt(11)]
+        result = resample_to_steps(values, self._dt(10), 60, starts, [1 / 60.0, 1.0])
+        assert result == pytest.approx([2.0, 8.0])
+
+    def test_stops_at_end_of_source(self):
+        """Steps beyond the source horizon are not produced (caller pads)."""
+        values = [1.0, 2.0]
+        starts = [self._dt(10) + timedelta(minutes=15 * i) for i in range(6)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [0.25] * 6)
+        assert result == pytest.approx([1.0, 2.0])
+
+    def test_source_entirely_after_horizon_returns_empty(self):
+        """No overlap at all yields an empty list so the caller can fall back."""
+        values = [0.10, 0.10]
+        starts = [self._dt(10), self._dt(11)]
+        result = resample_to_steps(
+            values, self._dt(10) + timedelta(days=1), 15, starts, [1.0, 1.0]
+        )
+        assert result == []
+
+    def test_empty_inputs(self):
+        assert resample_to_steps([], self._dt(10), 15, [self._dt(10)], [0.25]) == []
+        assert resample_to_steps([1.0], self._dt(10), 15, [], []) == []
+        assert resample_to_steps([1.0], self._dt(10), 0, [self._dt(10)], [0.25]) == []
+
+    def test_is_mean_preserving_for_power(self):
+        """Total energy over the covered span is preserved."""
+        values = [0.0, 1.0, 3.0, 4.0, 2.0, 0.0, 0.0, 0.0]
+        starts = [self._dt(10), self._dt(11)]
+        durations = [1.0, 1.0]
+        result = resample_to_steps(values, self._dt(10), 15, starts, durations)
+        source_kwh = sum(values) * 0.25
+        step_kwh = sum(v * d for v, d in zip(result, durations))
+        assert step_kwh == pytest.approx(source_kwh)
