@@ -100,3 +100,19 @@ def make_optimization_coordinator(
 def optimization_coordinator(hass) -> OptimizationCoordinator:
     """A minimal OptimizationCoordinator with one battery subentry."""
     return make_optimization_coordinator(hass)
+
+
+@pytest.fixture
+def optimization_run(hass, monkeypatch):
+    """Factory for an OptimizationRunHarness (see tests/harness.py)."""
+    from .harness import OptimizationRunHarness
+
+    def _build(coordinator=None, **coordinator_kwargs):
+        if coordinator is None:
+            coordinator_kwargs.setdefault("max_charge_kw", 1.2)
+            coordinator_kwargs.setdefault("max_discharge_kw", 1.2)
+            coordinator_kwargs.setdefault("max_soc_percent", 100.0)
+            coordinator = make_optimization_coordinator(hass, **coordinator_kwargs)
+        return OptimizationRunHarness(hass, monkeypatch, coordinator)
+
+    return _build
