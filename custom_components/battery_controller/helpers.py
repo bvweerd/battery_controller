@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,39 @@ from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
+
+# The two state strings Home Assistant uses for "this entity has no reading".
+UNAVAILABLE_STATES = ("unknown", "unavailable")
+
+
+def state_has_value(state: State | None) -> bool:
+    """Return whether a state object exists and carries a real reading."""
+    return state is not None and state.state not in UNAVAILABLE_STATES
+
+
+def usable_state(hass: Any, entity_id: str | None) -> State | None:
+    """Look up an entity, returning None unless it carries a real reading."""
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    return state if state_has_value(state) else None
+
+
+def battery_energy_sensor_ids(
+    battery_subentries: Iterable[tuple[str, dict[str, Any]]], key: str
+) -> list[str]:
+    """Collect one battery energy counter per subentry that has it configured.
+
+    Deduplicated: where a single inverter reports one counter for several packs,
+    the same entity may legitimately be selected on more than one subentry, and
+    counting it twice would double the measured throughput.
+    """
+    seen: list[str] = []
+    for _subentry_id, data in battery_subentries:
+        entity_id = data.get(key)
+        if entity_id and entity_id not in seen:
+            seen.append(entity_id)
+    return seen
 
 
 def _normalize_price_value(value: Any) -> float | None:
@@ -168,176 +202,15 @@ def _extract_hours_dict_forecast(
 def extract_price_forecast_with_interval(state: State) -> tuple[list[float], int]:
     """Extract price forecast and detected interval from a Home Assistant price state.
 
-    Priority order (highest to lowest):
-    1. net_prices_today/tomorrow  — timestamp-based skip, interval auto-detected
-    2. raw_today/raw_tomorrow WITH per-entry timestamps — timestamp-based skip
-    3. forecast_prices             — no skip-past, interval from timestamps or 60 min
-    4. forecast (generic)          — no skip-past, interval from timestamps or 60 min
-    5. raw_today/raw_tomorrow WITHOUT timestamps — index-based skip
-    6. today/tomorrow              — index-based skip
-    7. current state value         — last resort
-
-    Timestamp-bearing formats (1 & 2) are preferred because they allow accurate
-    interval detection and correct exclusion of elapsed price periods.
+    Convenience wrapper around :func:`extract_price_forecast_with_timestamps`
+    for callers that do not need the per-period start times; see that function
+    for the supported sensor formats and their priority order.
 
     Returns:
         Tuple of (prices list, interval in minutes)
     """
-    now = dt_util.utcnow()
-
-    # Pre-compute raw_today/raw_tomorrow once; used in priorities 2 and 5.
-    raw_today_list = state.attributes.get("raw_today")
-    raw_today_list = raw_today_list if isinstance(raw_today_list, list) else []
-    raw_tomorrow_list = state.attributes.get("raw_tomorrow")
-    raw_tomorrow_list = raw_tomorrow_list if isinstance(raw_tomorrow_list, list) else []
-    _raw_ref = raw_today_list or raw_tomorrow_list
-    _raw_first_has_ts = bool(
-        _raw_ref
-        and isinstance(_raw_ref[0], dict)
-        and (
-            _raw_ref[0].get("start")
-            or _raw_ref[0].get("from")
-            or _raw_ref[0].get("time")
-        )
-    )
-
-    # Shared closure for timestamp-bearing formats (priorities 1 & 2).
-    interval_forecast: list[float] = []
-    detected_interval = 60
-
-    def _extend_interval_forecast(entries: Any, *, skip_past: bool = False) -> bool:
-        nonlocal detected_interval
-        if not isinstance(entries, (list, tuple)):
-            return False
-
-        interval = _detect_interval_from_entries(entries)
-        if interval != 60:
-            detected_interval = interval
-
-        added = False
-        for entry in entries:
-            if skip_past and isinstance(entry, dict):
-                start = entry.get("start") or entry.get("from") or entry.get("time")
-                start_dt: datetime | None = None
-                if isinstance(start, str):
-                    parsed = dt_util.parse_datetime(start)
-                    if parsed is not None:
-                        start_dt = dt_util.as_utc(parsed)
-                elif isinstance(start, datetime):
-                    start_dt = dt_util.as_utc(start)
-                if start_dt is not None:
-                    if start_dt + timedelta(minutes=detected_interval) <= now:
-                        continue
-
-            price = _normalize_price_value(entry)
-            if price is not None:
-                interval_forecast.append(price)
-                added = True
-        return added
-
-    # Priority 1: net_prices_today/tomorrow
-    _extend_interval_forecast(state.attributes.get("net_prices_today"), skip_past=True)
-    _extend_interval_forecast(state.attributes.get("net_prices_tomorrow"))
-    if interval_forecast:
-        return interval_forecast, detected_interval
-
-    # Priority 2: raw_today/raw_tomorrow WITH timestamps
-    if _raw_ref and _raw_first_has_ts:
-        interval_forecast = []
-        detected_interval = 60
-        _extend_interval_forecast(raw_today_list, skip_past=True)
-        _extend_interval_forecast(raw_tomorrow_list)
-        if interval_forecast:
-            return interval_forecast, detected_interval
-
-    # Priority 2.5: OMIE-style hour-keyed dicts (today_hours/tomorrow_hours)
-    hours_result = _extract_hours_dict_forecast(state, now)
-    if hours_result is not None:
-        hours_prices, _, hours_interval = hours_result
-        return hours_prices, hours_interval
-
-    # Priority 3: forecast_prices (skip elapsed periods when entries carry
-    # timestamps; plain value lists are taken as-is)
-    forecast_attr = state.attributes.get("forecast_prices")
-    if isinstance(forecast_attr, (list, tuple)):
-        if _first_entry_has_timestamp(forecast_attr):
-            interval_forecast = []
-            detected_interval = 60
-            _extend_interval_forecast(forecast_attr, skip_past=True)
-            if interval_forecast:
-                return interval_forecast, detected_interval
-        interval = _detect_interval_from_entries(forecast_attr)
-        forecast: list[float] = []
-        for entry in forecast_attr:
-            price = _normalize_price_value(entry)
-            if price is not None:
-                forecast.append(price)
-        if forecast:
-            return forecast, interval
-
-    # Priority 4: generic forecast (same timestamp-aware skip)
-    generic_forecast = state.attributes.get("forecast")
-    if isinstance(generic_forecast, (list, tuple)):
-        if _first_entry_has_timestamp(generic_forecast):
-            interval_forecast = []
-            detected_interval = 60
-            _extend_interval_forecast(generic_forecast, skip_past=True)
-            if interval_forecast:
-                return interval_forecast, detected_interval
-        interval = _detect_interval_from_entries(generic_forecast)
-        forecast = []
-        for entry in generic_forecast:
-            price = _normalize_price_value(entry)
-            if price is not None:
-                forecast.append(price)
-        if forecast:
-            return forecast, interval
-
-    # Priority 5: raw_today/raw_tomorrow WITHOUT timestamps (index-based skip)
-    if _raw_ref and not _raw_first_has_ts:
-        now_local = dt_util.now()
-        raw_interval = _detect_interval_from_entries(_raw_ref)
-        skip_index = _skip_index_since_local_midnight(now_local, raw_interval)
-        forecast = []
-        for entry in raw_today_list[skip_index:]:
-            price = _normalize_price_value(entry)
-            if price is not None:
-                forecast.append(price)
-        for entry in raw_tomorrow_list:
-            price = _normalize_price_value(entry)
-            if price is not None:
-                forecast.append(price)
-        if forecast:
-            return forecast, raw_interval
-
-    # Priority 6: today/tomorrow (index-based skip)
-    now_local = dt_util.now()
-    today_attr = state.attributes.get("today")
-    tomorrow_attr = state.attributes.get("tomorrow")
-    interval = _detect_interval_from_entries(today_attr)
-    if interval == 60:
-        interval = _detect_interval_from_entries(tomorrow_attr)
-    skip_index = _skip_index_since_local_midnight(now_local, interval)
-    combined: list[Any] = []
-    if isinstance(today_attr, list):
-        combined.extend(today_attr[skip_index:])
-    if isinstance(tomorrow_attr, list):
-        combined.extend(tomorrow_attr)
-    forecast = []
-    for entry in combined:
-        price = _normalize_price_value(entry)
-        if price is not None:
-            forecast.append(price)
-    if forecast:
-        return forecast, interval
-
-    # Priority 7: current state value
-    try:
-        price = float(state.state)
-    except (TypeError, ValueError):
-        return [], 60
-
-    return [price], 60
+    prices, _start_times, interval = extract_price_forecast_with_timestamps(state)
+    return prices, interval
 
 
 def extract_price_forecast(state: State) -> list[float]:
@@ -387,7 +260,18 @@ def extract_price_forecast_with_timestamps(
 ) -> tuple[list[float], list[datetime], int]:
     """Extract price forecast with UTC start timestamps from a HA price state.
 
-    Supports the same sensor formats as extract_price_forecast_with_interval.
+    Priority order (highest to lowest):
+    1. net_prices_today/tomorrow  — timestamp-based skip, interval auto-detected
+    2. raw_today/raw_tomorrow WITH per-entry timestamps — timestamp-based skip
+    2.5 today_hours/tomorrow_hours (OMIE) — hour-keyed dicts in EUR/MWh
+    3. forecast_prices             — no skip-past, interval from timestamps or 60 min
+    4. forecast (generic)          — no skip-past, interval from timestamps or 60 min
+    5. raw_today/raw_tomorrow WITHOUT timestamps — index-based skip
+    6. today/tomorrow              — index-based skip
+    7. current state value         — last resort
+
+    Timestamp-bearing formats (1 & 2) are preferred because they allow accurate
+    interval detection and correct exclusion of elapsed price periods.
     Timestamps are synthesized for formats that carry no explicit start times.
 
     Returns:
@@ -768,11 +652,8 @@ def get_sensor_value(
     default: float = 0.0,
 ) -> float:
     """Get a sensor value from Home Assistant."""
-    if not entity_id:
-        return default
-
-    state = hass.states.get(entity_id)
-    if state is None or state.state in ("unknown", "unavailable"):
+    state = usable_state(hass, entity_id)
+    if state is None:
         return default
 
     return safe_float(state.state, default)
@@ -852,7 +733,7 @@ def extract_pv_forecast_series(states: list[State]) -> list[tuple[datetime, floa
                 buckets.setdefault(ts, []).append(power_kw)
 
     for state in states:
-        if state is None or state.state in ("unknown", "unavailable"):
+        if not state_has_value(state):
             continue
         attrs = state.attributes
         for attr_key in ("detailedForecast", "detailedHourly", "forecast"):

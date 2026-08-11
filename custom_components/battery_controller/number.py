@@ -65,13 +65,18 @@ async def async_setup_entry(
 
 
 class BatteryControllerNumber(NumberEntity):
-    """Base class for Battery Controller number entities."""
+    """Base class for Battery Controller number entities.
+
+    Subclasses declare where their value lives (``_conf_key``), what it falls
+    back to (``_conf_default``) and the unique-id suffix (``_key``); reading and
+    writing it is handled here.
+    """
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
-    _conf_key: (
-        str  # Config entry key used by async_set_native_value; set in each subclass
-    )
+    _conf_key: str  # Config entry key read and written by this entity
+    _conf_default: float  # Value used when the key is absent from the entry
+    _key: str  # Unique-id suffix (kept distinct from _conf_key for stability)
 
     def __init__(
         self,
@@ -79,15 +84,13 @@ class BatteryControllerNumber(NumberEntity):
         entry: ConfigEntry,
         device: DeviceInfo,
         config: dict[str, Any],
-        key: str,
     ):
         """Initialize the number entity."""
         self.hass = hass
         self._entry = entry
         self._attr_device_info = device
-        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
         self._config = config
-        self._key = key
 
     def _get_runtime_value(self, key: str, default: float) -> float:
         """Get runtime value from config entry options or data."""
@@ -115,11 +118,17 @@ class BatteryControllerNumber(NumberEntity):
         await self._set_runtime_value(self._conf_key, value)
         self.async_write_ha_state()
 
+    @property
+    def native_value(self) -> float:
+        return self._get_runtime_value(self._conf_key, self._conf_default)
+
 
 class DegradationCostNumber(BatteryControllerNumber):
     """Number entity for degradation cost per cycle."""
 
     _conf_key = CONF_DEGRADATION_COST_PER_CYCLE
+    _conf_default = DEFAULT_DEGRADATION_COST_PER_CYCLE
+    _key = "degradation_cost"
     _attr_translation_key = "degradation_cost"
     _attr_name = "Degradation Cost"
     _attr_native_min_value = 0.0
@@ -128,26 +137,13 @@ class DegradationCostNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "EUR/cycle"
     _attr_mode = NumberMode.BOX
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        device: DeviceInfo,
-        config: dict[str, Any],
-    ) -> None:
-        super().__init__(hass, entry, device, config, "degradation_cost")
-
-    @property
-    def native_value(self) -> float:
-        return self._get_runtime_value(
-            CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
-        )
-
 
 class MinPriceSpreadNumber(BatteryControllerNumber):
     """Number entity for minimum price spread."""
 
     _conf_key = CONF_MIN_PRICE_SPREAD
+    _conf_default = DEFAULT_MIN_PRICE_SPREAD
+    _key = "min_price_spread"
     _attr_translation_key = "min_price_spread"
     _attr_name = "Minimum Price Spread"
     _attr_native_min_value = 0.0
@@ -156,24 +152,13 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_mode = NumberMode.BOX
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        device: DeviceInfo,
-        config: dict[str, Any],
-    ) -> None:
-        super().__init__(hass, entry, device, config, "min_price_spread")
-
-    @property
-    def native_value(self) -> float:
-        return self._get_runtime_value(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD)
-
 
 class ZeroGridDeadbandNumber(BatteryControllerNumber):
     """Number entity for zero-grid deadband."""
 
     _conf_key = CONF_ZERO_GRID_DEADBAND_W
+    _conf_default = DEFAULT_ZERO_GRID_DEADBAND_W
+    _key = "zero_grid_deadband"
     _attr_translation_key = "zero_grid_deadband"
     _attr_name = "Zero Grid Deadband"
     _attr_native_min_value = 0.0
@@ -181,21 +166,6 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
     _attr_native_step = 10.0
     _attr_native_unit_of_measurement = "W"
     _attr_mode = NumberMode.BOX
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        device: DeviceInfo,
-        config: dict[str, Any],
-    ) -> None:
-        super().__init__(hass, entry, device, config, "zero_grid_deadband")
-
-    @property
-    def native_value(self) -> float:
-        return self._get_runtime_value(
-            CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
-        )
 
 
 class ManualPowerSetpointNumber(BatteryControllerNumber):
@@ -207,20 +177,13 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
     """
 
     _conf_key = CONF_MANUAL_POWER_SETPOINT_W
+    _conf_default = DEFAULT_MANUAL_POWER_SETPOINT_W
+    _key = "manual_power_setpoint"
     _attr_translation_key = "manual_power_setpoint"
     _attr_name = "Manual Power Setpoint"
     _attr_native_step = 100.0
     _attr_native_unit_of_measurement = "W"
     _attr_mode = NumberMode.BOX
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-        device: DeviceInfo,
-        config: dict[str, Any],
-    ) -> None:
-        super().__init__(hass, entry, device, config, "manual_power_setpoint")
 
     @property
     def native_min_value(self) -> float:
@@ -253,9 +216,3 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
             )
             max_discharge_kw = DEFAULT_MAX_DISCHARGE_POWER_KW
         return max_discharge_kw * 1000
-
-    @property
-    def native_value(self) -> float:
-        return self._get_runtime_value(
-            CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
-        )
