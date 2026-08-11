@@ -161,6 +161,7 @@ async def test_async_unload_entry_with_runtime_data():
     assert removed == {
         (DOMAIN, "reset_charge_efficiency_calibration"),
         (DOMAIN, "reset_discharge_efficiency_calibration"),
+        (DOMAIN, "reset_pv_calibration"),
     }
 
 
@@ -239,7 +240,7 @@ async def test_async_setup_entry_no_subentries():
     assert entry.runtime_data.optimization_coordinator is mock_opt_coord
     assert entry.runtime_data.battery_devices == {}
     assert entry.runtime_data.pv_devices == {}
-    assert mock_hass.services.async_register.call_count == 2
+    assert mock_hass.services.async_register.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -372,14 +373,15 @@ def test_register_services_only_once():
     _async_register_services(mock_hass)
     _async_register_services(mock_hass)
 
-    # Both services registered by the first call; the second call is a no-op.
-    assert mock_hass.services.async_register.call_count == 2
+    # All services registered by the first call; the second call is a no-op.
+    assert mock_hass.services.async_register.call_count == 3
     registered = {
         call.args[1] for call in mock_hass.services.async_register.call_args_list
     }
     assert registered == {
         "reset_charge_efficiency_calibration",
         "reset_discharge_efficiency_calibration",
+        "reset_pv_calibration",
     }
     for call in mock_hass.services.async_register.call_args_list:
         assert inspect.iscoroutinefunction(call.args[2])
