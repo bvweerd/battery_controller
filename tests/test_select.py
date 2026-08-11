@@ -59,7 +59,7 @@ def _make_select(control_mode=MODE_HYBRID):
 
 def test_select_init():
     sel = _make_select()
-    assert sel._attr_unique_id == "test_entry_control_mode"
+    assert sel.unique_id == "test_entry_control_mode"
 
 
 def test_select_options_are_all_control_modes():

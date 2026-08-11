@@ -202,14 +202,14 @@ class TestUseMaxPowerSensor:
 
     def test_unique_id_contains_key(self):
         sensor = self._make_sensor(data={})
-        assert "use_max_power" in sensor._attr_unique_id
+        assert "use_max_power" in sensor.unique_id
 
     def test_pv_curtailment_unique_id(self):
         coord = _make_coord({})
         entry = _make_entry("eid123")
         device = _make_device()
         sensor = PVCurtailmentSensor(coord, device, entry)
-        assert sensor._attr_unique_id == "eid123_pv_curtailment"
+        assert sensor.unique_id == "eid123_pv_curtailment"
 
 
 # ---------------------------------------------------------------------------

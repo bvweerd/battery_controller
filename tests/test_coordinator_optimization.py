@@ -2443,15 +2443,15 @@ def _mark_plan_executed(coord) -> None:
 def test_calibration_no_sample_without_previous_result(hass):
     """No calibration sample when _last_result is None."""
     coord = _make_coordinator(hass)
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_correction == 1.0
 
     battery_state = BatteryState(
         soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert coord._charge_eff_correction == 1.0
-    assert len(coord._charge_eff_samples) == 0
+    assert coord.charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
 
 
 def test_calibration_no_sample_for_idle_step(hass):
@@ -2467,8 +2467,8 @@ def test_calibration_no_sample_for_idle_step(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == 1.0
 
 
 def test_calibration_no_sample_when_planned_delta_too_small(hass):
@@ -2484,7 +2484,7 @@ def test_calibration_no_sample_when_planned_delta_too_small(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
+    assert coord.charge_eff_sample_count == 0
 
 
 def test_calibration_perfect_efficiency_no_correction(hass):
@@ -2502,9 +2502,9 @@ def test_calibration_perfect_efficiency_no_correction(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 1
+    assert coord.charge_eff_sample_count == 1
     assert coord._charge_eff_samples[0] == pytest.approx(1.0)
-    assert coord._charge_eff_correction == pytest.approx(1.0)
+    assert coord.charge_eff_correction == pytest.approx(1.0)
 
 
 def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
@@ -2530,8 +2530,8 @@ def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == 1.0
 
 
 def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
@@ -2557,9 +2557,9 @@ def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 1
+    assert coord.charge_eff_sample_count == 1
     assert coord._charge_eff_samples[0] == pytest.approx(1.0)
-    assert coord._charge_eff_correction == pytest.approx(1.0)
+    assert coord.charge_eff_correction == pytest.approx(1.0)
 
 
 def test_calibration_low_efficiency_updates_correction(hass):
@@ -2577,9 +2577,9 @@ def test_calibration_low_efficiency_updates_correction(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 1
+    assert coord.charge_eff_sample_count == 1
     assert coord._charge_eff_samples[0] == pytest.approx(0.8)
-    assert coord._charge_eff_correction == pytest.approx(0.8)
+    assert coord.charge_eff_correction == pytest.approx(0.8)
 
 
 def test_calibration_rolling_average_converges(hass):
@@ -2603,7 +2603,7 @@ def test_calibration_rolling_average_converges(hass):
             soc_schedule_kwh=[0.0, 1.0],
         )
 
-    assert coord._charge_eff_correction == pytest.approx(0.85, abs=1e-9)
+    assert coord.charge_eff_correction == pytest.approx(0.85, abs=1e-9)
 
 
 def test_calibration_drops_implausibly_low_ratio(hass):
@@ -2626,8 +2626,8 @@ def test_calibration_drops_implausibly_low_ratio(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == pytest.approx(1.0)
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == pytest.approx(1.0)
 
 
 def test_calibration_drops_implausibly_high_ratio(hass):
@@ -2645,7 +2645,7 @@ def test_calibration_drops_implausibly_high_ratio(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
+    assert coord.charge_eff_sample_count == 0
 
 
 def test_calibration_correction_is_clamped_for_use(hass):
@@ -2668,7 +2668,7 @@ def test_calibration_correction_is_clamped_for_use(hass):
     coord._update_charge_eff_calibration(battery_state)
 
     assert coord._charge_eff_samples[0] == pytest.approx(1.4)
-    assert coord._charge_eff_correction == pytest.approx(1.05)
+    assert coord.charge_eff_correction == pytest.approx(1.05)
 
 
 def test_calibration_not_applied_for_dc_coupled(hass):
@@ -2723,8 +2723,8 @@ def test_calibration_not_applied_for_dc_coupled(hass):
     coord._update_charge_eff_calibration(battery_state)
 
     # No sample should have been added for DC-coupled system
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -3090,8 +3090,8 @@ def test_calibration_no_sample_when_plan_overridden_by_zero_grid(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == 1.0
 
 
 def test_calibration_no_sample_when_commitment_locked_other_power(hass):
@@ -3110,8 +3110,8 @@ def test_calibration_no_sample_when_commitment_locked_other_power(hass):
     )
     coord._update_charge_eff_calibration(battery_state)
 
-    assert len(coord._charge_eff_samples) == 0
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_correction == 1.0
 
 
 def test_discharge_calibration_no_sample_when_plan_overridden(hass):
@@ -3129,8 +3129,8 @@ def test_discharge_calibration_no_sample_when_plan_overridden(hass):
     )
     coord._update_discharge_eff_calibration(battery_state)
 
-    assert len(coord._discharge_eff_samples) == 0
-    assert coord._discharge_eff_correction == 1.0
+    assert coord.discharge_eff_sample_count == 0
+    assert coord.discharge_eff_correction == 1.0
 
 
 def test_discharge_calibration_samples_when_plan_executed(hass):
@@ -3148,9 +3148,9 @@ def test_discharge_calibration_samples_when_plan_executed(hass):
     )
     coord._update_discharge_eff_calibration(battery_state)
 
-    assert len(coord._discharge_eff_samples) == 1
+    assert coord.discharge_eff_sample_count == 1
     assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
-    assert coord._discharge_eff_correction == pytest.approx(0.8)
+    assert coord.discharge_eff_correction == pytest.approx(0.8)
 
 
 def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
@@ -3176,8 +3176,8 @@ def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
     )
     coord._update_discharge_eff_calibration(battery_state)
 
-    assert len(coord._discharge_eff_samples) == 0
-    assert coord._discharge_eff_correction == pytest.approx(1.0)
+    assert coord.discharge_eff_sample_count == 0
+    assert coord.discharge_eff_correction == pytest.approx(1.0)
 
 
 def test_discharge_calibration_samples_above_low_soc_derating(hass):
@@ -3198,7 +3198,7 @@ def test_discharge_calibration_samples_above_low_soc_derating(hass):
     )
     coord._update_discharge_eff_calibration(battery_state)
 
-    assert len(coord._discharge_eff_samples) == 1
+    assert coord.discharge_eff_sample_count == 1
     assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
 
 
@@ -3952,7 +3952,7 @@ def test_small_step_is_skipped_on_a_coarse_soc_sensor(hass):
     )
     coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
 
-    assert len(coord._charge_eff_samples) == 0
+    assert coord.charge_eff_sample_count == 0
 
 
 def test_symmetric_noise_does_not_bias_the_correction(hass):
@@ -3984,5 +3984,5 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
         )
         coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
 
-    assert len(coord._charge_eff_samples) == 6
-    assert coord._charge_eff_correction == pytest.approx(1.0, abs=1e-6)
+    assert coord.charge_eff_sample_count == 6
+    assert coord.charge_eff_correction == pytest.approx(1.0, abs=1e-6)

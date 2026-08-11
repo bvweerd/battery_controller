@@ -65,7 +65,7 @@ class TestDegradationCostNumber:
 
     def test_unique_id(self):
         n = self._make()
-        assert "degradation_cost" in n._attr_unique_id
+        assert "degradation_cost" in n.unique_id
 
     def test_native_value_from_default(self):
         n = self._make()

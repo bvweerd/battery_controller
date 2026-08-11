@@ -269,8 +269,8 @@ def test_soc_sensor_unique_id_does_not_collide_with_global_soc():
     device = _make_device()
     sensor = BatterySubentrySoCSensor(coord, device, entry, "sub42", "Batt")
     # Global SoC sensor uses key "soc" → unique_id "eid_soc"
-    assert sensor._attr_unique_id != "eid_soc"
-    assert "sub42" in sensor._attr_unique_id
+    assert sensor.unique_id != "eid_soc"
+    assert "sub42" in sensor.unique_id
 
 
 def test_soc_sensor_device_class_is_battery():
@@ -307,7 +307,7 @@ def test_setpoint_sensor_unique_id_stable():
     device = _make_device()
     s1 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ", "Batt")
     s2 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ", "Batt")
-    assert s1._attr_unique_id == s2._attr_unique_id
+    assert s1.unique_id == s2.unique_id
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +362,7 @@ def test_pv_array_sensor_is_diagnostic_and_disabled_by_default():
 
 def test_pv_array_sensor_unique_id_contains_subentry_id():
     sensor = _make_pv_sensor(subentry_id="pvABC")
-    assert "pvABC" in sensor._attr_unique_id
+    assert "pvABC" in sensor.unique_id
 
 
 # ---------------------------------------------------------------------------

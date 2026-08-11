@@ -412,6 +412,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._pv_curtailed = value
         self.forecast_coordinator.pv_curtailed = value
 
+    @property
+    def charge_eff_correction(self) -> float:
+        """Learned multiplier on the charge-side SoC transition (1.0 = nominal).
+
+        Already published in ``data`` and in diagnostics; exposed here so the
+        current value can be read without a completed run, the same way
+        control_mode and optimization_enabled are.
+        """
+        return self._charge_eff_correction
+
+    @property
+    def charge_eff_sample_count(self) -> int:
+        """Number of observations behind charge_eff_correction."""
+        return len(self._charge_eff_samples)
+
+    @property
+    def discharge_eff_correction(self) -> float:
+        """Learned multiplier on the discharge-side SoC transition."""
+        return self._discharge_eff_correction
+
+    @property
+    def discharge_eff_sample_count(self) -> int:
+        """Number of observations behind discharge_eff_correction."""
+        return len(self._discharge_eff_samples)
+
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
         _LOGGER.debug("Daily price model refresh triggered at %s", now)

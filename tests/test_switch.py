@@ -55,12 +55,12 @@ def _make_switch(is_on_initial=True):
 
 def test_switch_init_default_on():
     switch = _make_switch()
-    assert switch._is_on is True
+    assert switch.is_on is True
 
 
 def test_switch_unique_id():
     switch = _make_switch()
-    assert "optimization_enabled" in switch._attr_unique_id
+    assert "optimization_enabled" in switch.unique_id
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ async def test_turn_on_sets_is_on_and_refreshes():
 
     await switch.async_turn_on()
 
-    assert switch._is_on is True
+    assert switch.is_on is True
     assert switch.coordinator.optimization_enabled is True
     switch.coordinator.async_request_refresh.assert_called_once()
     switch.async_write_ha_state.assert_called_once()
@@ -103,7 +103,7 @@ async def test_turn_off_clears_is_on():
 
     await switch.async_turn_off()
 
-    assert switch._is_on is False
+    assert switch.is_on is False
     assert switch.coordinator.optimization_enabled is False
     switch.async_write_ha_state.assert_called_once()
     switch.coordinator.async_request_refresh.assert_not_called()
@@ -143,7 +143,7 @@ async def test_async_added_to_hass_restores_on_state():
         switch._is_on = last_state.state == "on"
         switch.coordinator.optimization_enabled = switch._is_on
 
-    assert switch._is_on is True
+    assert switch.is_on is True
     assert switch.coordinator.optimization_enabled is True
 
 
@@ -158,7 +158,7 @@ async def test_async_added_to_hass_restores_off_state():
     switch._is_on = last_state.state == "on"
     switch.coordinator.optimization_enabled = switch._is_on
 
-    assert switch._is_on is False
+    assert switch.is_on is False
     assert switch.coordinator.optimization_enabled is False
 
 
@@ -171,7 +171,7 @@ async def test_async_added_to_hass_no_last_state_stays_on():
     if last_state is not None:
         switch._is_on = last_state.state == "on"
     # Should stay True
-    assert switch._is_on is True
+    assert switch.is_on is True
 
 
 @pytest.mark.asyncio
@@ -195,7 +195,7 @@ async def test_async_added_to_hass_real_method_with_last_state():
     ):
         await switch.async_added_to_hass()
 
-    assert switch._is_on is True
+    assert switch.is_on is True
     assert switch.coordinator.optimization_enabled is True
 
 
@@ -214,7 +214,7 @@ async def test_async_added_to_hass_real_method_no_last_state():
     ):
         await switch.async_added_to_hass()
 
-    assert switch._is_on is True
+    assert switch.is_on is True
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_async_added_to_hass_real_method_unknown_state_restores_false():
     ):
         await switch.async_added_to_hass()
 
-    assert switch._is_on is False
+    assert switch.is_on is False
     assert switch.coordinator.optimization_enabled is False
 
 
