@@ -175,7 +175,9 @@ class OptimizationRunHarness:
                 f"{module}.compute_step_durations_hours", lambda *a: self._durations()
             )
         if self.passthrough_resample:
-            mp.setattr(f"{module}.resample_forecast", lambda values, src, dst: list(values))
+            mp.setattr(
+                f"{module}.resample_forecast", lambda values, src, dst: list(values)
+            )
 
         mp.setattr(coord, "_refresh_battery_config", lambda: None)
         mp.setattr(coord, "get_current_battery_state", lambda: self.battery_state)
