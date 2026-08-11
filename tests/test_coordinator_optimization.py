@@ -45,6 +45,8 @@ from custom_components.battery_controller.helpers import (
 )
 from custom_components.battery_controller.optimizer import OptimizationResult
 
+from .conftest import make_optimization_coordinator
+
 
 @pytest.mark.asyncio
 async def test_follow_schedule_commitment_locks_published_setpoint(hass, monkeypatch):
@@ -281,37 +283,16 @@ async def test_mode_switch_resets_commitment(hass):
     assert coordinator._optimization_trigger_source == "price_boundary"
 
 
-def _make_coordinator(hass):
-    """Build a minimal OptimizationCoordinator for scheduling tests."""
-    weather_coordinator = MagicMock()
-    weather_coordinator.data = {}
-    forecast_coordinator = MagicMock()
-    forecast_coordinator.data = None
-    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
-    config = {
-        "entry_id": "test-entry",
-        CONF_PRICE_SENSOR: "sensor.test_price",
-        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
-        CONF_FIXED_FEED_IN_PRICE: 0.07,
-        CONF_POWER_CONSUMPTION_SENSORS: [],
-        CONF_POWER_PRODUCTION_SENSORS: [],
-        "battery_subentries": [
-            (
-                "bat1",
-                {
-                    CONF_MAX_CHARGE_POWER_KW: 1.2,
-                    CONF_MAX_DISCHARGE_POWER_KW: 1.2,
-                    CONF_ROUND_TRIP_EFFICIENCY: 0.92,
-                    CONF_MIN_SOC_PERCENT: 10.0,
-                    CONF_MAX_SOC_PERCENT: 100.0,
-                    CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
-                },
-            )
-        ],
-    }
-    return OptimizationCoordinator(
-        hass, weather_coordinator, forecast_coordinator, config
-    )
+def _make_coordinator(hass, **kwargs):
+    """Coordinator for the scheduling tests.
+
+    1.2 kW and a 10-100 % SoC window: the numbers the assertions in this module
+    are written against. Everything else comes from the shared factory.
+    """
+    kwargs.setdefault("max_charge_kw", 1.2)
+    kwargs.setdefault("max_discharge_kw", 1.2)
+    kwargs.setdefault("max_soc_percent", 100.0)
+    return make_optimization_coordinator(hass, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -400,25 +381,10 @@ async def test_async_setup_tracks_distinct_feed_in_price_sensor(hass):
     """A feed-in price sensor different from the buy price sensor gets its own tracker."""
     from unittest.mock import AsyncMock
 
-    weather_coordinator = MagicMock()
-    weather_coordinator.data = {}
-    forecast_coordinator = MagicMock()
-    forecast_coordinator.data = None
-    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
-
-    config = {
-        "entry_id": "test-entry",
-        CONF_PRICE_SENSOR: "sensor.test_price",
-        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_feed_in_price",
-        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
-        CONF_FIXED_FEED_IN_PRICE: 0.07,
-        CONF_POWER_CONSUMPTION_SENSORS: [],
-        CONF_POWER_PRODUCTION_SENSORS: [],
-        "battery_subentries": [],
-    }
-
-    coord = OptimizationCoordinator(
-        hass, weather_coordinator, forecast_coordinator, config
+    coord = make_optimization_coordinator(
+        hass,
+        battery_subentries=[],
+        feed_in_price_sensor="sensor.test_feed_in_price",
     )
     coord._price_model = MagicMock()
     coord._price_model.async_update_pattern = AsyncMock()
@@ -449,25 +415,10 @@ async def test_async_setup_skips_feed_in_tracker_when_same_as_price_sensor(hass)
     """No duplicate tracker is registered when feed-in price reuses the buy price sensor."""
     from unittest.mock import AsyncMock
 
-    weather_coordinator = MagicMock()
-    weather_coordinator.data = {}
-    forecast_coordinator = MagicMock()
-    forecast_coordinator.data = None
-    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
-
-    config = {
-        "entry_id": "test-entry",
-        CONF_PRICE_SENSOR: "sensor.test_price",
-        CONF_FEED_IN_PRICE_SENSOR: "sensor.test_price",
-        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
-        CONF_FIXED_FEED_IN_PRICE: 0.07,
-        CONF_POWER_CONSUMPTION_SENSORS: [],
-        CONF_POWER_PRODUCTION_SENSORS: [],
-        "battery_subentries": [],
-    }
-
-    coord = OptimizationCoordinator(
-        hass, weather_coordinator, forecast_coordinator, config
+    coord = make_optimization_coordinator(
+        hass,
+        battery_subentries=[],
+        feed_in_price_sensor="sensor.test_price",
     )
     coord._price_model = MagicMock()
     coord._price_model.async_update_pattern = AsyncMock()
@@ -1276,24 +1227,10 @@ async def test_async_setup_with_power_sensors(hass):
     """async_setup with power sensors registers a realtime timer."""
     from unittest.mock import AsyncMock
 
-    weather_coordinator = MagicMock()
-    weather_coordinator.data = {}
-    forecast_coordinator = MagicMock()
-    forecast_coordinator.data = None
-    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
-
-    config = {
-        "entry_id": "test-entry",
-        CONF_PRICE_SENSOR: "sensor.test_price",
-        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
-        CONF_FIXED_FEED_IN_PRICE: 0.07,
-        CONF_POWER_CONSUMPTION_SENSORS: ["sensor.grid_consumption"],
-        CONF_POWER_PRODUCTION_SENSORS: [],
-        "battery_subentries": [],
-    }
-
-    coord = OptimizationCoordinator(
-        hass, weather_coordinator, forecast_coordinator, config
+    coord = make_optimization_coordinator(
+        hass,
+        battery_subentries=[],
+        power_consumption_sensors=["sensor.grid_consumption"],
     )
     coord._price_model = MagicMock()
     coord._price_model.async_update_pattern = AsyncMock()
@@ -1478,26 +1415,12 @@ def test_resolve_controller_mode_control_mode_fallback(hass):
 
 def test_get_realtime_grid_w_value_error_skipped(hass):
     """_get_realtime_grid_w skips sensors that cannot be converted to float."""
-    from custom_components.battery_controller.const import (
-        CONF_POWER_CONSUMPTION_SENSORS,
-    )
 
-    weather_coordinator = MagicMock()
-    weather_coordinator.data = {}
-    forecast_coordinator = MagicMock()
-    forecast_coordinator.data = None
-    forecast_coordinator.async_add_listener = MagicMock(return_value=lambda: None)
-    config = {
-        "entry_id": "test-entry",
-        CONF_PRICE_SENSOR: "sensor.test_price",
-        CONF_CONTROL_MODE: MODE_FOLLOW_SCHEDULE,
-        CONF_FIXED_FEED_IN_PRICE: 0.07,
-        CONF_POWER_CONSUMPTION_SENSORS: ["sensor.bad_consumption"],
-        CONF_POWER_PRODUCTION_SENSORS: ["sensor.bad_production"],
-        "battery_subentries": [],
-    }
-    coord = OptimizationCoordinator(
-        hass, weather_coordinator, forecast_coordinator, config
+    coord = make_optimization_coordinator(
+        hass,
+        battery_subentries=[],
+        power_consumption_sensors=["sensor.bad_consumption"],
+        power_production_sensors=["sensor.bad_production"],
     )
 
     hass.states.async_set("sensor.bad_consumption", "not_a_number")

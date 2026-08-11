@@ -46,12 +46,22 @@ def standard_battery_config() -> BatteryConfig:
     )
 
 
-@pytest.fixture
-def optimization_coordinator(hass):
-    """A minimal OptimizationCoordinator with one battery subentry.
+def make_optimization_coordinator(
+    hass,
+    *,
+    max_charge_kw: float = 5.0,
+    max_discharge_kw: float = 5.0,
+    min_soc_percent: float = 10.0,
+    max_soc_percent: float = 90.0,
+    battery_subentries=None,
+    **config_overrides,
+) -> OptimizationCoordinator:
+    """Build a minimal OptimizationCoordinator with one battery subentry.
 
     Enough to exercise the coordinator's own helpers without standing up
-    forecasts, price sensors or an optimizer run.
+    forecasts, price sensors or an optimizer run. Every test module builds its
+    coordinator through this, so they all exercise the same battery unless they
+    deliberately ask for another one.
     """
     weather_coordinator = MagicMock()
     weather_coordinator.data = {}
@@ -65,19 +75,28 @@ def optimization_coordinator(hass):
         CONF_FIXED_FEED_IN_PRICE: 0.07,
         CONF_POWER_CONSUMPTION_SENSORS: [],
         CONF_POWER_PRODUCTION_SENSORS: [],
-        "battery_subentries": [
+        "battery_subentries": battery_subentries
+        if battery_subentries is not None
+        else [
             (
                 "bat1",
                 {
-                    CONF_MAX_CHARGE_POWER_KW: 5.0,
-                    CONF_MAX_DISCHARGE_POWER_KW: 5.0,
-                    CONF_MIN_SOC_PERCENT: 10.0,
-                    CONF_MAX_SOC_PERCENT: 90.0,
+                    CONF_MAX_CHARGE_POWER_KW: max_charge_kw,
+                    CONF_MAX_DISCHARGE_POWER_KW: max_discharge_kw,
+                    CONF_MIN_SOC_PERCENT: min_soc_percent,
+                    CONF_MAX_SOC_PERCENT: max_soc_percent,
                     CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
                 },
             )
         ],
     }
+    config.update(config_overrides)
     return OptimizationCoordinator(
         hass, weather_coordinator, forecast_coordinator, config
     )
+
+
+@pytest.fixture
+def optimization_coordinator(hass) -> OptimizationCoordinator:
+    """A minimal OptimizationCoordinator with one battery subentry."""
+    return make_optimization_coordinator(hass)
