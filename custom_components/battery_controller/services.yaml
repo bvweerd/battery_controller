@@ -19,3 +19,14 @@ reset_discharge_efficiency_calibration:
       example: 01KK4RJJQZBD9C3FMEVYAB0VAB
       selector:
         text:
+
+reset_pv_calibration:
+  name: Reset PV forecast calibration
+  description: Reset every per-array PV forecast correction back to 1.0 and clear all calibration samples.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: Optional. Reset only the specified Battery Controller config entry. Leave empty to reset all Battery Controller entries.
+      example: 01KK4RJJQZBD9C3FMEVYAB0VAB
+      selector:
+        text:

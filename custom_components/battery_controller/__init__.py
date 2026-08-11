@@ -57,6 +57,7 @@ SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION = "reset_charge_efficiency_calibrati
 SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION = (
     "reset_discharge_efficiency_calibration"
 )
+SERVICE_RESET_PV_CALIBRATION = "reset_pv_calibration"
 SERVICE_ENTRY_ID = "entry_id"
 SERVICE_RESET_SCHEMA = vol.Schema({vol.Optional(SERVICE_ENTRY_ID): cv.string})
 
@@ -124,6 +125,20 @@ async def _async_handle_reset_efficiency_calibration(
             await coordinator.async_reset_discharge_eff_calibration()
 
 
+async def _async_handle_reset_pv_calibration(
+    hass: HomeAssistant, call: ServiceCall
+) -> None:
+    """Reset every per-array PV forecast correction for one or more entries."""
+    requested_entry_id = call.data.get(SERVICE_ENTRY_ID)
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if requested_entry_id is not None and entry.entry_id != requested_entry_id:
+            continue
+        runtime_data = getattr(entry, "runtime_data", None)
+        if runtime_data is None:
+            continue
+        await runtime_data.forecast_coordinator.async_reset_pv_calibration()
+
+
 async def _async_handle_reset_charge_efficiency_calibration(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
@@ -162,6 +177,16 @@ def _async_register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
         _handle_discharge_service,
+        schema=SERVICE_RESET_SCHEMA,
+    )
+
+    async def _handle_pv_service(call: ServiceCall) -> None:
+        await _async_handle_reset_pv_calibration(hass, call)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESET_PV_CALIBRATION,
+        _handle_pv_service,
         schema=SERVICE_RESET_SCHEMA,
     )
 
@@ -367,6 +392,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             for service in (
                 SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
                 SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
+                SERVICE_RESET_PV_CALIBRATION,
             ):
                 if hass.services.has_service(DOMAIN, service):
                     hass.services.async_remove(DOMAIN, service)
