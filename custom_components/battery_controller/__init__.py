@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -154,41 +156,34 @@ async def _async_handle_reset_discharge_efficiency_calibration(
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
-    """Register domain services once."""
+    """Register domain services once.
+
+    Each calibration that is persisted needs an escape hatch: without one a bad
+    correction can only be cleared by editing .storage by hand.
+    """
     if hass.services.has_service(DOMAIN, SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION):
         return
 
-    async def _handle_charge_service(call: ServiceCall) -> None:
-        await _async_handle_reset_charge_efficiency_calibration(hass, call)
-
-    async def _handle_discharge_service(call: ServiceCall) -> None:
-        await _async_handle_reset_discharge_efficiency_calibration(hass, call)
-
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
-        _handle_charge_service,
-        schema=SERVICE_RESET_SCHEMA,
-    )
-    # The discharge-side correction is persisted the same way as the charge-side
-    # one, so it needs the same escape hatch: without it a bad calibration can
-    # only be cleared by editing .storage by hand.
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
-        _handle_discharge_service,
-        schema=SERVICE_RESET_SCHEMA,
-    )
-
-    async def _handle_pv_service(call: ServiceCall) -> None:
-        await _async_handle_reset_pv_calibration(hass, call)
-
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RESET_PV_CALIBRATION,
-        _handle_pv_service,
-        schema=SERVICE_RESET_SCHEMA,
-    )
+    handlers: list[
+        tuple[str, Callable[[HomeAssistant, ServiceCall], Coroutine[Any, Any, None]]]
+    ] = [
+        (
+            SERVICE_RESET_CHARGE_EFFICIENCY_CALIBRATION,
+            _async_handle_reset_charge_efficiency_calibration,
+        ),
+        (
+            SERVICE_RESET_DISCHARGE_EFFICIENCY_CALIBRATION,
+            _async_handle_reset_discharge_efficiency_calibration,
+        ),
+        (SERVICE_RESET_PV_CALIBRATION, _async_handle_reset_pv_calibration),
+    ]
+    for service, handler in handlers:
+        hass.services.async_register(
+            DOMAIN,
+            service,
+            partial(handler, hass),
+            schema=SERVICE_RESET_SCHEMA,
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

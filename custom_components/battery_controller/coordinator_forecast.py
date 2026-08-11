@@ -42,24 +42,13 @@ from .forecast_models import (
     NetLoadForecast,
     PVForecastModel,
 )
-from .helpers import extract_pv_forecast_series
+from .helpers import (
+    battery_energy_sensor_ids,
+    extract_pv_forecast_series,
+    usable_state,
+)
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _battery_energy_sensors(config: dict[str, Any], key: str) -> list[str]:
-    """Collect one battery energy counter per subentry that has it configured.
-
-    Deduplicated: where a single inverter reports one counter for several packs,
-    the same entity may legitimately be selected on more than one subentry, and
-    counting it twice would distort the reconstruction.
-    """
-    seen: list[str] = []
-    for _subentry_id, data in config.get("battery_subentries", []):
-        entity_id = data.get(key)
-        if entity_id and entity_id not in seen:
-            seen.append(entity_id)
-    return seen
 
 
 class ForecastCoordinator(DataUpdateCoordinator):
@@ -168,11 +157,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
             base_consumption_kw=0.5,
             pv_production_sensors=reconstruction_pv_sensors,
             entry_id=config.get("entry_id"),
-            battery_charge_sensors=_battery_energy_sensors(
-                config, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+            battery_charge_sensors=battery_energy_sensor_ids(
+                config.get("battery_subentries", []),
+                CONF_BATTERY_ENERGY_CHARGED_SENSOR,
             ),
-            battery_discharge_sensors=_battery_energy_sensors(
-                config, CONF_BATTERY_ENERGY_DISCHARGED_SENSOR
+            battery_discharge_sensors=battery_energy_sensor_ids(
+                config.get("battery_subentries", []),
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
             ),
         )
 
@@ -287,8 +278,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
     def _read_pv_meter_kwh(self, entity_id: str) -> float | None:
         """Read one cumulative production counter, in kWh."""
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state in ("unknown", "unavailable"):
+        state = usable_state(self.hass, entity_id)
+        if state is None:
             return None
         try:
             value = float(state.state)
@@ -387,12 +378,6 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 )
         if changed:
             self.hass.async_create_task(self._async_save_pv_calibration())
-
-    def _pv_correction_for(self, sid: str, kwp: float, raw_kw: float) -> float:
-        """Return the gain factor to apply to one array's forecast step."""
-        if not sid:
-            return 1.0
-        return self._pv_cal_correction.get(sid, 1.0)
 
     def _snapshot_pv_calibration(
         self,
@@ -653,70 +638,55 @@ class ForecastCoordinator(DataUpdateCoordinator):
         raw_first_step_kw: dict[str, float] = {}
         kwp_by_sid: dict[str, float] = {}
 
-        # Sum AC PV forecast across all AC subentry models, applying temperature derating
-        pv_forecast = [0.0] * n
         per_pv_array_forecasts: dict[str, list[float]] = {}
-        for sid, model, sensors in zip(
+
+        def _sum_arrays(
+            subentry_ids: list[str],
+            models: list[PVForecastModel],
+            sensors_per_array: list[list[str]],
+        ) -> list[float]:
+            """Forecast one coupling group (AC or DC) and sum its arrays.
+
+            Per-array series are recorded for the diagnostic sensors and for
+            calibration on the way through.
+            """
+            total = [0.0] * n
+            for sid, model, sensors in zip(subentry_ids, models, sensors_per_array):
+                series = model.forecast_from_radiation(
+                    radiation_steps,
+                    temp_for_pv,
+                    dni_forecast=poa_dni,
+                    diffuse_forecast=poa_diffuse,
+                    timestamps_utc=timestamps_utc,
+                    latitude=lat,
+                    longitude=lon,
+                )
+                series = self._apply_sensor_forecast(series, sensors, timestamps_utc)
+                if sid:
+                    # Snapshot the UNcorrected value: the factor is always
+                    # measured/raw, so it stays a direct estimate instead of
+                    # compounding on itself run after run.
+                    raw_first_step_kw[sid] = series[0] if series else 0.0
+                    kwp_by_sid[sid] = model.peak_power_kwp
+                gain = self.pv_correction(sid)
+                if gain != 1.0:
+                    series = [v * gain for v in series]
+                if sid:
+                    per_pv_array_forecasts[sid] = [
+                        round(max(0.0, v), 3) for v in series[:n]
+                    ]
+                for i in range(min(n, len(series))):
+                    total[i] += series[i]
+            # Clamp: a faulty sensor/model must not produce negative output (P1.3)
+            return [max(0.0, v) for v in total]
+
+        pv_forecast = _sum_arrays(
             self.pv_ac_subentry_ids, self.pv_ac_models, self.pv_ac_forecast_sensors
-        ):
-            extra = model.forecast_from_radiation(
-                radiation_steps,
-                temp_for_pv,
-                dni_forecast=poa_dni,
-                diffuse_forecast=poa_diffuse,
-                timestamps_utc=timestamps_utc,
-                latitude=lat,
-                longitude=lon,
-            )
-            extra = self._apply_sensor_forecast(extra, sensors, timestamps_utc)
-            if sid:
-                # Snapshot the UNcorrected value: the factor is always
-                # measured/raw, so it stays a direct estimate instead of
-                # compounding on itself run after run.
-                raw_first_step_kw[sid] = extra[0] if extra else 0.0
-                kwp_by_sid[sid] = model.peak_power_kwp
-            gain = self._pv_correction_for(sid, model.peak_power_kwp, 0.0)
-            if gain != 1.0:
-                extra = [v * gain for v in extra]
-            arr_forecast = [round(max(0.0, v), 3) for v in extra[:n]]
-            if sid:
-                per_pv_array_forecasts[sid] = arr_forecast
-            for i in range(min(n, len(extra))):
-                pv_forecast[i] += extra[i]
-
-        # Clamp PV values: a faulty sensor/model must not produce negative output (P1.3)
-        pv_forecast = [max(0.0, v) for v in pv_forecast]
-
-        # Sum DC PV forecast across all DC subentry models, applying temperature derating
+        )
         has_dc = bool(self.pv_dc_models)
-        pv_dc_forecast = [0.0] * n
-        for sid, dc_model, dc_sensors in zip(
+        pv_dc_forecast = _sum_arrays(
             self.pv_dc_subentry_ids, self.pv_dc_models, self.pv_dc_forecast_sensors
-        ):
-            extra_dc = dc_model.forecast_from_radiation(
-                radiation_steps,
-                temp_for_pv,
-                dni_forecast=poa_dni,
-                diffuse_forecast=poa_diffuse,
-                timestamps_utc=timestamps_utc,
-                latitude=lat,
-                longitude=lon,
-            )
-            extra_dc = self._apply_sensor_forecast(extra_dc, dc_sensors, timestamps_utc)
-            if sid:
-                raw_first_step_kw[sid] = extra_dc[0] if extra_dc else 0.0
-                kwp_by_sid[sid] = dc_model.peak_power_kwp
-            gain = self._pv_correction_for(sid, dc_model.peak_power_kwp, 0.0)
-            if gain != 1.0:
-                extra_dc = [v * gain for v in extra_dc]
-            arr_forecast = [round(max(0.0, v), 3) for v in extra_dc[:n]]
-            if sid:
-                per_pv_array_forecasts[sid] = arr_forecast
-            for i in range(min(n, len(extra_dc))):
-                pv_dc_forecast[i] += extra_dc[i]
-
-        # Clamp DC PV values as well
-        pv_dc_forecast = [max(0.0, v) for v in pv_dc_forecast]
+        )
 
         # Net load = consumption minus all PV that reaches the AC side.
         # DC-coupled PV gets there through the inverter, the same path the
