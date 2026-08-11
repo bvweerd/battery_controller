@@ -26,6 +26,8 @@ from .const import (
     ACTION_DISCHARGING,
     ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_CONTROL_MODE,
@@ -93,6 +95,30 @@ _SOC_HYSTERESIS = 0.05
 # this fraction of the planned charge power. Below it, the DP evidently wants
 # grid charging beyond the surplus and the schedule is followed instead.
 _SURPLUS_COVERS_PLAN_FRACTION = 0.8
+
+# Efficiency calibration tuning.
+#
+# A sample is only worth taking when the planned SoC change is comfortably
+# larger than the resolution of whatever measured it. The energy counters are
+# fine-grained, so the floor there is just "big enough to be a real action". A
+# SoC sensor reporting whole percent, by contrast, quantises at capacity/100 —
+# 0.1 kWh on a 10 kWh pack, which is exactly the old fixed floor, so a single
+# sample carried up to +/-50 % quantisation error. On that path the floor
+# scales with the observed quantum instead.
+_CALIBRATION_MIN_DELTA_KWH = 0.1
+_CALIBRATION_SOC_QUANTUM_FACTOR = 4.0
+
+# Samples outside this window are dropped rather than clipped into it. The
+# window is wide enough to contain genuine derating and far enough above 1.0
+# that ordinary measurement noise is not truncated on one side — the previous
+# code capped the ratio at 1.05 while allowing it down to 0.5, so symmetric
+# noise biased the mean downward and could apply a correction below 1.0 to a
+# perfectly healthy battery. The applied correction is still clamped (below).
+_CALIBRATION_ACCEPT_MIN = 0.5
+_CALIBRATION_ACCEPT_MAX = 1.5
+# Bounds on the correction actually handed to the optimizer.
+_CALIBRATION_APPLY_MIN = 0.5
+_CALIBRATION_APPLY_MAX = 1.05
 
 
 class OptimizationCoordinator(DataUpdateCoordinator):
@@ -292,6 +318,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # to avoid confounding with passive PV.
         self._charge_eff_samples: deque[float] = deque(maxlen=20)
         self._charge_eff_correction: float = 1.0
+
+        # Cumulative throughput counters as they stood when _last_result was
+        # planned. The difference against the next read is the energy the
+        # battery actually moved over that step — a far finer measurement than
+        # the SoC delta, which on a whole-percent sensor quantises at
+        # capacity/100 (0.1 kWh on a 10 kWh pack).
+        self._energy_counter_snapshot: dict[str, float | None] = {
+            "charged": None,
+            "discharged": None,
+        }
 
         # Persistent storage for charge efficiency calibration (survives reboots).
         entry_id = config.get("entry_id", "unknown")
@@ -1570,6 +1606,175 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._charge_eff_correction = 1.0
         await self._async_save_charge_eff_calibration()
 
+    def _battery_energy_sensor_ids(self, conf_key: str) -> list[str]:
+        """Collect one energy counter per battery subentry that has it configured.
+
+        Deduplicated: where one inverter reports a single counter covering
+        several packs it may legitimately be selected on more than one
+        subentry, and counting it twice would double the measured throughput.
+        Same convention as the forecast coordinator's collector.
+        """
+        seen: list[str] = []
+        for _sid, data in self._battery_subentries:
+            entity_id = data.get(conf_key)
+            if entity_id and entity_id not in seen:
+                seen.append(entity_id)
+        return seen
+
+    def _read_energy_total_kwh(self, conf_key: str) -> float | None:
+        """Sum the configured cumulative energy counters, in kWh.
+
+        Returns None when no counter is configured or any of them is
+        unavailable: a partial sum would look like a jump backwards on the next
+        read and poison the delta.
+        """
+        sensor_ids = self._battery_energy_sensor_ids(conf_key)
+        if not sensor_ids:
+            return None
+        total = 0.0
+        for sensor_id in sensor_ids:
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                return None
+            try:
+                value = float(state.state)
+            except (ValueError, TypeError):
+                return None
+            unit = str(state.attributes.get("unit_of_measurement") or "kWh")
+            if unit == "Wh":
+                value /= 1000.0
+            elif unit == "MWh":
+                value *= 1000.0
+            elif unit != "kWh":
+                self._warn_unit_once(sensor_id, unit, "treating value as kWh")
+            total += value
+        return total
+
+    def _read_energy_totals(self) -> dict[str, float | None]:
+        """Read both cumulative throughput counters at one instant."""
+        return {
+            "charged": self._read_energy_total_kwh(CONF_BATTERY_ENERGY_CHARGED_SENSOR),
+            "discharged": self._read_energy_total_kwh(
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSOR
+            ),
+        }
+
+    def _counter_delta_kwh(
+        self, key: str, totals_now: dict[str, float | None]
+    ) -> float | None:
+        """Throughput measured by the counters since the plan was made.
+
+        None when either end of the interval is missing, or when the counter
+        went backwards — a total_increasing sensor that was reset or replaced,
+        where the difference is meaningless rather than negative.
+        """
+        before = self._energy_counter_snapshot.get(key)
+        after = totals_now.get(key)
+        if before is None or after is None:
+            return None
+        delta = after - before
+        if delta < 0:
+            _LOGGER.debug(
+                "Efficiency calibration: %s counter went backwards "
+                "(%.3f -> %.3f kWh); treating as a meter reset",
+                key,
+                before,
+                after,
+            )
+            return None
+        return delta
+
+    def _soc_quantum_kwh(self) -> float:
+        """Estimate the resolution of the aggregated SoC measurement, in kWh.
+
+        Derived from the decimals each SoC sensor actually reports: a state of
+        "47" is whole-percent, "47.3" is ten times finer. Summed across packs
+        because the aggregate SoC is a sum and the individual quantisation
+        errors can align. Returns 0.0 when nothing can be determined, which
+        leaves the caller on its fixed floor.
+        """
+        total = 0.0
+        for (_sid, cfg), (_sid2, data) in zip(
+            self._individual_battery_configs, self._battery_subentries
+        ):
+            sensor_id = data.get(CONF_BATTERY_SOC_SENSOR)
+            if not sensor_id:
+                continue
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                continue
+            raw = state.state.strip()
+            decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
+            step = 10.0**-decimals
+            unit = str(state.attributes.get("unit_of_measurement") or "%")
+            if unit == "kWh":
+                total += step
+            elif unit == "Wh":
+                total += step / 1000.0
+            else:  # percent (or unitless, which is treated as percent elsewhere)
+                total += step / 100.0 * cfg.capacity_kwh
+        return total
+
+    def _min_planned_delta_kwh(self, from_counters: bool) -> float:
+        """Smallest planned SoC change worth sampling, given how it is measured."""
+        if from_counters:
+            return _CALIBRATION_MIN_DELTA_KWH
+        quantum = self._soc_quantum_kwh()
+        return max(
+            _CALIBRATION_MIN_DELTA_KWH,
+            _CALIBRATION_SOC_QUANTUM_FACTOR * quantum,
+        )
+
+    def _record_calibration_sample(
+        self,
+        *,
+        direction: str,
+        samples: deque[float],
+        current_correction: float,
+        planned_delta: float,
+        actual_delta: float,
+        source: str,
+    ) -> float:
+        """Fold one actual/planned observation into a correction factor.
+
+        Samples outside the acceptance window are dropped rather than clipped
+        into it. Clipping was not symmetric around 1.0 — the ratio was capped
+        at 1.05 but allowed down to 0.5 — so ordinary measurement noise pulled
+        the mean below 1.0 and a healthy battery could end up with a correction
+        applied to it. Only the resulting mean is clamped, and only for use.
+        """
+        ratio = actual_delta / planned_delta
+        if not (_CALIBRATION_ACCEPT_MIN <= ratio <= _CALIBRATION_ACCEPT_MAX):
+            _LOGGER.debug(
+                "%s efficiency calibration: dropping implausible sample "
+                "(ratio=%.3f from %s, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                direction.capitalize(),
+                ratio,
+                source,
+                planned_delta,
+                actual_delta,
+            )
+            return current_correction
+
+        samples.append(ratio)
+        mean = sum(samples) / len(samples)
+        new_correction = max(_CALIBRATION_APPLY_MIN, min(_CALIBRATION_APPLY_MAX, mean))
+        if abs(new_correction - current_correction) > 0.005:
+            _LOGGER.info(
+                "%s efficiency correction updated: %.3f → %.3f "
+                "(latest ratio=%.3f from %s, n=%d samples, "
+                "planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                direction.capitalize(),
+                current_correction,
+                new_correction,
+                ratio,
+                source,
+                len(samples),
+                planned_delta,
+                actual_delta,
+            )
+        return new_correction
+
     def _previous_charge_step_complete(self) -> bool:
         """Return whether the previously planned first step has elapsed.
 
@@ -1629,7 +1834,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         tolerance_kw = max(0.05, 0.1 * abs(planned_kw))
         return abs(executed_kw - planned_kw) <= tolerance_kw
 
-    def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
+    def _update_charge_eff_calibration(
+        self,
+        battery_state: BatteryState,
+        energy_totals_now: dict[str, float | None] | None = None,
+    ) -> None:
         """Compare previous planned SoC to actual SoC and update charge efficiency correction.
 
         Samples are only collected when:
@@ -1679,8 +1888,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         planned_next_soc = self._last_result.soc_schedule_kwh[1]
         planned_delta = planned_next_soc - prev_soc
 
-        if planned_delta < 0.1:
-            # Too small to measure reliably; skip.
+        # Prefer the cumulative charged-energy counter over the SoC delta. Both
+        # measure the same quantity — energy into the battery, which is what
+        # the planned SoC change represents — but the counter is not limited by
+        # the SoC sensor's step size.
+        counter_delta = (
+            self._counter_delta_kwh("charged", energy_totals_now)
+            if energy_totals_now is not None
+            else None
+        )
+        from_counters = counter_delta is not None
+
+        if planned_delta < self._min_planned_delta_kwh(from_counters):
+            # Too small to measure reliably at this resolution; skip.
             return
 
         # Skip if the step crosses the high-SoC charge derating threshold.
@@ -1700,32 +1920,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 return
 
-        actual_delta = battery_state.soc_kwh - prev_soc
-        # Cap upward to 1.2× planned to filter out unexpected external charge
-        # sources (e.g. brief grid export reversed, SoC sensor noise).
-        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
-        ratio = actual_delta / planned_delta
-        # Clip to a physically reasonable range; the correction should never
-        # indicate the battery charged *more* than modelled by more than 5%.
-        ratio = max(0.5, min(1.05, ratio))
+        if counter_delta is not None:
+            actual_delta = counter_delta
+            source = "energy counter"
+        else:
+            actual_delta = max(0.0, battery_state.soc_kwh - prev_soc)
+            source = "SoC delta"
 
-        self._charge_eff_samples.append(ratio)
-        new_correction = sum(self._charge_eff_samples) / len(self._charge_eff_samples)
-
-        changed = abs(new_correction - self._charge_eff_correction) > 0.005
-        if changed:
-            _LOGGER.info(
-                "Charge efficiency correction updated: %.3f → %.3f "
-                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self._charge_eff_correction,
-                new_correction,
-                ratio,
-                len(self._charge_eff_samples),
-                planned_delta,
-                actual_delta,
-            )
-        self._charge_eff_correction = new_correction
-        if changed:
+        previous = self._charge_eff_correction
+        self._charge_eff_correction = self._record_calibration_sample(
+            direction="charge",
+            samples=self._charge_eff_samples,
+            current_correction=previous,
+            planned_delta=planned_delta,
+            actual_delta=actual_delta,
+            source=source,
+        )
+        if abs(self._charge_eff_correction - previous) > 0.005:
             self.hass.async_create_task(self._async_save_charge_eff_calibration())
 
     async def _async_load_discharge_eff_calibration(self) -> None:
@@ -1768,7 +1979,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._discharge_eff_correction = 1.0
         await self._async_save_discharge_eff_calibration()
 
-    def _update_discharge_eff_calibration(self, battery_state: BatteryState) -> None:
+    def _update_discharge_eff_calibration(
+        self,
+        battery_state: BatteryState,
+        energy_totals_now: dict[str, float | None] | None = None,
+    ) -> None:
         """Compare previous planned SoC to actual SoC and update discharge efficiency correction.
 
         Samples are only collected when:
@@ -1816,8 +2031,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         planned_next_soc = self._last_result.soc_schedule_kwh[1]
         planned_delta = prev_soc - planned_next_soc  # positive: SoC goes down
 
-        if planned_delta < 0.1:
-            # Too small to measure reliably; skip.
+        # Prefer the cumulative discharged-energy counter over the SoC delta
+        # (same reasoning as the charge side).
+        counter_delta = (
+            self._counter_delta_kwh("discharged", energy_totals_now)
+            if energy_totals_now is not None
+            else None
+        )
+        from_counters = counter_delta is not None
+
+        if planned_delta < self._min_planned_delta_kwh(from_counters):
+            # Too small to measure reliably at this resolution; skip.
             return
 
         # Skip if the step crosses the low-SoC discharge derating threshold.
@@ -1838,34 +2062,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 return
 
-        actual_delta = prev_soc - battery_state.soc_kwh  # positive: SoC went down
-        # Cap upward to 1.2× planned to filter out unexpected external discharge
-        # (e.g. grid outage, SoC sensor noise causing apparent over-discharge).
-        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
-        ratio = actual_delta / planned_delta
-        # Clip to a physically reasonable range; the correction should never
-        # indicate the battery discharged *more* than modelled by more than 5%.
-        ratio = max(0.5, min(1.05, ratio))
+        if counter_delta is not None:
+            actual_delta = counter_delta
+            source = "energy counter"
+        else:
+            # positive: SoC went down
+            actual_delta = max(0.0, prev_soc - battery_state.soc_kwh)
+            source = "SoC delta"
 
-        self._discharge_eff_samples.append(ratio)
-        new_correction = sum(self._discharge_eff_samples) / len(
-            self._discharge_eff_samples
+        previous = self._discharge_eff_correction
+        self._discharge_eff_correction = self._record_calibration_sample(
+            direction="discharge",
+            samples=self._discharge_eff_samples,
+            current_correction=previous,
+            planned_delta=planned_delta,
+            actual_delta=actual_delta,
+            source=source,
         )
-
-        changed = abs(new_correction - self._discharge_eff_correction) > 0.005
-        if changed:
-            _LOGGER.info(
-                "Discharge efficiency correction updated: %.3f → %.3f "
-                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self._discharge_eff_correction,
-                new_correction,
-                ratio,
-                len(self._discharge_eff_samples),
-                planned_delta,
-                actual_delta,
-            )
-        self._discharge_eff_correction = new_correction
-        if changed:
+        if abs(self._discharge_eff_correction - previous) > 0.005:
             self.hass.async_create_task(self._async_save_discharge_eff_calibration())
 
     async def _run_optimization(self) -> dict[str, Any]:
@@ -2278,11 +2492,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
-        # Charge efficiency calibration: compare previous planned SoC with actual SoC
-        # to detect systematic over-estimation of charge efficiency (e.g. CV-phase).
-        self._update_charge_eff_calibration(battery_state)
+        # Cumulative throughput counters, read once: they close the previous
+        # planned step and open the new one at the same instant.
+        energy_totals_now = self._read_energy_totals()
+
+        # Charge efficiency calibration: compare the previous plan against what
+        # the battery actually moved, to detect systematic over-estimation of
+        # charge efficiency (e.g. CV-phase).
+        self._update_charge_eff_calibration(battery_state, energy_totals_now)
         # Discharge efficiency calibration: same principle for discharging steps.
-        self._update_discharge_eff_calibration(battery_state)
+        self._update_discharge_eff_calibration(battery_state, energy_totals_now)
 
         battery_config = self.battery_config
 
@@ -2361,6 +2580,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         self._last_result = result
+        # Snapshot the counters alongside the plan they belong to, so the next
+        # run can measure the throughput of exactly this step.
+        self._energy_counter_snapshot = energy_totals_now
 
         # Get current grid power: prefer real sensor, fall back to estimate
         realtime_grid_w = self._get_realtime_grid_w()
