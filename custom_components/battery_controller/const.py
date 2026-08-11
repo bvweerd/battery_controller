@@ -75,6 +75,18 @@ BATTERY_SUBENTRY_TYPE = "battery"
 # internal model remains the fallback for steps not covered by sensor data.
 CONF_PV_FORECAST_SENSORS = "pv_forecast_sensors"
 
+# Configuration keys - PV array (subentry): measured production.
+# A cumulative kWh counter for THIS array. Two consumers:
+#  - the gross-load reconstruction, which only ever needs the sum and is
+#    equally happy with the legacy CONF_PV_PRODUCTION_SENSORS list;
+#  - per-array forecast calibration, which needs the attribution the flat list
+#    cannot express.
+# Same convention as the battery energy counters: where one inverter reports a
+# single counter covering several arrays, set it on one of them and the
+# collector deduplicates, so totals stay correct while per-array use of the
+# figure is unavailable.
+CONF_PV_MEASURED_PRODUCTION_SENSOR = "pv_measured_production_sensor"
+
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
 # battery without AC conversion. This is common with hybrid inverters
@@ -271,6 +283,28 @@ WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this 
 # Such a sample is unbounded in magnitude — observed values reach 10^8 kW — and
 # a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
 MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
+
+# Per-array PV forecast calibration.
+# The correction is a gain factor: it captures a systematically wrong tilt or
+# orientation entry, soiling, or a string that is down. It cannot capture
+# shading, which is a function of sun position rather than a constant factor —
+# see docs/algorithm.md.
+# Samples are only taken in a middle band of the array's rating: below the
+# floor the signal is smaller than the noise, above the ceiling inverter
+# clipping and thermal derating dominate and are not forecast errors.
+PV_CALIBRATION_MIN_LOAD_FRACTION = 0.10
+PV_CALIBRATION_MAX_LOAD_FRACTION = 0.80
+# Energy-weighted over this many samples (a few days of daylight at 15 min),
+# so cloudy low-signal steps cannot dominate the estimate.
+PV_CALIBRATION_WINDOW = 200
+# A single step this far off the forecast is weather, a sensor glitch or a
+# window that did not line up — not a gain error.
+PV_CALIBRATION_MAX_SAMPLE_RATIO = 5.0
+# Bounds on the factor actually applied to a forecast.
+PV_CALIBRATION_APPLY_MIN = 0.5
+PV_CALIBRATION_APPLY_MAX = 1.5
+# Minimum samples before the correction is used at all.
+PV_CALIBRATION_MIN_SAMPLES = 20
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode

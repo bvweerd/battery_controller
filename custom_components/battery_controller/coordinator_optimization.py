@@ -367,8 +367,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     @pv_curtailed.setter
     def pv_curtailed(self, value: bool) -> None:
-        """Enable or disable PV curtailment mode."""
+        """Enable or disable PV curtailment mode.
+
+        Propagated to the forecast coordinator: while production is
+        deliberately suppressed, the shortfall against the PV forecast is not a
+        forecast error and must not be learned as a per-array correction.
+        """
         self._pv_curtailed = value
+        self.forecast_coordinator.pv_curtailed = value
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""

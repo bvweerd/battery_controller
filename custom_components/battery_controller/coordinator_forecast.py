@@ -7,8 +7,10 @@ from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from typing import Any
 
+from collections import deque
+
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import issue_registry as ir, storage
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
@@ -20,10 +22,18 @@ from .const import (
     CONF_GRID_IMPORT_SENSORS,
     CONF_GROSS_LOAD_SENSORS,
     CONF_PV_FORECAST_SENSORS,
+    CONF_PV_MEASURED_PRODUCTION_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
     DC_TO_AC_INVERTER_EFFICIENCY,
     DOMAIN,
     FORECAST_INTERVAL_MINUTES,
+    PV_CALIBRATION_APPLY_MAX,
+    PV_CALIBRATION_APPLY_MIN,
+    PV_CALIBRATION_MAX_LOAD_FRACTION,
+    PV_CALIBRATION_MAX_SAMPLE_RATIO,
+    PV_CALIBRATION_MIN_LOAD_FRACTION,
+    PV_CALIBRATION_MIN_SAMPLES,
+    PV_CALIBRATION_WINDOW,
     WEATHER_STALE_AFTER_MINUTES,
 )
 from .coordinator_weather import WeatherDataCoordinator
@@ -122,6 +132,33 @@ class ForecastCoordinator(DataUpdateCoordinator):
             peak_power_kwp=0.0, orientation_deg=180, tilt_deg=35, efficiency_factor=1.0
         )
 
+        # Measured production per array, and the union used by the gross-load
+        # reconstruction. The reconstruction only ever needs the sum, so the
+        # legacy flat list keeps working untouched and the per-array sensors are
+        # purely additive — no migration, and nothing to configure twice.
+        self._pv_measured_sensors: dict[str, str] = {}
+        for arr in config.get("pv_arrays", []):
+            sid = arr.get("subentry_id", "")
+            entity_id = arr.get(CONF_PV_MEASURED_PRODUCTION_SENSOR)
+            if sid and entity_id:
+                self._pv_measured_sensors[sid] = entity_id
+        reconstruction_pv_sensors = list(config.get(CONF_PV_PRODUCTION_SENSORS, []))
+        for entity_id in self._pv_measured_sensors.values():
+            if entity_id not in reconstruction_pv_sensors:
+                reconstruction_pv_sensors.append(entity_id)
+
+        # Per-array forecast calibration state.
+        self._pv_cal_samples: dict[str, deque[tuple[float, float]]] = {}
+        self._pv_cal_correction: dict[str, float] = {}
+        self._pv_cal_snapshot: dict[str, Any] = {}
+        self._pv_cal_store: storage.Store[dict[str, Any]] = storage.Store(
+            hass, 1, f"battery_controller_{config.get('entry_id', 'unknown')}_pv_cal"
+        )
+        # Set by the PV-curtailment switch (via the optimization coordinator):
+        # while production is deliberately suppressed the shortfall against the
+        # forecast is not a forecast error and must not be calibrated away.
+        self.pv_curtailed: bool = False
+
         self.consumption_model = ConsumptionForecastModel(
             hass=hass,
             grid_import_sensors=config.get(CONF_GRID_IMPORT_SENSORS, []),
@@ -129,7 +166,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             gross_load_sensors=config.get(CONF_GROSS_LOAD_SENSORS, []),
             history_days=14,
             base_consumption_kw=0.5,
-            pv_production_sensors=config.get(CONF_PV_PRODUCTION_SENSORS, []),
+            pv_production_sensors=reconstruction_pv_sensors,
             entry_id=config.get("entry_id"),
             battery_charge_sensors=_battery_energy_sensors(
                 config, CONF_BATTERY_ENERGY_CHARGED_SENSOR
@@ -153,6 +190,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
         """Set up the forecast coordinator."""
         # Update consumption pattern from history on startup
         await self.consumption_model.async_update_pattern()
+        await self._async_load_pv_calibration()
 
         # Subscribe to the weather coordinator. A DataUpdateCoordinator only
         # keeps polling while it has listeners, and no entity subscribes to the
@@ -191,6 +229,202 @@ class ForecastCoordinator(DataUpdateCoordinator):
             self._unsub_weather()
             self._unsub_weather = None
         await super().async_shutdown()
+
+    async def _async_load_pv_calibration(self) -> None:
+        """Restore per-array PV corrections from storage."""
+        stored = await self._pv_cal_store.async_load()
+        if not stored:
+            return
+        for sid, entry in (stored.get("arrays") or {}).items():
+            samples = entry.get("samples") or []
+            self._pv_cal_samples[sid] = deque(
+                ((float(m), float(f)) for m, f in samples),
+                maxlen=PV_CALIBRATION_WINDOW,
+            )
+            self._pv_cal_correction[sid] = float(entry.get("correction", 1.0))
+        active = {
+            sid: round(c, 3)
+            for sid, c in self._pv_cal_correction.items()
+            if abs(c - 1.0) > 0.01
+        }
+        if active:
+            _LOGGER.info("Restored PV forecast calibration: %s", active)
+
+    async def _async_save_pv_calibration(self) -> None:
+        """Persist per-array PV corrections."""
+        await self._pv_cal_store.async_save(
+            {
+                "arrays": {
+                    sid: {
+                        "samples": [[m, f] for m, f in samples],
+                        "correction": self._pv_cal_correction.get(sid, 1.0),
+                    }
+                    for sid, samples in self._pv_cal_samples.items()
+                }
+            }
+        )
+
+    async def async_reset_pv_calibration(self) -> None:
+        """Reset every per-array PV correction to the nominal 1.0."""
+        if self._pv_cal_samples or any(
+            abs(c - 1.0) > 1e-9 for c in self._pv_cal_correction.values()
+        ):
+            _LOGGER.info(
+                "Resetting PV forecast calibration for %d array(s)",
+                len(self._pv_cal_correction),
+            )
+        self._pv_cal_samples.clear()
+        self._pv_cal_correction.clear()
+        await self._async_save_pv_calibration()
+
+    def _read_pv_meter_kwh(self, entity_id: str) -> float | None:
+        """Read one cumulative production counter, in kWh."""
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        unit = str(state.attributes.get("unit_of_measurement") or "kWh")
+        if unit == "Wh":
+            return value / 1000.0
+        if unit == "MWh":
+            return value * 1000.0
+        return value
+
+    def _update_pv_calibration(self, now_utc: datetime) -> None:
+        """Compare the previous step's forecast against what each array produced.
+
+        The correction is an energy-weighted ratio, not a mean of per-step
+        ratios: a quarter hour under cloud has a large relative error on a tiny
+        amount of energy, and weighting by energy stops those steps dominating
+        an estimate that is meant to describe a gain error.
+
+        What it can and cannot fix is stated in const.py: a wrong tilt or
+        orientation entry, soiling and a dead string are gain errors and are
+        captured; shading is a function of sun position, not a constant factor,
+        and is not.
+        """
+        snapshot = self._pv_cal_snapshot
+        self._pv_cal_snapshot = {}
+        if not snapshot:
+            return
+
+        elapsed_min = (now_utc - snapshot["taken_at"]).total_seconds() / 60.0
+        step_min = FORECAST_INTERVAL_MINUTES
+        if not (0.5 * step_min <= elapsed_min <= 1.5 * step_min):
+            # The window the forecast described is not the window that elapsed.
+            return
+
+        if self.pv_curtailed:
+            # Production was deliberately suppressed; the shortfall is not a
+            # forecast error.
+            return
+
+        changed = False
+        for sid, planned_kwh in (snapshot["forecast_kwh"] or {}).items():
+            entity_id = self._pv_measured_sensors.get(sid)
+            before = (snapshot["meter_kwh"] or {}).get(sid)
+            if not entity_id or before is None or planned_kwh <= 0:
+                continue
+            after = self._read_pv_meter_kwh(entity_id)
+            if after is None:
+                continue
+            measured_kwh = after - before
+            if measured_kwh < 0:
+                _LOGGER.debug(
+                    "PV calibration: counter %s went backwards (%.3f -> %.3f kWh); "
+                    "treating as a meter reset",
+                    entity_id,
+                    before,
+                    after,
+                )
+                continue
+            if measured_kwh > PV_CALIBRATION_MAX_SAMPLE_RATIO * planned_kwh:
+                _LOGGER.debug(
+                    "PV calibration: dropping implausible sample for %s "
+                    "(measured %.3f kWh vs forecast %.3f kWh)",
+                    sid,
+                    measured_kwh,
+                    planned_kwh,
+                )
+                continue
+
+            samples = self._pv_cal_samples.setdefault(
+                sid, deque(maxlen=PV_CALIBRATION_WINDOW)
+            )
+            samples.append((measured_kwh, planned_kwh))
+            total_measured = sum(m for m, _ in samples)
+            total_planned = sum(f for _, f in samples)
+            if len(samples) < PV_CALIBRATION_MIN_SAMPLES or total_planned <= 0:
+                continue
+            correction = max(
+                PV_CALIBRATION_APPLY_MIN,
+                min(PV_CALIBRATION_APPLY_MAX, total_measured / total_planned),
+            )
+            previous = self._pv_cal_correction.get(sid, 1.0)
+            self._pv_cal_correction[sid] = correction
+            if abs(correction - previous) > 0.005:
+                changed = True
+                _LOGGER.info(
+                    "PV forecast correction for array %s: %.3f → %.3f "
+                    "(n=%d steps, measured %.2f kWh vs forecast %.2f kWh)",
+                    sid,
+                    previous,
+                    correction,
+                    len(samples),
+                    total_measured,
+                    total_planned,
+                )
+        if changed:
+            self.hass.async_create_task(self._async_save_pv_calibration())
+
+    def _pv_correction_for(self, sid: str, kwp: float, raw_kw: float) -> float:
+        """Return the gain factor to apply to one array's forecast step."""
+        if not sid:
+            return 1.0
+        return self._pv_cal_correction.get(sid, 1.0)
+
+    def _snapshot_pv_calibration(
+        self,
+        now_utc: datetime,
+        raw_first_step_kw: dict[str, float],
+        kwp_by_sid: dict[str, float],
+    ) -> None:
+        """Record what the next step is expected to produce, and the meters now.
+
+        Only arrays whose forecast falls in the middle of their rating are
+        recorded: below the floor the signal is smaller than the noise, above
+        the ceiling inverter clipping and thermal derating dominate and are not
+        forecast errors.
+        """
+        step_hours = FORECAST_INTERVAL_MINUTES / 60.0
+        forecast_kwh: dict[str, float] = {}
+        meter_kwh: dict[str, float] = {}
+        for sid, entity_id in self._pv_measured_sensors.items():
+            kwp = kwp_by_sid.get(sid, 0.0)
+            raw_kw = raw_first_step_kw.get(sid, 0.0)
+            if kwp <= 0:
+                continue
+            load_fraction = raw_kw / kwp
+            if not (
+                PV_CALIBRATION_MIN_LOAD_FRACTION
+                <= load_fraction
+                <= PV_CALIBRATION_MAX_LOAD_FRACTION
+            ):
+                continue
+            meter = self._read_pv_meter_kwh(entity_id)
+            if meter is None:
+                continue
+            forecast_kwh[sid] = raw_kw * step_hours
+            meter_kwh[sid] = meter
+        if forecast_kwh:
+            self._pv_cal_snapshot = {
+                "taken_at": now_utc,
+                "forecast_kwh": forecast_kwh,
+                "meter_kwh": meter_kwh,
+            }
 
     def _apply_sensor_forecast(
         self,
@@ -405,6 +639,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
         poa_dni: list[float] | None = dni_steps or None
         poa_diffuse: list[float] | None = diffuse_steps or None
 
+        # Fold in what the previous step's forecast turned out to be worth,
+        # before this run's forecast is corrected with the result.
+        self._update_pv_calibration(now_utc)
+        raw_first_step_kw: dict[str, float] = {}
+        kwp_by_sid: dict[str, float] = {}
+
         # Sum AC PV forecast across all AC subentry models, applying temperature derating
         pv_forecast = [0.0] * n
         per_pv_array_forecasts: dict[str, list[float]] = {}
@@ -421,6 +661,15 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 longitude=lon,
             )
             extra = self._apply_sensor_forecast(extra, sensors, timestamps_utc)
+            if sid:
+                # Snapshot the UNcorrected value: the factor is always
+                # measured/raw, so it stays a direct estimate instead of
+                # compounding on itself run after run.
+                raw_first_step_kw[sid] = extra[0] if extra else 0.0
+                kwp_by_sid[sid] = model.peak_power_kwp
+            gain = self._pv_correction_for(sid, model.peak_power_kwp, 0.0)
+            if gain != 1.0:
+                extra = [v * gain for v in extra]
             arr_forecast = [round(max(0.0, v), 3) for v in extra[:n]]
             if sid:
                 per_pv_array_forecasts[sid] = arr_forecast
@@ -446,6 +695,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 longitude=lon,
             )
             extra_dc = self._apply_sensor_forecast(extra_dc, dc_sensors, timestamps_utc)
+            if sid:
+                raw_first_step_kw[sid] = extra_dc[0] if extra_dc else 0.0
+                kwp_by_sid[sid] = dc_model.peak_power_kwp
+            gain = self._pv_correction_for(sid, dc_model.peak_power_kwp, 0.0)
+            if gain != 1.0:
+                extra_dc = [v * gain for v in extra_dc]
             arr_forecast = [round(max(0.0, v), 3) for v in extra_dc[:n]]
             if sid:
                 per_pv_array_forecasts[sid] = arr_forecast
@@ -475,6 +730,10 @@ class ForecastCoordinator(DataUpdateCoordinator):
         current_total_pv = current_pv + current_dc_pv * DC_TO_AC_INVERTER_EFFICIENCY
         current_consumption = self.consumption_model.get_current_consumption()
 
+        # Record what the step about to elapse should produce, so the next run
+        # can score it.
+        self._snapshot_pv_calibration(now_utc, raw_first_step_kw, kwp_by_sid)
+
         result = {
             "pv_forecast_kw": [round(v, 3) for v in pv_forecast],
             "pv_dc_forecast_kw": [round(v, 3) for v in pv_dc_forecast],
@@ -490,6 +749,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
             if wind_speed_steps
             else 0.0,
             "pv_dc_coupled": has_dc,
+            "pv_calibration": {
+                sid: {
+                    "correction": round(self._pv_cal_correction.get(sid, 1.0), 4),
+                    "samples": len(self._pv_cal_samples.get(sid, ())),
+                }
+                for sid in self._pv_measured_sensors
+            },
             "forecast_interval_minutes": step_min,
             "forecast_start_utc": current_step,
             "timestamp": dt_util.utcnow(),

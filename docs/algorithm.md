@@ -647,6 +647,35 @@ Output: power_schedule_kw, mode_schedule, soc_schedule_kwh,
 
 ---
 
+### Per-array PV forecast calibration
+
+Each PV array can carry a measured production counter. The forecast for that
+array is then scored against what it actually produced and multiplied by a
+learned gain factor.
+
+The factor is an energy-weighted ratio over the last `PV_CALIBRATION_WINDOW`
+sampled steps — `sum(measured) / sum(forecast)`, not a mean of per-step ratios.
+A quarter hour under cloud has a large relative error on a tiny amount of
+energy, and weighting by energy stops those steps dominating an estimate that
+is meant to describe a gain error.
+
+Samples are only taken in the middle of the array's rating (10–80 % of kWp):
+below the floor the signal is smaller than the noise, above the ceiling
+inverter clipping and thermal derating dominate and are not forecast errors.
+Steps are skipped entirely while PV curtailment is active, when the elapsed
+window is not the window the forecast described, and when the counter jumps
+backwards. The applied factor is clamped and only used once enough samples
+exist.
+
+**What it can and cannot fix.** A wrong tilt or orientation entry, soiling and
+a string that is down are gain errors: the array produces a roughly constant
+fraction of what the model expects, and the factor captures that. Shading is
+not — it is a function of sun position, so a single scalar smears a
+morning-only obstruction across the whole day. Modelling that needs a horizon
+profile, which this does not attempt.
+
+---
+
 ## 12. Multi-Battery Dispatch
 
 The DP optimizer treats all configured batteries as a single aggregated virtual battery (`aggregate_battery_configs`). After the optimizer produces a combined setpoint, `_split_setpoint` distributes it across the individual inverters.
