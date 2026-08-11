@@ -491,6 +491,8 @@ Let `chg_r = chg_eff_repr` and `dis_r = dis_eff_repr` (representative scalars, �
 
 Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces the charge-side efficiency curve for the planned SoC transitions. Economic quantities (step costs, the oscillation-filter threshold) keep using the nominal curves.
 
+The observation is taken from the per-battery cumulative kWh counters when they are configured, and from the SoC delta otherwise. Both measure the same energy, but a SoC sensor reporting whole percent quantises at `capacity / 100` — 0.1 kWh on a 10 kWh pack — so on that path the minimum planned change worth sampling scales with the observed sensor resolution rather than a fixed 0.1 kWh. Samples outside `[0.5, 1.5]` are dropped rather than folded into the mean: an asymmetric clip (capped at 1.05, allowed down to 0.5) let symmetric measurement noise bias the correction below 1.0 for a healthy battery. Only the resulting mean is clamped, to `[0.5, 1.05]`, before it is applied.
+
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
 **Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
