@@ -13,6 +13,9 @@ from custom_components.battery_controller.const import (
     MODE_ZERO_GRID,
 )
 from custom_components.battery_controller.select import BatteryControlModeSelect
+from custom_components.battery_controller.select import async_setup_entry
+from homeassistant.helpers.entity import DeviceInfo
+import logging
 
 
 def _make_hass():
@@ -30,7 +33,6 @@ def _make_entry(entry_id="test_entry"):
 
 
 def _make_device():
-    from homeassistant.helpers.entity import DeviceInfo
 
     return DeviceInfo(identifiers={(DOMAIN, "test_entry")})
 
@@ -123,7 +125,6 @@ async def test_select_option_preserves_existing_option_keys():
 
 @pytest.mark.asyncio
 async def test_select_option_invalid_mode_logs_warning(caplog):
-    import logging
 
     sel = _make_select(control_mode=MODE_HYBRID)
     sel.async_write_ha_state = MagicMock()
@@ -155,7 +156,6 @@ async def test_select_option_all_valid_modes():
 @pytest.mark.asyncio
 async def test_async_setup_entry_adds_entity():
     """async_setup_entry reads runtime_data and calls async_add_entities."""
-    from custom_components.battery_controller.select import async_setup_entry
 
     coord = _make_coord()
     device = _make_device()
@@ -178,7 +178,6 @@ async def test_async_setup_entry_adds_entity():
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
-    from custom_components.battery_controller.select import async_setup_entry
 
     entry = _make_entry()
     entry.runtime_data = None
@@ -190,7 +189,6 @@ async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_without_coordinator_skips_entity_setup():
-    from custom_components.battery_controller.select import async_setup_entry
 
     runtime_data = MagicMock()
     runtime_data.device = _make_device()

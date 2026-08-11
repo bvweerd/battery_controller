@@ -27,6 +27,8 @@ from custom_components.battery_controller.number import (
     MinPriceSpreadNumber,
     ZeroGridDeadbandNumber,
 )
+from custom_components.battery_controller.number import async_setup_entry
+from homeassistant.helpers.entity import DeviceInfo
 
 
 def _make_hass():
@@ -45,7 +47,6 @@ def _make_entry(entry_id="test_entry", options=None, data=None):
 
 
 def _make_device():
-    from homeassistant.helpers.entity import DeviceInfo
 
     return DeviceInfo(identifiers={(DOMAIN, "test_entry")})
 
@@ -255,7 +256,6 @@ class TestManualPowerSetpointNumber:
 @pytest.mark.asyncio
 async def test_async_setup_entry_adds_entities():
     """async_setup_entry reads runtime_data and calls async_add_entities."""
-    from custom_components.battery_controller.number import async_setup_entry
 
     hass = _make_hass()
     config = {
@@ -282,7 +282,6 @@ async def test_async_setup_entry_adds_entities():
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
-    from custom_components.battery_controller.number import async_setup_entry
 
     entry = _make_entry()
     entry.runtime_data = None
@@ -294,7 +293,6 @@ async def test_async_setup_entry_without_runtime_data_skips_entity_setup():
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_without_config_skips_entity_setup():
-    from custom_components.battery_controller.number import async_setup_entry
 
     runtime_data = MagicMock()
     runtime_data.device = _make_device()

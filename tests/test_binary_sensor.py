@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from custom_components.battery_controller.binary_sensor import async_setup_entry
+from homeassistant.helpers.entity import DeviceInfo
 
 
 from custom_components.battery_controller.binary_sensor import (
@@ -29,7 +31,6 @@ def _make_entry(entry_id="test_entry"):
 
 
 def _make_device():
-    from homeassistant.helpers.entity import DeviceInfo
 
     return DeviceInfo(identifiers={(DOMAIN, "test_entry")})
 
@@ -219,7 +220,6 @@ class TestUseMaxPowerSensor:
 @pytest.mark.asyncio
 async def test_async_setup_entry_adds_entities():
     """async_setup_entry reads runtime_data and calls async_add_entities."""
-    from custom_components.battery_controller.binary_sensor import async_setup_entry
 
     coord = _make_coord()
     device = _make_device()
@@ -278,7 +278,6 @@ class TestPVCurtailmentMissingControlAction:
 @pytest.mark.asyncio
 async def test_async_setup_entry_none_runtime_data():
     """async_setup_entry returns early (no entities) when runtime_data is None."""
-    from custom_components.battery_controller.binary_sensor import async_setup_entry
 
     entry = MagicMock()
     entry.runtime_data = None

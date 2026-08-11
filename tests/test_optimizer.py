@@ -881,7 +881,6 @@ class TestQuarterHourOscillationFilter:
         covered the entire 96-step horizon, causing charge blocks to be
         paired with distant, low-spread discharges and incorrectly removed.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 16
         # Steps 0-3: cheap (4 ct), steps 4-7: idle, steps 8-15: expensive (25 ct)
@@ -921,7 +920,6 @@ class TestQuarterHourOscillationFilter:
         removed, even though a profitable discharge appeared a few steps later
         within the same lookahead window.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 16
         # Step 0: charge at 4 ct
@@ -960,7 +958,6 @@ class TestQuarterHourOscillationFilter:
 
     def test_true_oscillation_still_removed(self):
         """Rapid charge→discharge with no profitable match must still be suppressed."""
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 8
         # All discharges have very small spread vs the charges → true oscillation
@@ -1106,7 +1103,6 @@ class TestOscillationFilterDcPv:
 
     def test_oscillation_filter_dc_pv_passive_charge(self):
         """Oscillation filter should account for passive DC PV when evaluating charge cost."""
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Scenario: charge at step 0, discharge at step 1. With DC PV,
         # the charge at step 0 is partially free (passive DC PV charging).
@@ -1309,7 +1305,6 @@ class TestCalculateStepCostGridCap:
 
     def test_grid_cap_clamps_export(self):
         """max_grid_power_kw > 0 triggers grid cap clamp."""
-        from custom_components.battery_controller.battery_model import BatteryConfig
 
         config = BatteryConfig(
             capacity_kwh=10.0,
@@ -1476,7 +1471,6 @@ class TestCalculateScheduleTotalCostNoPvDc:
         from custom_components.battery_controller.optimizer import (
             _calculate_schedule_total_cost,
         )
-        from custom_components.battery_controller.battery_model import BatteryConfig
 
         config = BatteryConfig(
             capacity_kwh=10.0,
@@ -1564,7 +1558,11 @@ class TestFilterOscillationsGetChargeCostEdges:
             pv_dc_coupled=True,
             pv_dc_efficiency=0.97,
         )
-        # Doesn't crash; result may or may not filter
+
+        # The filter rebuilds a schedule of the same length and never invents
+        # a mode outside the three it knows.
+        assert len(result_power) == len(power)
+        assert set(result_mode) <= {ACTION_CHARGING, ACTION_DISCHARGING, ACTION_IDLE}
 
     def test_get_discharge_value_negative_power(self):
         """get_discharge_value with discharge_power_kw <= 0 returns grid price."""
@@ -1642,7 +1640,7 @@ class TestSubResolutionACSkip:
         a 15 min step = 25 Wh when resolution is 100 Wh) should be filtered.
         The result must still be valid (no crash, valid schedule).
         """
-        from custom_components.battery_controller.battery_model import BatteryConfig
+
         from custom_components.battery_controller.optimizer import (
             optimize_battery_schedule,
         )
@@ -1674,7 +1672,7 @@ class TestForwardPassDCIdlePassiveCharge:
 
     def test_dc_pv_idle_charges_battery_in_forward_pass(self):
         """When idle with DC PV, forward pass increases SoC."""
-        from custom_components.battery_controller.battery_model import BatteryConfig
+
         from custom_components.battery_controller.optimizer import (
             optimize_battery_schedule,
         )
@@ -1739,7 +1737,6 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
         # if from_pv = 0 and from_grid = 0 — but this requires effective_charge_kw = 0,
         # blocked by line 890 guard. Let's just verify the oscillation filter doesn't crash
         # and returns a valid schedule.
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Use a charging schedule where pv perfectly covers the charge
         result_power, result_mode, result_soc = _filter_oscillations(
@@ -2607,7 +2604,6 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
         So total_kw > 0 normally. The guard 'if total_kw <= 0' is a safety net.
         We verify the filter runs correctly with discharging during export conditions.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Discharge during PV surplus: pv > consumption → residual_load=0, all to export
         result_power, result_mode, result_soc = _filter_oscillations(

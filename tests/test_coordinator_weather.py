@@ -12,6 +12,8 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from custom_components.battery_controller.coordinator_weather import (
     WeatherDataCoordinator,
 )
+from datetime import timedelta
+import aiohttp
 
 
 def _make_weather_response(
@@ -25,8 +27,6 @@ def _make_weather_response(
     """Build a minimal open-meteo API response dict."""
     now_hour = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
     if times is None:
-        from datetime import timedelta
-
         times = [
             (now_hour + timedelta(hours=i)).isoformat().replace("+00:00", "")
             for i in range(48)
@@ -124,7 +124,6 @@ async def test_async_update_data_non_200_status(hass):
 @pytest.mark.asyncio
 async def test_async_update_data_client_error(hass):
     """aiohttp.ClientError raises UpdateFailed."""
-    import aiohttp
 
     mock_session = MagicMock()
     mock_session.get = MagicMock(side_effect=aiohttp.ClientError("connection refused"))
@@ -268,7 +267,6 @@ async def test_start_idx_logic(hass):
 @pytest.mark.asyncio
 async def test_async_update_data_invalid_timestamp_skipped(hass):
     """Invalid timestamps in weather response are skipped."""
-    from unittest.mock import AsyncMock, MagicMock
 
     response_data = {
         "hourly": {

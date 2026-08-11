@@ -13,6 +13,8 @@ from custom_components.battery_controller.forecast_models import (
     NetLoadForecast,
     PriceForecastModel,
 )
+from custom_components.battery_controller.helpers import resample_forecast
+from homeassistant.util import dt as dt_util
 
 
 class TestPVForecastModel:
@@ -336,9 +338,6 @@ class TestAsyncUpdatePattern:
         Patterns are stored in local time so they align with the local-time
         forecast generated in ConsumptionForecastModel.forecast().
         """
-        from datetime import datetime, timezone
-
-        from homeassistant.util import dt as dt_util
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -450,8 +449,6 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
-        from homeassistant.util import dt as dt_util
-
         expected_local = dt_util.as_local(self._DT)
         expected_key = (expected_local.hour, expected_local.weekday())
 
@@ -494,8 +491,6 @@ class TestPriceForecastModelPatternUpdate:
         ):
             await model.async_update_pattern()
 
-        from homeassistant.util import dt as dt_util
-
         expected_local = dt_util.as_local(self._DT)
         expected_key = (expected_local.hour, expected_local.weekday(), 3, 2)
 
@@ -517,8 +512,6 @@ class TestPriceForecastModelPatternUpdate:
             return_value=mock_instance,
         ):
             await model.async_update_pattern()
-
-        from homeassistant.util import dt as dt_util
 
         expected_local = dt_util.as_local(self._DT)
         expected_key = (expected_local.hour, expected_local.weekday())
@@ -613,7 +606,6 @@ class TestHorizonExtension:
 
     def test_extension_fills_missing_hours(self):
         """Simulates a 14-hour live forecast being extended to 24 hours."""
-        from custom_components.battery_controller.helpers import resample_forecast
 
         live_prices = [0.20] * 14  # 14 hourly prices (e.g. 10:00 – 23:00)
         time_step = 60
@@ -640,7 +632,6 @@ class TestHorizonExtension:
 
     def test_extension_with_15min_timestep(self):
         """Extension works correctly with 15-minute time steps."""
-        from custom_components.battery_controller.helpers import resample_forecast
 
         # 14 hourly prices → 56 steps at 15 min
         live_prices = [0.20] * 14
@@ -665,7 +656,6 @@ class TestHorizonExtension:
 
     def test_no_extension_when_full_horizon(self):
         """No extension when live prices already cover 24 hours."""
-        from custom_components.battery_controller.helpers import resample_forecast
 
         live_prices = [0.20] * 24
         time_step = 60
@@ -686,7 +676,6 @@ class TestPVForecastModelTemperatureDerating:
 
     def test_temperature_derating_applied(self):
         """Temperature derating reduces output at high temperature."""
-        from custom_components.battery_controller.forecast_models import PVForecastModel
 
         model = PVForecastModel(
             peak_power_kwp=5.0,
@@ -710,7 +699,6 @@ class TestPVForecastModelTemperatureDerating:
 
     def test_temperature_forecast_shorter_than_radiation(self):
         """When temperature_forecast is shorter, remaining entries use base_forecast."""
-        from custom_components.battery_controller.forecast_models import PVForecastModel
 
         model = PVForecastModel(peak_power_kwp=5.0)
         radiation = [1000.0] * 4
@@ -730,7 +718,6 @@ class TestConsumptionForecastModelPatterns:
             ConsumptionForecastModel,
             _get_season,
         )
-        from datetime import datetime
 
         model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
         # Populate seasonal pattern
@@ -746,7 +733,6 @@ class TestConsumptionForecastModelPatterns:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from datetime import datetime
 
         model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
         dt_now = datetime(2024, 6, 15, 10, 0, 0)
@@ -765,8 +751,7 @@ class TestConsumptionForecastModelGetCurrentConsumption:
             ConsumptionForecastModel,
             _get_season,
         )
-        from unittest.mock import patch
-        from datetime import datetime
+
         import custom_components.battery_controller.forecast_models as fm_mod
 
         model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
@@ -784,8 +769,7 @@ class TestConsumptionForecastModelGetCurrentConsumption:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import patch
-        from datetime import datetime
+
         import custom_components.battery_controller.forecast_models as fm_mod
 
         model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
@@ -806,7 +790,6 @@ class TestNetLoadModelForecastPadding:
         from custom_components.battery_controller.forecast_models import (
             NetLoadForecast as NetLoadForecastModel,
         )
-        from unittest.mock import MagicMock
 
         pv_model = MagicMock()
         pv_model.forecast_from_radiation = MagicMock(
@@ -838,8 +821,12 @@ class TestPriceForecastModelNoSensor:
 
         model = PriceForecastModel(hass, price_sensor_id=None)
 
-        # Should not raise and should return without doing anything
         await model.async_update_pattern()
+
+        # No sensor to learn from, so the model stays unusable rather than
+        # reporting a pattern built from nothing.
+        assert model.has_data() is False
+        assert model._simple_pattern == {}
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +842,6 @@ class TestConsumptionForecastModelNoSensors:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import MagicMock
 
         hass = MagicMock()
         model = ConsumptionForecastModel(hass=hass, base_consumption_kw=0.5)
@@ -870,11 +856,10 @@ class TestConsumptionForecastModelEmptyStats:
 
     async def test_empty_stats_returns_early(self, caplog):
         """When recorder returns empty stats, logs debug and returns."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -908,7 +893,6 @@ class TestConsumptionForecastModelTsAndValueNone:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -940,7 +924,6 @@ class TestConsumptionForecastModelSeasonalMinSamples:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -973,11 +956,10 @@ class TestConsumptionForecastModelImportError:
 
     async def test_import_error_handled_gracefully(self, caplog):
         """ImportError for recorder is caught and logged as debug."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import patch
 
         hass = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
         model = ConsumptionForecastModel(
@@ -1005,11 +987,10 @@ class TestConsumptionForecastModelGenericException:
 
     async def test_generic_exception_handled(self, caplog):
         """Generic exception during pattern update is caught and logged."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -1044,7 +1025,6 @@ class TestPriceForecastModelStatDtNone:
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
@@ -1068,11 +1048,10 @@ class TestPriceForecastModelStatDtNumeric:
 
     async def test_unix_timestamp_start_handled(self):
         """Stats with unix timestamp as start are parsed correctly."""
-        from datetime import datetime, timezone
+
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
@@ -1096,11 +1075,10 @@ class TestPriceForecastModelImportError:
 
     async def test_import_error_handled(self, caplog):
         """ImportError for recorder is caught and logged as debug."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
-        from unittest.mock import patch
 
         hass = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
@@ -1125,11 +1103,10 @@ class TestPriceForecastModelGenericException:
 
     async def test_generic_exception_handled(self, caplog):
         """Generic exception is caught and logged as warning."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = PriceForecastModel(hass=hass, price_sensor_id="sensor.price")
@@ -1158,11 +1135,10 @@ class TestPriceForecastModelEntityRegistryException:
 
     async def test_entity_registry_exception_handled(self, caplog):
         """Exception resolving weather sensor IDs is caught."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = PriceForecastModel(
@@ -1197,11 +1173,10 @@ class TestConsumptionForecastModelLayer2Exception:
 
     async def test_layer2_exception_caught_and_logged(self, caplog):
         """Exception during entity registry pv_forecast lookup is caught."""
-        import logging
+
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -1250,7 +1225,6 @@ class TestConsumptionForecastModelNullDatetimeParse:
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
-        from unittest.mock import AsyncMock, MagicMock, patch
 
         hass = MagicMock()
         model = ConsumptionForecastModel(
@@ -1285,7 +1259,6 @@ class TestNetLoadForecastConsumptionPadded:
         from custom_components.battery_controller.forecast_models import (
             NetLoadForecast as NetLoadForecastModel,
         )
-        from unittest.mock import MagicMock
 
         pv_model = MagicMock()
         pv_model.forecast_from_radiation = MagicMock(return_value=[0.0] * 4)
@@ -1371,7 +1344,6 @@ class TestAsyncUpdatePatternStartFormats:
 
     @staticmethod
     def _expected_key():
-        from homeassistant.util import dt as dt_util
 
         local = dt_util.as_local(TestAsyncUpdatePatternStartFormats._DT)
         return (local.hour, local.weekday())
@@ -1429,7 +1401,6 @@ class TestConsumptionOutlierRejection:
 
     @staticmethod
     def _key():
-        from homeassistant.util import dt as dt_util
 
         local = dt_util.as_local(TestConsumptionOutlierRejection._DT)
         return (local.hour, local.weekday())

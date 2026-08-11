@@ -191,7 +191,12 @@ async def test_async_shutdown_without_unsub(hass):
         coord = ForecastCoordinator(hass, weather_coord, config)
 
     coord._unsub_pattern_refresh = None
-    await coord.async_shutdown()  # Should not raise
+
+    await coord.async_shutdown()
+
+    # Nothing was registered, so nothing had to be released.
+    assert coord._unsub_pattern_refresh is None
+    assert coord._unsub_weather is None
 
 
 @pytest.mark.asyncio

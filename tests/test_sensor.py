@@ -41,6 +41,14 @@ from custom_components.battery_controller.sensor import (
     SolarIrradianceSensor,
     WindSpeedSensor,
 )
+from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
+from custom_components.battery_controller.const import PV_SUBENTRY_TYPE
+from custom_components.battery_controller.sensor import async_setup_entry
+from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity import EntityCategory
+from homeassistant.util import dt as dt_util
+from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +274,6 @@ def test_soc_sensor_unique_id_does_not_collide_with_global_soc():
 
 
 def test_soc_sensor_device_class_is_battery():
-    from homeassistant.components.sensor import SensorDeviceClass
 
     sensor = _make_soc_sensor()
     assert sensor._attr_device_class == SensorDeviceClass.BATTERY
@@ -347,7 +354,6 @@ def test_pv_array_sensor_extra_attributes_contain_full_forecast():
 
 
 def test_pv_array_sensor_is_diagnostic_and_disabled_by_default():
-    from homeassistant.helpers.entity import EntityCategory
 
     sensor = _make_pv_sensor()
     assert sensor._attr_entity_category == EntityCategory.DIAGNOSTIC
@@ -866,14 +872,12 @@ class TestOptimizationStatusSensor:
         assert sensor.native_value == "failed"
 
     def test_ok_when_recent_update(self):
-        from homeassistant.util import dt as dt_util
 
         recent = dt_util.utcnow() - timedelta(minutes=5)
         sensor = self._sensor({"last_success_time": recent})
         assert sensor.native_value == "ok"
 
     def test_stale_when_old_update(self):
-        from homeassistant.util import dt as dt_util
 
         old = dt_util.utcnow() - timedelta(minutes=60)
         sensor = self._sensor({"last_success_time": old})
@@ -973,7 +977,6 @@ class TestBatteryScheduleSensorFeedInForecastModel:
     """Cover BatteryScheduleSensor feed_in_price_forecast_model branch."""
 
     def test_feed_in_price_forecast_model_in_attrs(self):
-        from custom_components.battery_controller.sensor import BatteryScheduleSensor
 
         coord = MagicMock()
         coord.data = {
@@ -1050,7 +1053,6 @@ class TestPVArrayForecastSensorDataNone:
     """Cover PVArrayForecastSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
-        from custom_components.battery_controller.sensor import PVArrayForecastSensor
 
         coord = _make_forecast_coord(data=None)
         sensor = PVArrayForecastSensor(
@@ -1078,11 +1080,6 @@ class TestOptimizationStatusSensorDataNone:
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_no_subentries():
     """async_setup_entry with no subentries calls async_add_entities once."""
-    from unittest.mock import patch
-
-    from homeassistant.helpers import device_registry as dr
-
-    from custom_components.battery_controller.sensor import async_setup_entry
 
     opt_coord = _make_opt_coord()
     forecast_coord = _make_forecast_coord()
@@ -1118,12 +1115,6 @@ async def test_sensor_async_setup_entry_no_subentries():
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_with_battery_subentry():
     """async_setup_entry with battery subentry creates per-battery sensors."""
-    from unittest.mock import patch
-
-    from homeassistant.helpers import device_registry as dr
-
-    from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
-    from custom_components.battery_controller.sensor import async_setup_entry
 
     opt_coord = _make_opt_coord()
     forecast_coord = _make_forecast_coord()
@@ -1169,12 +1160,6 @@ async def test_sensor_async_setup_entry_with_battery_subentry():
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_with_pv_subentry():
     """async_setup_entry with PV subentry creates per-PV sensors."""
-    from unittest.mock import patch
-
-    from homeassistant.helpers import device_registry as dr
-
-    from custom_components.battery_controller.const import PV_SUBENTRY_TYPE
-    from custom_components.battery_controller.sensor import async_setup_entry
 
     opt_coord = _make_opt_coord()
     forecast_coord = _make_forecast_coord()
@@ -1217,12 +1202,6 @@ async def test_sensor_async_setup_entry_with_pv_subentry():
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_device_migration():
     """Migration removes None subentry device associations."""
-    from unittest.mock import patch
-
-    from homeassistant.helpers import device_registry as dr
-
-    from custom_components.battery_controller.const import DOMAIN
-    from custom_components.battery_controller.sensor import async_setup_entry
 
     opt_coord = _make_opt_coord()
     forecast_coord = _make_forecast_coord()
