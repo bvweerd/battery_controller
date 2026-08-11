@@ -230,6 +230,14 @@ class ForecastCoordinator(DataUpdateCoordinator):
             self._unsub_weather = None
         await super().async_shutdown()
 
+    def pv_correction(self, subentry_id: str) -> float:
+        """Learned gain factor applied to one PV array's forecast (1.0 = nominal)."""
+        return self._pv_cal_correction.get(subentry_id, 1.0)
+
+    def pv_sample_count(self, subentry_id: str) -> int:
+        """Number of observations behind pv_correction for one array."""
+        return len(self._pv_cal_samples.get(subentry_id, ()))
+
     async def _async_load_pv_calibration(self) -> None:
         """Restore per-array PV corrections from storage."""
         stored = await self._pv_cal_store.async_load()

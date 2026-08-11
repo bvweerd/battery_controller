@@ -163,7 +163,7 @@ async def test_diagnostics_missing_runtime_data(
 async def test_diagnostics_entity_state_none(
     hass: HomeAssistant, mock_config_entry: MagicMock
 ):
-    """Test diagnostics when hass.states.get returns None for an entity (lines 212-213)."""
+    """Test diagnostics when hass.states.get returns None for an entity."""
     mock_config_entry.runtime_data = None
     if hasattr(mock_config_entry, "runtime_data"):
         del mock_config_entry.runtime_data

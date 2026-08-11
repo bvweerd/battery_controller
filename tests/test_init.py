@@ -21,6 +21,9 @@ from custom_components.battery_controller.const import (
     CONF_MIN_PRICE_SPREAD,
     CONF_ZERO_GRID_DEADBAND_W,
 )
+from custom_components.battery_controller import async_setup_entry
+from custom_components.battery_controller import async_unload_entry
+from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
 
 
 def _make_entry(entry_id="test", data=None, options=None):
@@ -140,7 +143,6 @@ async def test_update_listener_no_reload_when_value_unchanged():
 @pytest.mark.asyncio
 async def test_async_unload_entry_with_runtime_data():
     """async_unload_entry shuts down coordinators and unloads platforms."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = _make_runtime_data()
@@ -168,7 +170,6 @@ async def test_async_unload_entry_with_runtime_data():
 @pytest.mark.asyncio
 async def test_async_unload_entry_no_runtime_data():
     """async_unload_entry with no runtime_data still calls unload_platforms."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = None
@@ -183,15 +184,13 @@ async def test_async_unload_entry_no_runtime_data():
 
 
 # ---------------------------------------------------------------------------
-# async_setup_entry — covers lines 80-202
+# async_setup_entry — covers
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_no_subentries():
     """async_setup_entry with no subentries sets up coordinators and runtime_data."""
-
-    from custom_components.battery_controller import async_setup_entry
 
     mock_weather_coord = AsyncMock()
     mock_weather_coord.async_config_entry_first_refresh = AsyncMock()
@@ -247,7 +246,6 @@ async def test_async_setup_entry_no_subentries():
 async def test_async_setup_entry_with_battery_and_pv_subentries():
     """async_setup_entry with battery and PV subentries creates per-device DeviceInfo."""
 
-    from custom_components.battery_controller import async_setup_entry
     from custom_components.battery_controller.const import (
         BATTERY_SUBENTRY_TYPE,
         PV_SUBENTRY_TYPE,
@@ -312,9 +310,6 @@ async def test_async_setup_entry_with_battery_and_pv_subentries():
 @pytest.mark.asyncio
 async def test_async_setup_entry_battery_subentry_without_title():
     """Battery subentry without matching entry.subentries uses CONF_NAME fallback."""
-
-    from custom_components.battery_controller import async_setup_entry
-    from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
 
     mock_weather_coord = AsyncMock()
     mock_weather_coord.async_config_entry_first_refresh = AsyncMock()
@@ -414,7 +409,6 @@ async def test_reset_charge_efficiency_service_targets_requested_entry():
 @pytest.mark.asyncio
 async def test_async_unload_entry_coordinator_shutdown_exception():
     """M2: if one coordinator raises during shutdown, the others still run."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = _make_runtime_data()

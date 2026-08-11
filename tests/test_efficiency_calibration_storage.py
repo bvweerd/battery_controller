@@ -40,7 +40,7 @@ async def test_load_without_stored_data_leaves_nominal_state(coord_with_fake_sto
 
     await coord._async_load_charge_eff_calibration()
 
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_correction == 1.0
     assert list(coord._charge_eff_samples) == []
 
 
@@ -53,7 +53,7 @@ async def test_load_restores_samples_and_correction(coord_with_fake_stores):
 
     await coord._async_load_charge_eff_calibration()
 
-    assert coord._charge_eff_correction == pytest.approx(0.935)
+    assert coord.charge_eff_correction == pytest.approx(0.935)
     assert list(coord._charge_eff_samples) == [0.93, 0.94, 0.92]
 
 
@@ -68,7 +68,7 @@ async def test_load_keeps_only_the_most_recent_samples(coord_with_fake_stores):
     await coord._async_load_charge_eff_calibration()
 
     assert coord._charge_eff_samples.maxlen == 20
-    assert len(coord._charge_eff_samples) == 20
+    assert coord.charge_eff_sample_count == 20
     assert list(coord._charge_eff_samples) == stored[-20:]
 
 
@@ -82,7 +82,7 @@ async def test_load_coerces_a_string_correction(coord_with_fake_stores):
     await coord._async_load_charge_eff_calibration()
 
     assert isinstance(coord._charge_eff_correction, float)
-    assert coord._charge_eff_correction == pytest.approx(0.97)
+    assert coord.charge_eff_correction == pytest.approx(0.97)
 
 
 async def test_load_falls_back_to_nominal_when_correction_is_absent(
@@ -94,7 +94,7 @@ async def test_load_falls_back_to_nominal_when_correction_is_absent(
 
     await coord._async_load_charge_eff_calibration()
 
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_correction == 1.0
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +140,7 @@ async def test_save_then_load_round_trips(coord_with_fake_stores):
     await coord._async_load_charge_eff_calibration()
 
     assert list(coord._charge_eff_samples) == [0.94, 0.95]
-    assert coord._charge_eff_correction == pytest.approx(0.945)
+    assert coord.charge_eff_correction == pytest.approx(0.945)
 
 
 # --------------------------------------------------------------------------
@@ -157,7 +157,7 @@ async def test_reset_charge_clears_state_and_persists(coord_with_fake_stores):
     await coord.async_reset_charge_eff_calibration()
 
     assert list(coord._charge_eff_samples) == []
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_correction == 1.0
     coord._charge_eff_store.async_save.assert_awaited_once_with(
         {"samples": [], "correction": 1.0}
     )
@@ -171,7 +171,7 @@ async def test_reset_discharge_clears_state_and_persists(coord_with_fake_stores)
     await coord.async_reset_discharge_eff_calibration()
 
     assert list(coord._discharge_eff_samples) == []
-    assert coord._discharge_eff_correction == 1.0
+    assert coord.discharge_eff_correction == 1.0
     coord._discharge_eff_store.async_save.assert_awaited_once_with(
         {"samples": [], "correction": 1.0}
     )
@@ -183,7 +183,7 @@ async def test_reset_of_untouched_calibration_still_persists(coord_with_fake_sto
 
     await coord.async_reset_charge_eff_calibration()
 
-    assert coord._charge_eff_correction == 1.0
+    assert coord.charge_eff_correction == 1.0
     coord._charge_eff_store.async_save.assert_awaited_once()
 
 
@@ -198,5 +198,5 @@ async def test_charge_and_discharge_calibrations_are_independent(
     await coord.async_reset_charge_eff_calibration()
 
     assert list(coord._discharge_eff_samples) == [0.88, 0.89]
-    assert coord._discharge_eff_correction == pytest.approx(0.885)
+    assert coord.discharge_eff_correction == pytest.approx(0.885)
     coord._discharge_eff_store.async_save.assert_not_awaited()

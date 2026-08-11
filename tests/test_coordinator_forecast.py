@@ -191,7 +191,12 @@ async def test_async_shutdown_without_unsub(hass):
         coord = ForecastCoordinator(hass, weather_coord, config)
 
     coord._unsub_pattern_refresh = None
-    await coord.async_shutdown()  # Should not raise
+
+    await coord.async_shutdown()
+
+    # Nothing was registered, so nothing had to be released.
+    assert coord._unsub_pattern_refresh is None
+    assert coord._unsub_weather is None
 
 
 @pytest.mark.asyncio
@@ -293,7 +298,7 @@ async def test_handle_pattern_refresh(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_time_shifted_forecast(hass):
-    """When weather data is older than 0 hours, forecasts are shifted (lines 152-163)."""
+    """When weather data is older than 0 hours, forecasts are shifted."""
     config = _minimal_config()
 
     # Weather data from 2 hours ago — hours_elapsed = 2
@@ -342,7 +347,7 @@ async def test_async_update_data_time_shifted_forecast(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_ac_pv_model(hass):
-    """ForecastCoordinator processes AC PV arrays in _async_update_data (lines 189-202)."""
+    """ForecastCoordinator processes AC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_ac_1",
@@ -396,7 +401,7 @@ async def test_async_update_data_with_ac_pv_model(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_dc_pv_model(hass):
-    """ForecastCoordinator processes DC PV arrays in _async_update_data (lines 213-226)."""
+    """ForecastCoordinator processes DC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_dc_1",
@@ -1353,7 +1358,7 @@ async def test_pv_calibration_learns_an_energy_weighted_gain(hass):
         now += timedelta(minutes=15)
         coord._update_pv_calibration(now)
 
-    assert coord._pv_cal_correction["pv1"] == pytest.approx(0.8, abs=1e-6)
+    assert coord.pv_correction("pv1") == pytest.approx(0.8, abs=1e-6)
 
 
 @pytest.mark.asyncio
@@ -1375,8 +1380,8 @@ async def test_pv_calibration_waits_for_enough_samples(hass):
         now += timedelta(minutes=15)
         coord._update_pv_calibration(now)
 
-    assert len(coord._pv_cal_samples["pv1"]) == 5
-    assert "pv1" not in coord._pv_cal_correction
+    assert coord.pv_sample_count("pv1") == 5
+    assert coord.pv_correction("pv1") == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -1393,7 +1398,7 @@ async def test_pv_calibration_skipped_while_curtailed(hass):
     hass.states.async_set("sensor.pv1_energy", "100.0", {"unit_of_measurement": "kWh"})
     coord._update_pv_calibration(now + timedelta(minutes=15))
 
-    assert "pv1" not in coord._pv_cal_samples
+    assert coord.pv_sample_count("pv1") == 0
 
 
 @pytest.mark.asyncio
@@ -1409,7 +1414,7 @@ async def test_pv_calibration_ignores_a_mismatched_window(hass):
     hass.states.async_set("sensor.pv1_energy", "100.4", {"unit_of_measurement": "kWh"})
     coord._update_pv_calibration(now + timedelta(hours=2))
 
-    assert "pv1" not in coord._pv_cal_samples
+    assert coord.pv_sample_count("pv1") == 0
 
 
 @pytest.mark.asyncio
@@ -1424,7 +1429,7 @@ async def test_pv_calibration_ignores_a_meter_reset(hass):
     hass.states.async_set("sensor.pv1_energy", "0.2", {"unit_of_measurement": "kWh"})
     coord._update_pv_calibration(now + timedelta(minutes=15))
 
-    assert "pv1" not in coord._pv_cal_samples
+    assert coord.pv_sample_count("pv1") == 0
 
 
 @pytest.mark.asyncio
@@ -1440,7 +1445,7 @@ async def test_pv_calibration_drops_an_absurd_sample(hass):
     hass.states.async_set("sensor.pv1_energy", "110.0", {"unit_of_measurement": "kWh"})
     coord._update_pv_calibration(now + timedelta(minutes=15))
 
-    assert "pv1" not in coord._pv_cal_samples
+    assert coord.pv_sample_count("pv1") == 0
 
 
 @pytest.mark.asyncio
@@ -1482,7 +1487,7 @@ async def test_pv_correction_is_clamped(hass):
         now += timedelta(minutes=15)
         coord._update_pv_calibration(now)
 
-    assert coord._pv_cal_correction["pv1"] == pytest.approx(0.5)
+    assert coord.pv_correction("pv1") == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
@@ -1494,5 +1499,5 @@ async def test_pv_calibration_reset(hass):
 
     await coord.async_reset_pv_calibration()
 
-    assert coord._pv_cal_correction == {}
-    assert coord._pv_cal_samples == {}
+    assert coord.pv_correction("pv1") == pytest.approx(1.0)
+    assert coord.pv_sample_count("pv1") == 0

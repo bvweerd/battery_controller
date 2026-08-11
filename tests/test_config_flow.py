@@ -14,6 +14,11 @@ from custom_components.battery_controller.const import (
     DOMAIN,
     PV_SUBENTRY_TYPE,
 )
+from custom_components.battery_controller.config_flow import _battery_subentry_title
+from custom_components.battery_controller.config_flow import _extract_main_data
+from custom_components.battery_controller.config_flow import _pv_subentry_title
+from custom_components.battery_controller.config_flow import _validate_pv_subentry
+from homeassistant.config_entries import ConfigSubentry
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +137,6 @@ def v4_config_entry_with_battery(
     battery_subentry_data: dict,
 ) -> config_entries.ConfigEntry:
     """A v4 config entry with one battery subentry."""
-    from homeassistant.config_entries import ConfigSubentry
 
     sub = ConfigSubentry(
         subentry_type=BATTERY_SUBENTRY_TYPE,
@@ -151,7 +155,6 @@ def v3_config_entry_with_pv_subentries(
     pv_subentry_data: dict,
 ) -> config_entries.ConfigEntry:
     """A v3 config entry pre-loaded with two PV subentries."""
-    from homeassistant.config_entries import ConfigSubentry
 
     for i, (orientation, dc) in enumerate([(180.0, False), (90.0, True)], 1):
         data = {**pv_subentry_data, "orientation": orientation, "dc_coupled": dc}
@@ -284,7 +287,6 @@ async def test_already_configured_aborts(
 
 def test_extract_main_data_prefers_sections_and_defaults() -> None:
     """Section values take precedence and defaults fill missing optional fields."""
-    from custom_components.battery_controller.config_flow import _extract_main_data
 
     data = _extract_main_data(
         {
@@ -311,7 +313,6 @@ def test_extract_main_data_prefers_sections_and_defaults() -> None:
 
 def test_extract_main_data_supports_flat_layout_fallback() -> None:
     """Flat keys remain supported when section wrappers are absent."""
-    from custom_components.battery_controller.config_flow import _extract_main_data
 
     data = _extract_main_data(
         {
@@ -831,7 +832,7 @@ async def test_battery_subentry_delete(
 
 
 def test_validate_battery_subentry_with_name_stores_name():
-    """Name is non-empty → result[CONF_NAME] is set (line 164)."""
+    """Name is non-empty → result[CONF_NAME] is set."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -853,7 +854,7 @@ def test_validate_battery_subentry_with_name_stores_name():
 
 
 def test_validate_battery_subentry_with_power_sensor():
-    """battery_power_sensor present → stored in result (line 180)."""
+    """battery_power_sensor present → stored in result."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -875,7 +876,7 @@ def test_validate_battery_subentry_with_power_sensor():
 
 
 def test_validate_battery_subentry_with_soc_derating_keys():
-    """SoC derating keys present → stored in result (line 189)."""
+    """SoC derating keys present → stored in result."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -950,8 +951,7 @@ def test_validate_battery_subentry_omits_optional_keys_when_absent():
 
 
 def test_battery_subentry_title_with_name():
-    """_battery_subentry_title returns name when non-empty (line 196)."""
-    from custom_components.battery_controller.config_flow import _battery_subentry_title
+    """_battery_subentry_title returns name when non-empty."""
 
     assert (
         _battery_subentry_title({"name": "Main Battery", "capacity_kwh": 10.0})
@@ -960,8 +960,7 @@ def test_battery_subentry_title_with_name():
 
 
 def test_pv_subentry_title_with_name():
-    """_pv_subentry_title returns name when non-empty (line 506)."""
-    from custom_components.battery_controller.config_flow import _pv_subentry_title
+    """_pv_subentry_title returns name when non-empty."""
 
     assert (
         _pv_subentry_title(
@@ -972,8 +971,7 @@ def test_pv_subentry_title_with_name():
 
 
 def test_validate_pv_subentry_with_name():
-    """_validate_pv_subentry stores name when non-empty (line 490)."""
-    from custom_components.battery_controller.config_flow import _validate_pv_subentry
+    """_validate_pv_subentry stores name when non-empty."""
 
     data = {
         "name": "South Array",
@@ -989,7 +987,6 @@ def test_validate_pv_subentry_with_name():
 
 def test_validate_pv_subentry_whitespace_name_is_dropped():
     """Whitespace-only names should not be stored in normalized PV data."""
-    from custom_components.battery_controller.config_flow import _validate_pv_subentry
 
     data = {
         "name": "   ",
@@ -1005,7 +1002,6 @@ def test_validate_pv_subentry_whitespace_name_is_dropped():
 
 def test_validate_pv_subentry_with_forecast_sensors():
     """_validate_pv_subentry stores pv_forecast_sensors when provided."""
-    from custom_components.battery_controller.config_flow import _validate_pv_subentry
 
     data = {
         "peak_power_kwp": 4.0,
@@ -1027,7 +1023,6 @@ def test_validate_pv_subentry_with_forecast_sensors():
 
 def test_validate_pv_subentry_without_forecast_sensors():
     """pv_forecast_sensors is omitted when not provided."""
-    from custom_components.battery_controller.config_flow import _validate_pv_subentry
 
     data = {
         "peak_power_kwp": 4.0,
@@ -1041,7 +1036,7 @@ def test_validate_pv_subentry_without_forecast_sensors():
 
 
 # ---------------------------------------------------------------------------
-# Options flow — missing_required error path (line 569)
+# Options flow — missing_required error path
 # ---------------------------------------------------------------------------
 
 
@@ -1061,13 +1056,13 @@ async def test_options_flow_missing_price_sensor_shows_error(
 
 
 # ---------------------------------------------------------------------------
-# Error paths in subentry flows (lines 391-392, 416-417, 443-444, 468-469)
+# Error paths in subentry flows (, 416-417, 443-444, 468-469)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_battery_subentry_user_vol_invalid_sets_error():
-    """vol.Invalid in _validate_battery_subentry sets errors['base'] (line 391-392)."""
+    """vol.Invalid in _validate_battery_subentry sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1089,7 +1084,7 @@ async def test_battery_subentry_user_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_battery_subentry_reconfigure_vol_invalid_sets_error():
-    """vol.Invalid in battery reconfigure sets errors['base'] (line 416-417)."""
+    """vol.Invalid in battery reconfigure sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1117,7 +1112,7 @@ async def test_battery_subentry_reconfigure_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_pv_subentry_user_vol_invalid_sets_error():
-    """vol.Invalid in _validate_pv_subentry sets errors['base'] (line 443-444)."""
+    """vol.Invalid in _validate_pv_subentry sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1139,7 +1134,7 @@ async def test_pv_subentry_user_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_pv_subentry_reconfigure_vol_invalid_sets_error():
-    """vol.Invalid in PV reconfigure sets errors['base'] (line 468-469)."""
+    """vol.Invalid in PV reconfigure sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1218,7 +1213,6 @@ async def test_options_flow_subentries_untouched(
     """Options flow does not affect subentries."""
     entry = v4_config_entry_with_battery
     # Add a PV subentry too
-    from homeassistant.config_entries import ConfigSubentry
 
     pv_sub = ConfigSubentry(
         subentry_type=PV_SUBENTRY_TYPE,

@@ -383,7 +383,7 @@ class TestZeroDeadband:
 
 def test_get_control_action_zero_capacity_does_not_crash():
     """A zero-capacity battery config must not raise ZeroDivisionError."""
-    from custom_components.battery_controller.battery_model import BatteryConfig
+
     from custom_components.battery_controller.zero_grid_controller import (
         ZeroGridController,
         ZeroGridControllerConfig,
