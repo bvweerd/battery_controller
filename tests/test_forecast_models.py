@@ -682,7 +682,7 @@ class TestHorizonExtension:
 
 
 class TestPVForecastModelTemperatureDerating:
-    """Cover temperature derating in PVForecastModel.forecast_from_radiation (101-110)."""
+    """Cover temperature derating in PVForecastModel.forecast_from_radiation."""
 
     def test_temperature_derating_applied(self):
         """Temperature derating reduces output at high temperature."""
@@ -725,7 +725,7 @@ class TestConsumptionForecastModelPatterns:
     """Cover forecast() with _seasonal_pattern and _hourly_pattern (lines 372, 374)."""
 
     def test_seasonal_pattern_used_in_forecast(self, hass):
-        """When seasonal pattern is available, it's used first (line 372)."""
+        """When seasonal pattern is available, it's used first."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
             _get_season,
@@ -742,7 +742,7 @@ class TestConsumptionForecastModelPatterns:
         assert result[0] == pytest.approx(2.5)
 
     def test_hourly_pattern_used_when_no_seasonal(self, hass):
-        """When no seasonal but hourly pattern available, hourly is used (line 374)."""
+        """When no seasonal but hourly pattern available, hourly is used."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
@@ -757,10 +757,10 @@ class TestConsumptionForecastModelPatterns:
 
 
 class TestConsumptionForecastModelGetCurrentConsumption:
-    """Cover get_current_consumption with seasonal pattern (line 395)."""
+    """Cover get_current_consumption with seasonal pattern."""
 
     def test_seasonal_pattern_used_in_current(self, hass):
-        """get_current_consumption uses seasonal pattern when available (line 395)."""
+        """get_current_consumption uses seasonal pattern when available."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
             _get_season,
@@ -780,7 +780,7 @@ class TestConsumptionForecastModelGetCurrentConsumption:
         assert result == pytest.approx(3.0)
 
     def test_hourly_pattern_used_in_current(self, hass):
-        """get_current_consumption uses hourly pattern when seasonal absent (line 397)."""
+        """get_current_consumption uses hourly pattern when seasonal absent."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
@@ -799,10 +799,10 @@ class TestConsumptionForecastModelGetCurrentConsumption:
 
 
 class TestNetLoadModelForecastPadding:
-    """Cover padding in NetLoadForecastModel.forecast when pv_forecast is short (line 722)."""
+    """Cover padding in NetLoadForecastModel.forecast when pv_forecast is short."""
 
     def test_pv_forecast_padded_when_shorter_than_hours(self):
-        """When pv_model returns fewer entries than hours, zeros are appended (line 722)."""
+        """When pv_model returns fewer entries than hours, zeros are appended."""
         from custom_components.battery_controller.forecast_models import (
             NetLoadForecast as NetLoadForecastModel,
         )
@@ -827,11 +827,11 @@ class TestNetLoadModelForecastPadding:
 
 
 class TestPriceForecastModelNoSensor:
-    """Cover PriceForecastModel.async_update_pattern when no sensor_id (line 464)."""
+    """Cover PriceForecastModel.async_update_pattern when no sensor_id."""
 
     @pytest.mark.asyncio
     async def test_no_price_sensor_returns_early(self, hass):
-        """async_update_pattern returns early when price_sensor_id is None (line 464)."""
+        """async_update_pattern returns early when price_sensor_id is None."""
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
@@ -848,7 +848,7 @@ class TestPriceForecastModelNoSensor:
 
 
 class TestConsumptionForecastModelNoSensors:
-    """Cover async_update_pattern early return when no sensors (line 170)."""
+    """Cover async_update_pattern early return when no sensors."""
 
     async def test_no_sensors_returns_early(self):
         """Returns immediately when no consumption/production sensors configured."""
@@ -866,10 +866,10 @@ class TestConsumptionForecastModelNoSensors:
 
 
 class TestConsumptionForecastModelEmptyStats:
-    """Cover async_update_pattern debug log when stats empty (lines 192-194)."""
+    """Cover async_update_pattern debug log when stats empty."""
 
     async def test_empty_stats_returns_early(self, caplog):
-        """When recorder returns empty stats, logs debug and returns (lines 192-194)."""
+        """When recorder returns empty stats, logs debug and returns."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
@@ -901,10 +901,10 @@ class TestConsumptionForecastModelEmptyStats:
 
 
 class TestConsumptionForecastModelTsAndValueNone:
-    """Cover _ts_and_value returning None when value is None (line 205)."""
+    """Cover _ts_and_value returning None when value is None."""
 
     async def test_none_change_skipped(self):
-        """Stats entries with None change field are silently skipped (line 205)."""
+        """Stats entries with None change field are silently skipped."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
@@ -933,10 +933,10 @@ class TestConsumptionForecastModelTsAndValueNone:
 
 
 class TestConsumptionForecastModelSeasonalMinSamples:
-    """Cover seasonal bucket only stored when >= _SEASONAL_MIN_SAMPLES (line 330)."""
+    """Cover seasonal bucket only stored when >= _SEASONAL_MIN_SAMPLES."""
 
     async def test_seasonal_bucket_stored_with_enough_samples(self):
-        """When enough samples, seasonal pattern is populated (line 330)."""
+        """When enough samples, seasonal pattern is populated."""
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
         )
@@ -969,10 +969,10 @@ class TestConsumptionForecastModelSeasonalMinSamples:
 
 
 class TestConsumptionForecastModelImportError:
-    """Cover ImportError branch in async_update_pattern (lines 340-341)."""
+    """Cover ImportError branch in async_update_pattern."""
 
     async def test_import_error_handled_gracefully(self, caplog):
-        """ImportError for recorder is caught and logged as debug (lines 340-341)."""
+        """ImportError for recorder is caught and logged as debug."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
@@ -1001,10 +1001,10 @@ class TestConsumptionForecastModelImportError:
 
 
 class TestConsumptionForecastModelGenericException:
-    """Cover generic Exception branch in async_update_pattern (lines 342-343)."""
+    """Cover generic Exception branch in async_update_pattern."""
 
     async def test_generic_exception_handled(self, caplog):
-        """Generic exception during pattern update is caught and logged (lines 342-343)."""
+        """Generic exception during pattern update is caught and logged."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
@@ -1037,10 +1037,10 @@ class TestConsumptionForecastModelGenericException:
 
 
 class TestPriceForecastModelStatDtNone:
-    """Cover _stat_dt returning None when start is None (line 509)."""
+    """Cover _stat_dt returning None when start is None."""
 
     async def test_stat_with_none_start_skipped(self):
-        """Stats with start=None are skipped in the price model (line 509)."""
+        """Stats with start=None are skipped in the price model."""
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
         )
@@ -1064,10 +1064,10 @@ class TestPriceForecastModelStatDtNone:
 
 
 class TestPriceForecastModelStatDtNumeric:
-    """Cover _stat_dt unix timestamp branch (lines 513-516)."""
+    """Cover _stat_dt unix timestamp branch."""
 
     async def test_unix_timestamp_start_handled(self):
-        """Stats with unix timestamp as start are parsed correctly (lines 513-516)."""
+        """Stats with unix timestamp as start are parsed correctly."""
         from datetime import datetime, timezone
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
@@ -1092,10 +1092,10 @@ class TestPriceForecastModelStatDtNumeric:
 
 
 class TestPriceForecastModelImportError:
-    """Cover ImportError in price model async_update_pattern (lines 605-606)."""
+    """Cover ImportError in price model async_update_pattern."""
 
     async def test_import_error_handled(self, caplog):
-        """ImportError for recorder is caught and logged as debug (lines 605-606)."""
+        """ImportError for recorder is caught and logged as debug."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
@@ -1121,10 +1121,10 @@ class TestPriceForecastModelImportError:
 
 
 class TestPriceForecastModelGenericException:
-    """Cover generic Exception in price model async_update_pattern (lines 607-608)."""
+    """Cover generic Exception in price model async_update_pattern."""
 
     async def test_generic_exception_handled(self, caplog):
-        """Generic exception is caught and logged as warning (lines 607-608)."""
+        """Generic exception is caught and logged as warning."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
@@ -1154,10 +1154,10 @@ class TestPriceForecastModelGenericException:
 
 
 class TestPriceForecastModelEntityRegistryException:
-    """Cover Exception in entity registry lookup in price model (lines 490-491)."""
+    """Cover Exception in entity registry lookup in price model."""
 
     async def test_entity_registry_exception_handled(self, caplog):
-        """Exception resolving weather sensor IDs is caught (lines 490-491)."""
+        """Exception resolving weather sensor IDs is caught."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             PriceForecastModel,
@@ -1193,10 +1193,10 @@ class TestPriceForecastModelEntityRegistryException:
 
 
 class TestConsumptionForecastModelLayer2Exception:
-    """Cover exception in layer 2 pv forecast lookup (lines 291-292)."""
+    """Cover exception in layer 2 pv forecast lookup."""
 
     async def test_layer2_exception_caught_and_logged(self, caplog):
-        """Exception during entity registry pv_forecast lookup is caught (lines 291-292)."""
+        """Exception during entity registry pv_forecast lookup is caught."""
         import logging
         from custom_components.battery_controller.forecast_models import (
             ConsumptionForecastModel,
@@ -1239,10 +1239,10 @@ class TestConsumptionForecastModelLayer2Exception:
 
 
 class TestConsumptionForecastModelNullDatetimeParse:
-    """Cover dt_util.parse_datetime returning None for unknown timestamp (line 314)."""
+    """Cover dt_util.parse_datetime returning None for unknown timestamp."""
 
     async def test_unparseable_timestamp_skipped(self):
-        """Stats with a timestamp that parse_datetime can't parse are skipped (line 314).
+        """Stats with a timestamp that parse_datetime can't parse are skipped.
 
         When start=None: ts_key = str(None or '') = '' → parse_datetime('') = None →
         line 314: if dt is None: continue
@@ -1278,7 +1278,7 @@ class TestConsumptionForecastModelNullDatetimeParse:
 
 
 class TestNetLoadForecastConsumptionPadded:
-    """Cover padding of consumption_forecast in NetLoadForecast (line 722)."""
+    """Cover padding of consumption_forecast in NetLoadForecast."""
 
     def test_consumption_padded_when_shorter_than_hours(self):
         """When consumption_model returns fewer entries than hours, base value is appended."""

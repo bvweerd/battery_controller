@@ -1305,7 +1305,7 @@ class TestSocDependentDerating:
 
 
 class TestCalculateStepCostGridCap:
-    """Cover grid cap clamping in calculate_step_cost (lines 361-362)."""
+    """Cover grid cap clamping in calculate_step_cost."""
 
     def test_grid_cap_clamps_export(self):
         """max_grid_power_kw > 0 triggers grid cap clamp."""
@@ -1366,7 +1366,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
     """Cover edge cases in optimize_battery_schedule."""
 
     def test_step_durations_shorter_than_n_steps_are_padded(self):
-        """When step_durations_hours is shorter than n_steps, last value is repeated (line 434)."""
+        """When step_durations_hours is shorter than n_steps, last value is repeated."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1390,7 +1390,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
         assert len(result.power_schedule_kw) == 6
 
     def test_empty_feed_in_forecast_uses_zero_terminal_price(self):
-        """Empty feed_in_forecast sets terminal_price = 0.0 (line 503)."""
+        """Empty feed_in_forecast sets terminal_price = 0.0."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1440,7 +1440,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
         assert isinstance(result.shadow_price_eur_kwh, float)
 
     def test_dc_pv_passive_charging_in_forward_pass(self):
-        """DC-coupled PV triggers passive charging in forward pass (lines 663-666)."""
+        """DC-coupled PV triggers passive charging in forward pass."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1469,10 +1469,10 @@ class TestOptimizeBatteryScheduleEdgeCases:
 
 
 class TestCalculateScheduleTotalCostNoPvDc:
-    """Cover _calculate_schedule_total_cost with pv_dc_forecast=None (line 178)."""
+    """Cover _calculate_schedule_total_cost with pv_dc_forecast=None."""
 
     def test_pv_dc_forecast_none_uses_zeros(self):
-        """When pv_dc_forecast is None, function uses [0.0]*n (line 178)."""
+        """When pv_dc_forecast is None, function uses [0.0]*n."""
         from custom_components.battery_controller.optimizer import (
             _calculate_schedule_total_cost,
         )
@@ -1504,10 +1504,10 @@ class TestCalculateScheduleTotalCostNoPvDc:
 
 
 class TestFilterOscillationsEmpty:
-    """Cover _filter_oscillations with empty schedule (line 846)."""
+    """Cover _filter_oscillations with empty schedule."""
 
     def test_empty_schedule_returns_unchanged(self):
-        """Empty schedule returns immediately (line 846)."""
+        """Empty schedule returns immediately."""
         result_power, result_mode, result_soc = _filter_oscillations(
             power_schedule_kw=[],
             mode_schedule=[],
@@ -1542,7 +1542,7 @@ class TestFilterOscillationsGetChargeCostEdges:
         )
 
     def test_get_charge_cost_all_passive_dc(self):
-        """When passive DC PV covers all charging, charge cost = 0 (line 897)."""
+        """When passive DC PV covers all charging, charge cost = 0."""
         power, mode = self._make_schedule(1.0, -1.0)
         # DC PV of 2 kW covers the 1 kW charge → effective_charge_kw <= 0 → cost = 0
         result_power, result_mode, _ = _filter_oscillations(
@@ -1567,7 +1567,7 @@ class TestFilterOscillationsGetChargeCostEdges:
         # Doesn't crash; result may or may not filter
 
     def test_get_discharge_value_negative_power(self):
-        """get_discharge_value with discharge_power_kw <= 0 returns grid price (line 911)."""
+        """get_discharge_value with discharge_power_kw <= 0 returns grid price."""
         from custom_components.battery_controller.optimizer import (
             ACTION_CHARGING,
             ACTION_DISCHARGING,
@@ -1594,10 +1594,10 @@ class TestFilterOscillationsGetChargeCostEdges:
 
 
 class TestFilterMicroCyclesEmpty:
-    """Cover _filter_micro_cycles with empty schedule (line 1040)."""
+    """Cover _filter_micro_cycles with empty schedule."""
 
     def test_empty_schedule_returns_unchanged(self):
-        """Empty power schedule returns immediately (line 1040)."""
+        """Empty power schedule returns immediately."""
         result_power, result_mode, result_soc = _filter_micro_cycles(
             power_schedule_kw=[],
             mode_schedule=[],
@@ -1614,14 +1614,14 @@ class TestFilterMicroCyclesEmpty:
 
 
 class TestFindNearestSocIdxSingleState:
-    """Cover _find_nearest_soc_idx with len(soc_states) <= 1 (line 1112)."""
+    """Cover _find_nearest_soc_idx with len(soc_states) <= 1."""
 
     def test_single_soc_state_returns_zero(self):
-        """Single SoC state always returns index 0 (line 1112)."""
+        """Single SoC state always returns index 0."""
         assert _find_nearest_soc_idx(5000.0, [5000.0]) == 0
 
     def test_empty_soc_states_returns_zero(self):
-        """Empty soc_states returns 0 (line 1112)."""
+        """Empty soc_states returns 0."""
         assert _find_nearest_soc_idx(5000.0, []) == 0
 
 
@@ -1634,7 +1634,7 @@ class TestSubResolutionACSkip:
     """Cover line 600: sub-resolution AC action that doesn't change SoC bin is skipped."""
 
     def test_sub_resolution_action_skipped_does_not_affect_result(self):
-        """A non-zero action that keeps the SoC in the same bin is skipped (line 600).
+        """A non-zero action that keeps the SoC in the same bin is skipped.
 
         The optimizer internally skips actions that don't cross a SoC boundary.
         We can indirectly verify this by running an optimization with very small
@@ -1670,10 +1670,10 @@ class TestSubResolutionACSkip:
 
 
 class TestForwardPassDCIdlePassiveCharge:
-    """Cover lines 663-666: idle + DC-coupled PV passive charging in forward pass."""
+    """Cover: idle + DC-coupled PV passive charging in forward pass."""
 
     def test_dc_pv_idle_charges_battery_in_forward_pass(self):
-        """When idle with DC PV, forward pass increases SoC (lines 663-666)."""
+        """When idle with DC PV, forward pass increases SoC."""
         from custom_components.battery_controller.battery_model import BatteryConfig
         from custom_components.battery_controller.optimizer import (
             optimize_battery_schedule,
@@ -1722,7 +1722,7 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
     """Cover line 897: get_charge_cost returns price when total_kw == 0."""
 
     def test_charge_cost_zero_total_returns_price(self):
-        """When effective_charge_kw == from_pv + from_grid == 0, returns price (line 897).
+        """When effective_charge_kw == from_pv + from_grid == 0, returns price.
 
         This happens when from_pv == effective_charge_kw and from_grid == 0,
         but total_kw is 0 due to rounding. The function returns price_forecast[timestep].
@@ -2599,7 +2599,7 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
     """Cover line 922: get_discharge_value returns price when total_kw == 0."""
 
     def test_discharge_value_zero_total_returns_price(self):
-        """When discharge_power_kw > 0 but total_kw == 0, returns price (line 922).
+        """When discharge_power_kw > 0 but total_kw == 0, returns price.
 
         total_kw = to_self_kw + to_export_kw. This is 0 only when both are 0.
         to_self_kw = min(discharge_power_kw, residual_load) = 0 when residual_load=0.

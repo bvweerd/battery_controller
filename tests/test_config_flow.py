@@ -831,7 +831,7 @@ async def test_battery_subentry_delete(
 
 
 def test_validate_battery_subentry_with_name_stores_name():
-    """Name is non-empty → result[CONF_NAME] is set (line 164)."""
+    """Name is non-empty → result[CONF_NAME] is set."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -853,7 +853,7 @@ def test_validate_battery_subentry_with_name_stores_name():
 
 
 def test_validate_battery_subentry_with_power_sensor():
-    """battery_power_sensor present → stored in result (line 180)."""
+    """battery_power_sensor present → stored in result."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -875,7 +875,7 @@ def test_validate_battery_subentry_with_power_sensor():
 
 
 def test_validate_battery_subentry_with_soc_derating_keys():
-    """SoC derating keys present → stored in result (line 189)."""
+    """SoC derating keys present → stored in result."""
     from custom_components.battery_controller.config_flow import (
         _validate_battery_subentry,
     )
@@ -950,7 +950,7 @@ def test_validate_battery_subentry_omits_optional_keys_when_absent():
 
 
 def test_battery_subentry_title_with_name():
-    """_battery_subentry_title returns name when non-empty (line 196)."""
+    """_battery_subentry_title returns name when non-empty."""
     from custom_components.battery_controller.config_flow import _battery_subentry_title
 
     assert (
@@ -960,7 +960,7 @@ def test_battery_subentry_title_with_name():
 
 
 def test_pv_subentry_title_with_name():
-    """_pv_subentry_title returns name when non-empty (line 506)."""
+    """_pv_subentry_title returns name when non-empty."""
     from custom_components.battery_controller.config_flow import _pv_subentry_title
 
     assert (
@@ -972,7 +972,7 @@ def test_pv_subentry_title_with_name():
 
 
 def test_validate_pv_subentry_with_name():
-    """_validate_pv_subentry stores name when non-empty (line 490)."""
+    """_validate_pv_subentry stores name when non-empty."""
     from custom_components.battery_controller.config_flow import _validate_pv_subentry
 
     data = {
@@ -1041,7 +1041,7 @@ def test_validate_pv_subentry_without_forecast_sensors():
 
 
 # ---------------------------------------------------------------------------
-# Options flow — missing_required error path (line 569)
+# Options flow — missing_required error path
 # ---------------------------------------------------------------------------
 
 
@@ -1061,13 +1061,13 @@ async def test_options_flow_missing_price_sensor_shows_error(
 
 
 # ---------------------------------------------------------------------------
-# Error paths in subentry flows (lines 391-392, 416-417, 443-444, 468-469)
+# Error paths in subentry flows (, 416-417, 443-444, 468-469)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_battery_subentry_user_vol_invalid_sets_error():
-    """vol.Invalid in _validate_battery_subentry sets errors['base'] (line 391-392)."""
+    """vol.Invalid in _validate_battery_subentry sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1089,7 +1089,7 @@ async def test_battery_subentry_user_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_battery_subentry_reconfigure_vol_invalid_sets_error():
-    """vol.Invalid in battery reconfigure sets errors['base'] (line 416-417)."""
+    """vol.Invalid in battery reconfigure sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1117,7 +1117,7 @@ async def test_battery_subentry_reconfigure_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_pv_subentry_user_vol_invalid_sets_error():
-    """vol.Invalid in _validate_pv_subentry sets errors['base'] (line 443-444)."""
+    """vol.Invalid in _validate_pv_subentry sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (
@@ -1139,7 +1139,7 @@ async def test_pv_subentry_user_vol_invalid_sets_error():
 
 @pytest.mark.asyncio
 async def test_pv_subentry_reconfigure_vol_invalid_sets_error():
-    """vol.Invalid in PV reconfigure sets errors['base'] (line 468-469)."""
+    """vol.Invalid in PV reconfigure sets errors['base']."""
     import voluptuous as vol
 
     from custom_components.battery_controller.config_flow import (

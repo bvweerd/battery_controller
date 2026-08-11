@@ -687,21 +687,21 @@ def test_schedule_mid_period_run_cancels_previous(hass, monkeypatch):
 
 
 def test_control_mode_getter(hass):
-    """control_mode property getter returns _control_mode (line 206)."""
+    """control_mode property getter returns _control_mode."""
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_HYBRID
     assert coord.control_mode == MODE_HYBRID
 
 
 def test_last_failure_reason_getter(hass):
-    """last_failure_reason property returns _last_failure_reason (line 220)."""
+    """last_failure_reason property returns _last_failure_reason."""
     coord = _make_coordinator(hass)
     coord._last_failure_reason = "sensor unavailable"
     assert coord.last_failure_reason == "sensor unavailable"
 
 
 def test_last_success_time_getter(hass):
-    """last_success_time property returns _last_success_time (line 225)."""
+    """last_success_time property returns _last_success_time."""
     from datetime import datetime, timezone
 
     coord = _make_coordinator(hass)
@@ -711,14 +711,14 @@ def test_last_success_time_getter(hass):
 
 
 def test_optimization_enabled_getter(hass):
-    """optimization_enabled property getter returns _optimization_enabled (line 230)."""
+    """optimization_enabled property getter returns _optimization_enabled."""
     coord = _make_coordinator(hass)
     coord._optimization_enabled = False
     assert coord.optimization_enabled is False
 
 
 def test_optimization_enabled_setter(hass):
-    """optimization_enabled setter updates _optimization_enabled (line 235)."""
+    """optimization_enabled setter updates _optimization_enabled."""
     coord = _make_coordinator(hass)
     coord.optimization_enabled = False
     assert coord._optimization_enabled is False
@@ -728,7 +728,7 @@ def test_optimization_enabled_setter(hass):
 
 @pytest.mark.asyncio
 async def test_handle_price_model_refresh(hass):
-    """_handle_price_model_refresh calls async_update_pattern on both models (239-241)."""
+    """_handle_price_model_refresh calls async_update_pattern on both models."""
     from unittest.mock import AsyncMock
 
     coord = _make_coordinator(hass)
@@ -744,7 +744,7 @@ async def test_handle_price_model_refresh(hass):
 
 
 def test_handle_price_change_no_new_state(hass):
-    """_handle_price_change returns early when new_state is None (line 318)."""
+    """_handle_price_change returns early when new_state is None."""
     coord = _make_coordinator(hass)
     event = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
     event.data = {"new_state": None, "old_state": None}
@@ -753,7 +753,7 @@ def test_handle_price_change_no_new_state(hass):
 
 
 def test_handle_price_change_unavailable_state(hass, monkeypatch):
-    """_handle_price_change returns early when state is unavailable (lines 322-323)."""
+    """_handle_price_change returns early when state is unavailable."""
     coord = _make_coordinator(hass)
     new_state = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
     new_state.state = "unavailable"
@@ -765,7 +765,7 @@ def test_handle_price_change_unavailable_state(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_price_change_exception_in_extract(hass, monkeypatch):
-    """_handle_price_change handles exceptions from extract_price_forecast (338-340)."""
+    """_handle_price_change handles exceptions from extract_price_forecast."""
     coord = _make_coordinator(hass)
 
     def raise_exception(state):
@@ -803,7 +803,7 @@ async def test_handle_price_change_exception_in_extract(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_price_change_was_unavailable(hass, monkeypatch):
-    """was_unavailable=True triggers optimization (lines 343-351)."""
+    """was_unavailable=True triggers optimization."""
     coord = _make_coordinator(hass)
     period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -841,7 +841,7 @@ async def test_handle_price_change_was_unavailable(hass, monkeypatch):
 
 
 def test_schedule_mid_period_run_period_start_none(hass, monkeypatch):
-    """_schedule_mid_period_run with period_start=None returns immediately (line 386)."""
+    """_schedule_mid_period_run with period_start=None returns immediately."""
     coord = _make_coordinator(hass)
 
     registered = []
@@ -856,7 +856,7 @@ def test_schedule_mid_period_run_period_start_none(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_shutdown_unsubscribes_all(hass):
-    """async_shutdown calls all unsub callables and clears them (lines 414-429)."""
+    """async_shutdown calls all unsub callables and clears them."""
     coord = _make_coordinator(hass)
 
     unsub_calls = {}
@@ -889,7 +889,7 @@ async def test_async_shutdown_no_unsubs(hass):
 
 
 def test_get_realtime_grid_w_no_sensors(hass):
-    """_get_realtime_grid_w returns None when no power sensors configured (line 650-651)."""
+    """_get_realtime_grid_w returns None when no power sensors configured."""
     coord = _make_coordinator(hass)
     coord._power_consumption_sensors = []
     coord._power_production_sensors = []
@@ -897,7 +897,7 @@ def test_get_realtime_grid_w_no_sensors(hass):
 
 
 def test_get_realtime_grid_w_with_sensors(hass):
-    """_get_realtime_grid_w reads sensors and returns net grid power (lines 652-684)."""
+    """_get_realtime_grid_w reads sensors and returns net grid power."""
     coord = _make_coordinator(hass)
     coord._power_consumption_sensors = ["sensor.consumption"]
     coord._power_production_sensors = ["sensor.production"]
@@ -910,7 +910,7 @@ def test_get_realtime_grid_w_with_sensors(hass):
 
 
 def test_get_realtime_grid_w_kw_unit_conversion(hass):
-    """_get_realtime_grid_w converts kW sensors to W (lines 664-665, 678-679)."""
+    """_get_realtime_grid_w converts kW sensors to W (, 678-679)."""
     coord = _make_coordinator(hass)
     coord._power_consumption_sensors = ["sensor.consumption_kw"]
     coord._power_production_sensors = ["sensor.production_kw"]
@@ -1002,7 +1002,7 @@ def test_find_stale_power_sensor_skips_unavailable(hass, monkeypatch):
 
 
 def test_resolve_controller_mode(hass):
-    """_resolve_controller_mode returns correct mode string (lines 616-634)."""
+    """_resolve_controller_mode returns correct mode string."""
     from custom_components.battery_controller.const import MODE_ZERO_GRID
 
     coord = _make_coordinator(hass)
@@ -1092,7 +1092,7 @@ def test_resolve_controller_mode_idle_upgrade_resets_when_blocked(hass):
 
 
 def test_split_setpoint_no_batteries(hass):
-    """_split_setpoint returns empty dict when no battery subentries (line 823-824)."""
+    """_split_setpoint returns empty dict when no battery subentries."""
     coord = _make_coordinator(hass)
     coord._individual_battery_configs = []
     assert coord._split_setpoint(1.0) == {}
@@ -1186,7 +1186,7 @@ def test_split_setpoint_idle(hass):
 
 
 def test_get_current_battery_state_no_subentries(hass):
-    """get_current_battery_state returns default when no subentries (lines 771-775)."""
+    """get_current_battery_state returns default when no subentries."""
     coord = _make_coordinator(hass)
     coord._individual_battery_configs = []
 
@@ -1196,7 +1196,7 @@ def test_get_current_battery_state_no_subentries(hass):
 
 
 def test_get_current_battery_state_with_sensors(hass):
-    """get_current_battery_state reads sensors and returns combined state (lines 776-815)."""
+    """get_current_battery_state reads sensors and returns combined state."""
     from custom_components.battery_controller.battery_model import BatteryConfig
     from custom_components.battery_controller.const import CONF_BATTERY_SOC_SENSOR
 
@@ -1222,7 +1222,7 @@ def test_get_current_battery_state_with_sensors(hass):
 
 @pytest.mark.asyncio
 async def test_handle_soc_available_triggers_refresh(hass):
-    """_handle_soc_available triggers refresh when SoC becomes available (lines 414-429)."""
+    """_handle_soc_available triggers refresh when SoC becomes available."""
     coord = _make_coordinator(hass)
 
     refresh_called = []
@@ -1273,7 +1273,7 @@ def test_handle_soc_available_no_trigger_when_already_available(hass):
 
 @pytest.mark.asyncio
 async def test_async_setup_with_power_sensors(hass):
-    """async_setup with power sensors registers a realtime timer (lines 247-304)."""
+    """async_setup with power sensors registers a realtime timer."""
     from unittest.mock import AsyncMock
 
     weather_coordinator = MagicMock()
@@ -1323,7 +1323,7 @@ async def test_async_setup_with_power_sensors(hass):
 
 @pytest.mark.asyncio
 async def test_async_setup_with_soc_sensor(hass):
-    """async_setup with a battery SoC sensor registers SoC state tracking (lines 266-272)."""
+    """async_setup with a battery SoC sensor registers SoC state tracking."""
     from unittest.mock import AsyncMock
 
     weather_coordinator = MagicMock()
@@ -1380,7 +1380,7 @@ async def test_async_setup_with_soc_sensor(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_concurrency_guard_with_data(hass):
-    """_async_update_data returns cached data when already running (lines 894-900)."""
+    """_async_update_data returns cached data when already running."""
     coord = _make_coordinator(hass)
     coord._optimization_running = True
     coord.data = {"control_mode": "cached"}
@@ -1392,7 +1392,7 @@ async def test_async_update_data_concurrency_guard_with_data(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_concurrency_guard_no_data_raises(hass):
-    """_async_update_data raises UpdateFailed when running and no cached data (lines 901-904)."""
+    """_async_update_data raises UpdateFailed when running and no cached data."""
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     coord = _make_coordinator(hass)
@@ -1405,7 +1405,7 @@ async def test_async_update_data_concurrency_guard_no_data_raises(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_disabled_returns_cached(hass):
-    """_async_update_data returns cached data when optimization disabled (lines 908-913)."""
+    """_async_update_data returns cached data when optimization disabled."""
     coord = _make_coordinator(hass)
     coord._optimization_enabled = False
     coord.data = {"control_mode": "cached_disabled"}
@@ -1416,7 +1416,7 @@ async def test_async_update_data_disabled_returns_cached(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_pending_schedules_rerun(hass, monkeypatch):
-    """When _pending_optimization is set during a run, a re-run task is scheduled (lines 916-921)."""
+    """When _pending_optimization is set during a run, a re-run task is scheduled."""
     coord = _make_coordinator(hass)
     coord._optimization_running = False
     coord._pending_optimization = False
@@ -1454,7 +1454,7 @@ async def test_async_update_data_pending_schedules_rerun(hass, monkeypatch):
 
 
 def test_get_manual_setpoint_w_no_entry(hass):
-    """_get_manual_setpoint_w returns default when entry not found (lines 583-586)."""
+    """_get_manual_setpoint_w returns default when entry not found."""
     from custom_components.battery_controller.const import (
         DEFAULT_MANUAL_POWER_SETPOINT_W,
     )
@@ -1467,7 +1467,7 @@ def test_get_manual_setpoint_w_no_entry(hass):
 
 
 def test_resolve_controller_mode_control_mode_fallback(hass):
-    """_resolve_controller_mode returns control_mode for unhandled effective modes (line 636)."""
+    """_resolve_controller_mode returns control_mode for unhandled effective modes."""
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_ZERO_GRID
 
@@ -1477,7 +1477,7 @@ def test_resolve_controller_mode_control_mode_fallback(hass):
 
 
 def test_get_realtime_grid_w_value_error_skipped(hass):
-    """_get_realtime_grid_w skips sensors that cannot be converted to float (lines 669-670)."""
+    """_get_realtime_grid_w skips sensors that cannot be converted to float."""
     from custom_components.battery_controller.const import (
         CONF_POWER_CONSUMPTION_SENSORS,
     )
@@ -1509,7 +1509,7 @@ def test_get_realtime_grid_w_value_error_skipped(hass):
 
 
 def test_read_battery_state_kwh_soc_unit(hass):
-    """_read_battery_state reads SoC in kWh when unit_of_measurement is kWh (lines 727-728)."""
+    """_read_battery_state reads SoC in kWh when unit_of_measurement is kWh."""
     from custom_components.battery_controller.battery_model import BatteryConfig
 
     coord = _make_coordinator(hass)
@@ -1531,7 +1531,7 @@ def test_read_battery_state_kwh_soc_unit(hass):
 
 
 def test_read_battery_state_fallback_soc_when_unavailable(hass):
-    """_read_battery_state uses fallback SoC when sensor is unavailable (lines 733-737)."""
+    """_read_battery_state uses fallback SoC when sensor is unavailable."""
     from custom_components.battery_controller.battery_model import BatteryConfig
 
     coord = _make_coordinator(hass)
@@ -1553,7 +1553,7 @@ def test_read_battery_state_fallback_soc_when_unavailable(hass):
 
 
 def test_read_battery_state_no_soc_sensor_uses_fallback(hass):
-    """_read_battery_state uses fallback SoC when no sensor key in subentry (lines 735-737)."""
+    """_read_battery_state uses fallback SoC when no sensor key in subentry."""
     from custom_components.battery_controller.battery_model import BatteryConfig
 
     coord = _make_coordinator(hass)
@@ -1575,7 +1575,7 @@ def test_read_battery_state_no_soc_sensor_uses_fallback(hass):
 
 
 def test_read_battery_state_charging_mode_w_unit(hass):
-    """_read_battery_state detects charging mode from W-unit power sensor (line 758)."""
+    """_read_battery_state detects charging mode from W-unit power sensor."""
     from custom_components.battery_controller.battery_model import BatteryConfig
     from custom_components.battery_controller.const import CONF_BATTERY_POWER_SENSOR
 
@@ -1602,7 +1602,7 @@ def test_read_battery_state_charging_mode_w_unit(hass):
 
 
 def test_read_battery_state_discharging_mode_kw_unit(hass):
-    """_read_battery_state detects discharging from kW-unit power sensor (line 760)."""
+    """_read_battery_state detects discharging from kW-unit power sensor."""
     from custom_components.battery_controller.battery_model import BatteryConfig
     from custom_components.battery_controller.const import CONF_BATTERY_POWER_SENSOR
 
@@ -1629,7 +1629,7 @@ def test_read_battery_state_discharging_mode_kw_unit(hass):
 
 
 def test_read_battery_state_unknown_unit_warns(hass):
-    """_read_battery_state logs a warning for unknown power sensor unit (lines 749-754)."""
+    """_read_battery_state logs a warning for unknown power sensor unit."""
     from custom_components.battery_controller.battery_model import BatteryConfig
     from custom_components.battery_controller.const import CONF_BATTERY_POWER_SENSOR
 
@@ -1657,7 +1657,7 @@ def test_read_battery_state_unknown_unit_warns(hass):
 
 
 def test_get_current_battery_state_charging_mode(hass):
-    """get_current_battery_state returns charging when combined power > threshold (line 806)."""
+    """get_current_battery_state returns charging when combined power > threshold."""
     from custom_components.battery_controller.battery_model import BatteryConfig
 
     coord = _make_coordinator(hass)
@@ -1691,7 +1691,7 @@ def test_get_current_battery_state_charging_mode(hass):
 
 
 def test_get_current_battery_state_discharging_mode(hass):
-    """get_current_battery_state returns discharging when combined power < -threshold (line 808)."""
+    """get_current_battery_state returns discharging when combined power < -threshold."""
     from custom_components.battery_controller.battery_model import BatteryConfig
     import unittest.mock as um
 
@@ -1723,7 +1723,7 @@ def test_get_current_battery_state_discharging_mode(hass):
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_no_data_returns_early(hass):
-    """_handle_realtime_update returns early when data is None (line 441-442)."""
+    """_handle_realtime_update returns early when data is None."""
     coord = _make_coordinator(hass)
     coord.data = None
     coord._last_result = None
@@ -1734,7 +1734,7 @@ async def test_handle_realtime_update_no_data_returns_early(hass):
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_no_grid_returns_early(hass, monkeypatch):
-    """_handle_realtime_update returns early when grid sensors unavailable (lines 446-450)."""
+    """_handle_realtime_update returns early when grid sensors unavailable."""
     coord = _make_coordinator(hass)
     coord.data = {"control_action": {}}
     coord._last_result = MagicMock()
@@ -1749,7 +1749,7 @@ async def test_handle_realtime_update_no_grid_returns_early(hass, monkeypatch):
 async def test_handle_realtime_update_stable_setpoint_updates_battery_state(
     hass, monkeypatch
 ):
-    """Stable setpoint still updates battery state when power changes (lines 520-536)."""
+    """Stable setpoint still updates battery state when power changes."""
     from custom_components.battery_controller.battery_model import BatteryState
 
     coord = _make_coordinator(hass)
@@ -1800,7 +1800,7 @@ async def test_handle_realtime_update_stable_setpoint_updates_battery_state(
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_changed_setpoint(hass, monkeypatch):
-    """Changed setpoint triggers full data update with setpoint log (lines 538-571)."""
+    """Changed setpoint triggers full data update with setpoint log."""
     from custom_components.battery_controller.battery_model import BatteryState
 
     coord = _make_coordinator(hass)
@@ -1856,7 +1856,7 @@ async def test_handle_realtime_update_changed_setpoint(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_forecast_update_triggers_refresh_when_no_data(hass):
-    """_on_forecast_update triggers refresh when forecast arrives and data is None (277-278)."""
+    """_on_forecast_update triggers refresh when forecast arrives and data is None."""
     from unittest.mock import AsyncMock
 
     weather_coordinator = MagicMock()
@@ -1919,7 +1919,7 @@ async def test_on_forecast_update_triggers_refresh_when_no_data(hass):
 
 @pytest.mark.asyncio
 async def test_handle_price_change_significant_threshold_triggers(hass, monkeypatch):
-    """_handle_price_change re-optimizes on >=10% price change within same period (367-371)."""
+    """_handle_price_change re-optimizes on >=10% price change within same period."""
     coord = _make_coordinator(hass)
     period = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -1958,7 +1958,7 @@ async def test_handle_price_change_significant_threshold_triggers(hass, monkeypa
 
 
 def test_resolve_controller_mode_unknown_effective_mode(hass):
-    """_resolve_controller_mode returns control_mode for an unknown effective mode (line 636)."""
+    """_resolve_controller_mode returns control_mode for an unknown effective mode."""
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_HYBRID
     coord._power_consumption_sensors = []
@@ -2025,7 +2025,7 @@ def test_split_setpoint_discharging_zero_available(hass):
 
 
 def test_refresh_battery_config_with_entry(hass, monkeypatch):
-    """_refresh_battery_config re-reads BatteryConfig from live subentry data (871-884)."""
+    """_refresh_battery_config re-reads BatteryConfig from live subentry data."""
 
     coord = _make_coordinator(hass)
     coord._battery_subentries = [("bat1", {})]
@@ -2135,7 +2135,7 @@ def test_refresh_battery_config_preserves_dc_pv_overlay(hass, monkeypatch):
 
 
 def test_get_manual_setpoint_w_with_entry(hass, monkeypatch):
-    """_get_manual_setpoint_w reads setpoint from live entry options (587-593)."""
+    """_get_manual_setpoint_w reads setpoint from live entry options."""
     from custom_components.battery_controller.const import CONF_MANUAL_POWER_SETPOINT_W
 
     coord = _make_coordinator(hass)
@@ -2151,7 +2151,7 @@ def test_get_manual_setpoint_w_with_entry(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_stale_sensor_returns_early(hass, monkeypatch):
-    """_handle_realtime_update returns early when power sensor is stale (460-472)."""
+    """_handle_realtime_update returns early when power sensor is stale."""
     coord = _make_coordinator(hass)
     coord._power_consumption_sensors = ["sensor.grid_w"]
     coord.data = {"control_action": {"target_power_kw": 1.0}}
@@ -2316,7 +2316,7 @@ async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
-    """_handle_realtime_update uses zero_grid schedule when control mode is zero_grid (481-482)."""
+    """_handle_realtime_update uses zero_grid schedule when control mode is zero_grid."""
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_ZERO_GRID
     coord._effective_mode = "charging"
@@ -2368,7 +2368,7 @@ async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
-    """_handle_realtime_update reads live manual setpoint in MODE_MANUAL (485-488)."""
+    """_handle_realtime_update reads live manual setpoint in MODE_MANUAL."""
     from custom_components.battery_controller.const import MODE_MANUAL
 
     coord = _make_coordinator(hass)
@@ -2431,7 +2431,7 @@ async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_no_forecast_data_raises(hass, monkeypatch):
-    """_run_optimization raises UpdateFailed when forecast data is None (943-946)."""
+    """_run_optimization raises UpdateFailed when forecast data is None."""
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     coord = _make_coordinator(hass)
@@ -2444,7 +2444,7 @@ async def test_run_optimization_no_forecast_data_raises(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_no_price_sensor_raises(hass, monkeypatch):
-    """_run_optimization raises UpdateFailed when no price sensor configured (955-958)."""
+    """_run_optimization raises UpdateFailed when no price sensor configured."""
     from homeassistant.helpers.update_coordinator import UpdateFailed
 
     coord = _make_coordinator(hass)
@@ -2681,7 +2681,7 @@ async def test_run_optimization_feed_in_sensor_unavailable_uses_fixed_price(
 
 @pytest.mark.asyncio
 async def test_run_optimization_mode_zero_grid(hass, monkeypatch):
-    """_run_optimization with MODE_ZERO_GRID sets effective_mode to zero_grid (1364-1365)."""
+    """_run_optimization with MODE_ZERO_GRID sets effective_mode to zero_grid."""
     from unittest.mock import patch as upatch
 
     coord = _make_coordinator(hass)
@@ -2774,7 +2774,7 @@ async def test_run_optimization_mode_zero_grid(hass, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_optimization_mode_manual(hass, monkeypatch):
-    """_run_optimization with MODE_MANUAL reads live setpoint (1367-1369)."""
+    """_run_optimization with MODE_MANUAL reads live setpoint."""
     from unittest.mock import patch as upatch
     from custom_components.battery_controller.const import MODE_MANUAL
 

@@ -293,7 +293,7 @@ async def test_handle_pattern_refresh(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_time_shifted_forecast(hass):
-    """When weather data is older than 0 hours, forecasts are shifted (lines 152-163)."""
+    """When weather data is older than 0 hours, forecasts are shifted."""
     config = _minimal_config()
 
     # Weather data from 2 hours ago — hours_elapsed = 2
@@ -342,7 +342,7 @@ async def test_async_update_data_time_shifted_forecast(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_ac_pv_model(hass):
-    """ForecastCoordinator processes AC PV arrays in _async_update_data (lines 189-202)."""
+    """ForecastCoordinator processes AC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_ac_1",
@@ -396,7 +396,7 @@ async def test_async_update_data_with_ac_pv_model(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_dc_pv_model(hass):
-    """ForecastCoordinator processes DC PV arrays in _async_update_data (lines 213-226)."""
+    """ForecastCoordinator processes DC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_dc_1",

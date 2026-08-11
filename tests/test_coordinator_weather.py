@@ -267,7 +267,7 @@ async def test_start_idx_logic(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_invalid_timestamp_skipped(hass):
-    """Invalid timestamps in weather response are skipped (lines 81-82)."""
+    """Invalid timestamps in weather response are skipped."""
     from unittest.mock import AsyncMock, MagicMock
 
     response_data = {

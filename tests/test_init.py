@@ -183,7 +183,7 @@ async def test_async_unload_entry_no_runtime_data():
 
 
 # ---------------------------------------------------------------------------
-# async_setup_entry — covers lines 80-202
+# async_setup_entry — covers
 # ---------------------------------------------------------------------------
 
 

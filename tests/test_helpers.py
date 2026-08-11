@@ -793,7 +793,7 @@ class TestExtractPriceForecastWithTimestamps:
 
 
 class TestNormalizePriceValueEdgeCases:
-    """Cover _normalize_price_value returning None (lines 23-24)."""
+    """Cover _normalize_price_value returning None."""
 
     def _make_state(self, attributes):
         from unittest.mock import MagicMock
@@ -834,7 +834,7 @@ class TestNormalizePriceValueEdgeCases:
 
 
 class TestDetectIntervalWithDatetimeStart:
-    """Cover _detect_interval_from_entries with datetime start objects (line 44)."""
+    """Cover _detect_interval_from_entries with datetime start objects."""
 
     def test_datetime_start_in_entries_detects_15min(self):
         """Entries with datetime (not string) start fields are detected."""
@@ -853,7 +853,7 @@ class TestDetectIntervalWithDatetimeStart:
 
 
 class TestNetPricesTodayPath:
-    """Cover net_prices_today path returning interval_forecast (lines 113-114, 129)."""
+    """Cover net_prices_today path returning interval_forecast (, 129)."""
 
     def _make_state(self, attributes):
         from unittest.mock import MagicMock
@@ -864,12 +864,12 @@ class TestNetPricesTodayPath:
         return s
 
     def test_net_prices_today_with_datetime_start(self):
-        """net_prices_today with datetime start hits lines 113-114 and returns via 129."""
+        """net_prices_today with datetime start hits and returns via 129."""
         from datetime import timedelta, timezone
         from unittest.mock import patch
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
-        # datetime start objects (not strings) — covers line 113-114
+        # datetime start objects (not strings) — covers
         entries = [
             {"start": midnight + timedelta(hours=i), "value": 0.10 + i * 0.01}
             for i in range(10)
@@ -928,7 +928,7 @@ class TestNetPricesTodayPath:
 
 
 class TestGenericForecastAttribute:
-    """Cover generic 'forecast' attribute in extract_price_forecast_with_interval (155-162)."""
+    """Cover generic 'forecast' attribute in extract_price_forecast_with_interval."""
 
     def _make_state(self, attributes):
         from unittest.mock import MagicMock
@@ -947,7 +947,7 @@ class TestGenericForecastAttribute:
 
 
 class TestExtractPriceForecastWrapper:
-    """Cover extract_price_forecast wrapper (lines 213-214)."""
+    """Cover extract_price_forecast wrapper."""
 
     def test_extract_price_forecast_calls_underlying(self):
         """extract_price_forecast is a thin wrapper over _with_interval."""
@@ -962,7 +962,7 @@ class TestExtractPriceForecastWrapper:
 
 
 class TestFillMissingTimestampsAllNone:
-    """Cover _fill_missing_timestamps when all timestamps are None (line 241)."""
+    """Cover _fill_missing_timestamps when all timestamps are None."""
 
     def test_fill_missing_all_none_uses_synthesize(self):
         """When all timestamps are None, synthesize_timestamps is used."""
@@ -984,10 +984,10 @@ class TestFillMissingTimestampsAllNone:
 
 
 class TestExtendWithTimestampsDatetimeBranch:
-    """Cover _extend_with_timestamps datetime start branch (lines 304-305)."""
+    """Cover _extend_with_timestamps datetime start branch."""
 
     def test_datetime_start_in_net_prices_today_with_timestamps(self):
-        """net_prices_today with datetime start objects hits lines 304-305."""
+        """net_prices_today with datetime start objects hits."""
         from datetime import timedelta, timezone
         from unittest.mock import MagicMock, patch
         from custom_components.battery_controller.helpers import (
@@ -1024,7 +1024,7 @@ class TestExtendWithTimestampsDatetimeBranch:
 
 
 class TestRawTomorrowInPriority5WithTimestamps:
-    """Cover raw_tomorrow entries in priority 5 (lines 383-385)."""
+    """Cover raw_tomorrow entries in priority 5."""
 
     def test_raw_tomorrow_appended_in_priority5(self):
         """raw_tomorrow without timestamps is appended in extract_price_forecast_with_timestamps."""
@@ -1060,7 +1060,7 @@ class TestRawTomorrowInPriority5WithTimestamps:
 
 
 class TestTodayTomorrowWithTimestamps:
-    """Cover combined.extend(tomorrow_attr) in extract_price_forecast_with_timestamps (line 405)."""
+    """Cover combined.extend(tomorrow_attr) in extract_price_forecast_with_timestamps."""
 
     def test_today_tomorrow_combined_with_timestamps(self):
         """today + tomorrow attributes are combined in extract_price_forecast_with_timestamps."""
@@ -1096,7 +1096,7 @@ class TestTodayTomorrowWithTimestamps:
 
 
 class TestComputeStepDurationsSingleEntry:
-    """Cover compute_step_durations_hours with <=1 entries (line 445)."""
+    """Cover compute_step_durations_hours with <=1 entries."""
 
     def test_single_start_time_returns_full_interval(self):
         """A single-entry start_times list returns [full_h]."""
@@ -1122,7 +1122,7 @@ class TestComputeStepDurationsSingleEntry:
 
 
 class TestSolarPositionZenith:
-    """Cover _solar_position azimuth=180 fallback when cos_elev < 1e-6 (line 578)."""
+    """Cover _solar_position azimuth=180 fallback when cos_elev < 1e-6."""
 
     def test_zenith_azimuth_fallback(self):
         """When elevation = 90°, azimuth returns 180° (the undefined zenith fallback)."""

@@ -174,7 +174,7 @@ async def test_async_added_to_hass_no_last_state_stays_on():
 
 @pytest.mark.asyncio
 async def test_async_added_to_hass_real_method_with_last_state():
-    """Call the real async_added_to_hass method to cover lines 72-77."""
+    """Call the real async_added_to_hass method to cover."""
     from homeassistant.const import STATE_ON
 
     switch = _make_switch(is_on_initial=False)

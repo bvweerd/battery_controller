@@ -681,7 +681,7 @@ class TestBatterySubentrySetpointSensor:
 
 
 class TestGetOptimizationResultNone:
-    """Cover _get_optimization_result when coordinator.data is None (lines 158-160)."""
+    """Cover _get_optimization_result when coordinator.data is None."""
 
     def test_returns_none_when_data_is_none(self):
         from custom_components.battery_controller.sensor import (
@@ -695,7 +695,7 @@ class TestGetOptimizationResultNone:
 
 
 class TestBatteryScheduleSensorFeedInForecastModel:
-    """Cover BatteryScheduleSensor feed_in_price_forecast_model branch (line 288)."""
+    """Cover BatteryScheduleSensor feed_in_price_forecast_model branch."""
 
     def test_feed_in_price_forecast_model_in_attrs(self):
         from custom_components.battery_controller.sensor import BatteryScheduleSensor
@@ -721,7 +721,7 @@ class TestBatteryScheduleSensorFeedInForecastModel:
 
 
 class TestConsumptionForecastSensorDataNone:
-    """Cover ConsumptionForecastSensor extra_state_attributes when data=None (line 404)."""
+    """Cover ConsumptionForecastSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
         coord = _make_forecast_coord(data=None)
@@ -730,7 +730,7 @@ class TestConsumptionForecastSensorDataNone:
 
 
 class TestNetGridForecastSensorDataNone:
-    """Cover NetGridForecastSensor extra_state_attributes when data=None (line 429)."""
+    """Cover NetGridForecastSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
         coord = _make_forecast_coord(data=None)
@@ -739,7 +739,7 @@ class TestNetGridForecastSensorDataNone:
 
 
 class TestCurrentGridPowerSensorDataNone:
-    """Cover CurrentGridPowerSensor extra_state_attributes when data=None (line 568)."""
+    """Cover CurrentGridPowerSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
         coord = _make_opt_coord(data=None)
@@ -748,7 +748,7 @@ class TestCurrentGridPowerSensorDataNone:
 
 
 class TestBatteryGridSetpointSensorDataNone:
-    """Cover BatteryGridSetpointSensor extra_state_attributes when data=None (line 617)."""
+    """Cover BatteryGridSetpointSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
         coord = _make_opt_coord(data=None)
@@ -757,7 +757,7 @@ class TestBatteryGridSetpointSensorDataNone:
 
 
 class TestBatterySubentrySetpointSensorDataNone:
-    """Cover BatterySubentrySetpointSensor extra_state_attributes when data=None (line 655)."""
+    """Cover BatterySubentrySetpointSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_coord_data_none(self):
         coord = _make_opt_coord(data=None)
@@ -772,7 +772,7 @@ class TestBatterySubentrySetpointSensorDataNone:
 
 
 class TestPVArrayForecastSensorDataNone:
-    """Cover PVArrayForecastSensor extra_state_attributes when data=None (line 744)."""
+    """Cover PVArrayForecastSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_empty_when_no_data(self):
         from custom_components.battery_controller.sensor import PVArrayForecastSensor
@@ -785,24 +785,24 @@ class TestPVArrayForecastSensorDataNone:
 
 
 class TestOptimizationStatusSensorDataNone:
-    """Cover OptimizationStatusSensor extra_state_attributes when data=None (line 813)."""
+    """Cover OptimizationStatusSensor extra_state_attributes when data=None."""
 
     def test_extra_attrs_returns_basic_dict_when_no_data(self):
         coord = _make_opt_coord(data=None)
         sensor = OptimizationStatusSensor(coord, _make_device(), _make_entry())
         attrs = sensor.extra_state_attributes
-        # Returns basic attrs dict (line 813), not crash
+        # Returns basic attrs dict, not crash
         assert "last_update_success" in attrs
 
 
 # ---------------------------------------------------------------------------
-# async_setup_entry — covers lines 44-130
+# async_setup_entry — covers
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_no_subentries():
-    """async_setup_entry with no subentries calls async_add_entities once (lines 44-78)."""
+    """async_setup_entry with no subentries calls async_add_entities once."""
     from unittest.mock import patch
 
     from homeassistant.helpers import device_registry as dr
@@ -842,7 +842,7 @@ async def test_sensor_async_setup_entry_no_subentries():
 
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_with_battery_subentry():
-    """async_setup_entry with battery subentry creates per-battery sensors (lines 81-102)."""
+    """async_setup_entry with battery subentry creates per-battery sensors."""
     from unittest.mock import patch
 
     from homeassistant.helpers import device_registry as dr
@@ -893,7 +893,7 @@ async def test_sensor_async_setup_entry_with_battery_subentry():
 
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_with_pv_subentry():
-    """async_setup_entry with PV subentry creates per-PV sensors (lines 105-119)."""
+    """async_setup_entry with PV subentry creates per-PV sensors."""
     from unittest.mock import patch
 
     from homeassistant.helpers import device_registry as dr
@@ -941,7 +941,7 @@ async def test_sensor_async_setup_entry_with_pv_subentry():
 
 @pytest.mark.asyncio
 async def test_sensor_async_setup_entry_device_migration():
-    """Migration removes None subentry device associations (lines 121-134)."""
+    """Migration removes None subentry device associations."""
     from unittest.mock import patch
 
     from homeassistant.helpers import device_registry as dr
