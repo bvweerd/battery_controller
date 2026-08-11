@@ -317,6 +317,7 @@ def calculate_step_cost(
     pv_dc_production_w: float = 0.0,  # DC-coupled PV production in W
     charge_eff: float | None = None,  # pre-interpolated from charge_curve
     discharge_eff: float | None = None,  # pre-interpolated from discharge_curve
+    arbitrage_cost_per_kwh: float = 0.0,  # EUR/kWh commanded AC throughput
 ) -> float:
     """Calculate cost for a single time step.
 
@@ -351,6 +352,22 @@ def calculate_step_cost(
        - Every kWh through the battery costs degradation
        - DC PV charging also counts for degradation
        - Prevents unnecessary cycles at small price differences
+
+    3b. Arbitrage hurdle (arbitrage_cost_per_kwh):
+       - Half of the user's min_price_spread, charged per kWh of COMMANDED AC
+         throughput in either direction, so one full cycle carries the whole
+         spread: 2 x degradation + min_price_spread — exactly the threshold the
+         post-DP oscillation filter has always applied.
+       - Passive DC PV charging is exempt: it happens whatever the setpoint is,
+         so it is not an arbitrage decision and must not be discouraged.
+       - Putting the hurdle here rather than only in the post-filter is what
+         makes the DP solve the problem the user actually configured. Applied
+         afterwards, the hurdle removed actions from an already-optimal
+         schedule depending on whether a counterpart happened to fall inside a
+         two-hour window, which cost a large share of the achievable value on
+         quarter-hourly prices.
+       - It is a decision hurdle, not money: reported costs and savings are
+         recomputed with arbitrage_cost_per_kwh = 0.
 
     4. Grid capacity cap:
        - If battery_config.max_grid_power_kw > 0, both import and export are capped.
@@ -396,14 +413,19 @@ def calculate_step_cost(
     # idle mode AND on top of an active AC charge action — an explicit charge
     # command never reduces the amount of DC PV the battery absorbs.
     dc_pv_excess_w = pv_dc_production_w  # DC PV not used by battery -> goes to AC
-    throughput_kwh = 0.0
+    # Throughput is tracked in two buckets: energy the AC setpoint commanded
+    # (an arbitrage decision) and energy the DC MPPT absorbed passively (not a
+    # decision at all). Degradation applies to both; the arbitrage hurdle only
+    # to the commanded part.
+    ac_throughput_kwh = 0.0
+    passive_throughput_kwh = 0.0
 
     if action_w > 0:  # CHARGING
         # AC charging: grid draws the AC setpoint directly; losses are internal
         # to the inverter, captured in the SoC transition.
         grid_to_battery_w = action_w  # grid draws AC setpoint power
         ac_stored_wh = action_w * time_step_hours * charge_eff
-        throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
+        ac_throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
 
         if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
             # DC MPPT charging continues on top of the AC charge, limited by
@@ -418,7 +440,7 @@ def calculate_step_cost(
             )
             dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
             dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
-            throughput_kwh += passive_charge_wh / 1000
+            passive_throughput_kwh = passive_charge_wh / 1000
 
     elif action_w < 0:  # DISCHARGING
         # All DC PV excess goes to AC side when discharging
@@ -428,7 +450,7 @@ def calculate_step_cost(
         usable_power_w = abs(action_w)  # AC output = discharge setpoint
         grid_to_battery_w = -usable_power_w  # Negative = to home
 
-        throughput_kwh = (
+        ac_throughput_kwh = (
             abs(action_w) * time_step_hours / discharge_eff / 1000
         )  # actual battery-drawn Wh
 
@@ -448,10 +470,9 @@ def calculate_step_cost(
             )
             dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
             dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
-            throughput_kwh = passive_charge_wh / 1000
+            passive_throughput_kwh = passive_charge_wh / 1000
         else:
             dc_pv_excess_w = pv_dc_production_w
-            throughput_kwh = 0.0
 
     # DC PV excess converted to AC (through inverter, ~96% efficiency)
     dc_pv_to_ac_w = (
@@ -477,9 +498,14 @@ def calculate_step_cost(
         grid_cost = -energy_kwh * feed_in_price  # Selling (negative cost)
 
     # Degradation costs (all battery throughput, including passive DC PV charging)
-    degradation_cost = throughput_kwh * degradation_cost_per_kwh
+    degradation_cost = (
+        ac_throughput_kwh + passive_throughput_kwh
+    ) * degradation_cost_per_kwh
 
-    return grid_cost + degradation_cost
+    # Arbitrage hurdle on commanded throughput only (see 3b above)
+    arbitrage_cost = ac_throughput_kwh * arbitrage_cost_per_kwh
+
+    return grid_cost + degradation_cost + arbitrage_cost
 
 
 def optimize_battery_schedule(
@@ -575,6 +601,15 @@ def optimize_battery_schedule(
     )
     cost_charge_curve = battery_config.charge_efficiency_curve_parsed
     cost_discharge_curve = battery_config.discharge_efficiency_curve_parsed
+
+    # Arbitrage hurdle: half the configured spread per direction, so a full
+    # cycle carries 2 x degradation + min_price_spread.  This is the same
+    # threshold the post-DP oscillation filter applies, but inside the
+    # objective, so the DP returns the optimum UNDER the user's hurdle instead
+    # of an optimum-without-hurdle that a window heuristic then thins out.
+    # See calculate_step_cost section 3b.
+    arbitrage_cost_per_kwh = max(0.0, min_price_spread) / 2.0
+
     # Discretize SoC space.
     min_step_hours = min(step_durations_hours[:n_steps])
 
@@ -614,6 +649,14 @@ def optimize_battery_schedule(
     power_step_w = max(float(POWER_STEP_W), aligned_step_w)
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
+    if n_soc_states > 1:
+        # Make the grid divide the usable range exactly, so the top state IS
+        # max_soc_wh.  With a fixed resolution a range that is not a whole
+        # multiple of it left the last few Wh unreachable, and the fill-to-max
+        # boundary action then charged to a SoC the state it was credited to did
+        # not represent.  Shrinking the step instead of adding a state keeps the
+        # MAX_SOC_STATES budget intact.
+        soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     # Initialize value function (cost-to-go)
@@ -736,6 +779,16 @@ def optimize_battery_schedule(
         battery_config.max_discharge_at_soc(s_wh / 1000) * 1000 for s_wh in soc_states
     ]
 
+    # Hoisted loop invariants. The inner loop runs t x SoC x actions times —
+    # millions of iterations — so attribute lookups and the nearest-state helper
+    # call are worth taking out of it. The index arithmetic below is the exact
+    # body of _find_nearest_soc_idx, kept identical so results are unchanged.
+    dc_coupled = battery_config.pv_dc_coupled
+    dc_eff_cfg = battery_config.pv_dc_efficiency
+    soc_state0 = soc_states[0]
+    soc_state_step = soc_states[1] - soc_states[0] if n_soc_states > 1 else 1.0
+    last_soc_idx = n_soc_states - 1
+
     # Backward induction
     for t in range(n_steps - 1, -1, -1):
         time_step_hours = step_durations_hours[t]
@@ -746,6 +799,54 @@ def optimize_battery_schedule(
         consumption_w = (
             consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
         )
+        V_next = V[t + 1]
+
+        # Step cost per action, precomputed once for this step. The cost only
+        # depends on the SoC through the DC-PV headroom term, so:
+        #  - no DC PV producing  -> valid for every SoC (limit = +inf)
+        #  - discharging         -> valid for every SoC (branch ignores soc_wh)
+        #  - charging / idle with DC PV -> valid while the passive charge is not
+        #    clipped by headroom, i.e. below cache_soc_limit; only the handful of
+        #    states near full SoC fall through to a real call.
+        # Without this the identical cost is recomputed once per SoC state, i.e.
+        # up to 1001 times per action per step.
+        dc_active = dc_coupled and pv_dc_w > 0
+        passive_full_wh = pv_dc_w * dc_eff_cfg * time_step_hours if dc_active else 0.0
+        step_cost_cache: list[float] = [0.0] * len(actions)
+        cache_soc_limit: list[float] = [INF] * len(actions)
+        for a_idx, action_w in enumerate(actions):
+            probe_soc_wh = 0.0
+            if dc_active and action_w >= 0:
+                # Below this SoC the headroom never clips the passive charge, so
+                # one evaluation covers all of them. Probe at min_soc_wh, which
+                # is always inside that range.
+                ac_stored_wh = (
+                    action_w * time_step_hours * cost_charge_eff[a_idx]
+                    if action_w > 0
+                    else 0.0
+                )
+                cache_soc_limit[a_idx] = max_soc_wh - ac_stored_wh - passive_full_wh
+                probe_soc_wh = float(min_soc_wh)
+                if probe_soc_wh > cache_soc_limit[a_idx]:
+                    cache_soc_limit[a_idx] = -INF  # never usable; always recompute
+                    continue
+            step_cost_cache[a_idx] = calculate_step_cost(
+                time_step_hours=time_step_hours,
+                soc_wh=probe_soc_wh,
+                action_w=action_w,
+                grid_price=grid_price,
+                feed_in_price=feed_in_price,
+                pv_production_w=pv_w,
+                consumption_w=consumption_w,
+                charge_curve=cost_charge_curve,
+                discharge_curve=cost_discharge_curve,
+                degradation_cost_per_kwh=degradation_cost_per_kwh,
+                battery_config=battery_config,
+                pv_dc_production_w=pv_dc_w,
+                charge_eff=cost_charge_eff[a_idx],
+                discharge_eff=cost_discharge_eff[a_idx],
+                arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
+            )
 
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
@@ -768,11 +869,10 @@ def optimize_battery_schedule(
                     new_soc_wh = soc_wh + energy_change_wh
                     if new_soc_wh > max_soc_wh:
                         continue
-                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                        dc_eff = battery_config.pv_dc_efficiency
+                    if dc_active:
                         headroom_wh = max(0.0, max_soc_wh - new_soc_wh)
                         new_soc_wh += min(
-                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                            pv_dc_w * dc_eff_cfg * time_step_hours, headroom_wh
                         )
                 elif action_w < 0:
                     if -action_w > max_dis_w:
@@ -787,18 +887,22 @@ def optimize_battery_schedule(
                 else:
                     # Idle: no explicit AC charge/discharge.
                     # For DC-coupled systems, DC PV passively charges the battery.
-                    if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                        dc_eff = battery_config.pv_dc_efficiency
+                    if dc_active:
                         headroom_wh = max(0.0, max_soc_wh - soc_wh)
                         passive_wh = min(
-                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                            pv_dc_w * dc_eff_cfg * time_step_hours, headroom_wh
                         )
                         new_soc_wh = soc_wh + passive_wh
                     else:
                         new_soc_wh = soc_wh
 
-                # Find nearest SoC state for next step
-                new_soc_idx = _find_nearest_soc_idx(new_soc_wh, soc_states)
+                # Nearest SoC state for the next step (inlined
+                # _find_nearest_soc_idx; identical arithmetic)
+                new_soc_idx = round((new_soc_wh - soc_state0) / soc_state_step)
+                if new_soc_idx < 0:
+                    new_soc_idx = 0
+                elif new_soc_idx > last_soc_idx:
+                    new_soc_idx = last_soc_idx
 
                 # Skip sub-resolution AC actions: a non-zero action that doesn't
                 # cross a SoC state boundary appears "free" to the DP (no future
@@ -809,26 +913,31 @@ def optimize_battery_schedule(
                 if action_w != 0 and new_soc_idx == s_idx:
                     continue
 
-                # Calculate immediate cost (always on the nominal curves)
-                step_cost = calculate_step_cost(
-                    time_step_hours=time_step_hours,
-                    soc_wh=soc_wh,
-                    action_w=action_w,
-                    grid_price=grid_price,
-                    feed_in_price=feed_in_price,
-                    pv_production_w=pv_w,
-                    consumption_w=consumption_w,
-                    charge_curve=cost_charge_curve,
-                    discharge_curve=cost_discharge_curve,
-                    degradation_cost_per_kwh=degradation_cost_per_kwh,
-                    battery_config=battery_config,
-                    pv_dc_production_w=pv_dc_w,
-                    charge_eff=cost_charge_eff[a_idx],
-                    discharge_eff=cost_discharge_eff[a_idx],
-                )
+                # Immediate cost (always on the nominal curves). Taken from the
+                # per-step cache unless this action's cost depends on the SoC.
+                if soc_wh <= cache_soc_limit[a_idx]:
+                    step_cost = step_cost_cache[a_idx]
+                else:
+                    step_cost = calculate_step_cost(
+                        time_step_hours=time_step_hours,
+                        soc_wh=soc_wh,
+                        action_w=action_w,
+                        grid_price=grid_price,
+                        feed_in_price=feed_in_price,
+                        pv_production_w=pv_w,
+                        consumption_w=consumption_w,
+                        charge_curve=cost_charge_curve,
+                        discharge_curve=cost_discharge_curve,
+                        degradation_cost_per_kwh=degradation_cost_per_kwh,
+                        battery_config=battery_config,
+                        pv_dc_production_w=pv_dc_w,
+                        charge_eff=cost_charge_eff[a_idx],
+                        discharge_eff=cost_discharge_eff[a_idx],
+                        arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
+                    )
 
                 # Total cost = immediate + future
-                total_cost = step_cost + V[t + 1][new_soc_idx]
+                total_cost = step_cost + V_next[new_soc_idx]
 
                 if total_cost < best_cost:
                     best_cost = total_cost
@@ -855,8 +964,9 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
-                    total_cost = step_cost + V[t + 1][0]
+                    total_cost = step_cost + V_next[0]
                     if total_cost < best_cost:
                         best_cost = total_cost
                         best_action = -drain_w
@@ -876,8 +986,9 @@ def optimize_battery_schedule(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
-                    total_cost = step_cost + V[t + 1][n_soc_states - 1]
+                    total_cost = step_cost + V_next[last_soc_idx]
                     if total_cost < best_cost:
                         best_cost = total_cost
                         best_action = fill_w
@@ -885,10 +996,10 @@ def optimize_battery_schedule(
             V[t][s_idx] = best_cost
             policy[t][s_idx] = best_action
 
-    # Find current SoC index in the DP state space (needed for forward pass).
-    # Shadow price is computed after post-processing filters below.
-    current_soc_wh = int(current_soc_kwh * 1000)
-    current_soc_idx = _find_nearest_soc_idx(current_soc_wh, soc_states)
+    # Find current SoC index in the DP state space (needed for the shadow
+    # price).  Uses the continuous SoC, like the forward pass below: truncating
+    # to whole Wh first could snap to the neighbouring state near a boundary.
+    current_soc_idx = _find_nearest_soc_idx(current_soc_kwh * 1000.0, soc_states)
 
     # Forward pass: extract optimal schedule
 
@@ -970,6 +1081,7 @@ def optimize_battery_schedule(
                 pv_dc_production_w=pv_dc_w,
                 charge_eff=cost_charge_eff[a_idx],
                 discharge_eff=cost_discharge_eff[a_idx],
+                arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
             )
             total_cost = step_cost + V[t + 1][new_soc_idx]
             if total_cost < best_cost:
@@ -994,6 +1106,7 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
                 total_cost = step_cost + V[t + 1][0]
                 if total_cost < best_cost:
@@ -1017,6 +1130,7 @@ def optimize_battery_schedule(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
                 total_cost = step_cost + V[t + 1][n_soc_states - 1]
                 if total_cost < best_cost:
@@ -1033,6 +1147,14 @@ def optimize_battery_schedule(
             mode_schedule.append(ACTION_IDLE)
         current_soc = best_new_soc
         soc_schedule_kwh.append(current_soc / 1000)
+
+    # Keep the unfiltered schedule so raw_total_cost can be priced the same way
+    # as total_cost. Reading V[0] instead mixed two things that are no longer
+    # comparable: V is the DP objective, which includes the arbitrage hurdle
+    # and is evaluated at a snapped SoC state, while total_cost is real money
+    # for the continuous-SoC schedule actually returned.
+    raw_power_schedule_kw = list(power_schedule_kw)
+    raw_soc_schedule_kwh = list(soc_schedule_kwh)
 
     # Oscillation filter window: at least 2 h, but scale with battery size so
     # that a small battery (5 kWh / 5 kW = 1 h cycle) uses a shorter window and
@@ -1097,6 +1219,9 @@ def optimize_battery_schedule(
     #   λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC_kwh)
     # V is cost (lower is better); more energy lowers cost → gradient negative
     # → shadow price positive.
+    # V carries the arbitrage hurdle, so λ is the marginal value of stored
+    # energy under the user's own hurdle — the same economics the schedule was
+    # planned with, which is what the hybrid-mode thresholds compare against.
     step_kwh = soc_resolution_wh / 1000.0
     raw_shadow_price_eur_kwh = 0.0
     if n_soc_states >= 3 and 0 < current_soc_idx < n_soc_states - 1:
@@ -1109,8 +1234,24 @@ def optimize_battery_schedule(
         else:
             raw_shadow_price_eur_kwh = (V[0][-2] - V[0][-1]) / step_kwh
 
-    # Raw DP cost before any post-processing filters.
-    raw_total_cost = V[0][current_soc_idx]
+    # Cost of the unfiltered schedule, priced exactly like total_cost below
+    # (real money: no arbitrage hurdle) so the two are directly comparable and
+    # raw_savings - savings is the euro price of the post-processing filters.
+    raw_total_cost = _calculate_schedule_total_cost(
+        battery_config=battery_config,
+        power_schedule_kw=raw_power_schedule_kw,
+        soc_schedule_kwh=raw_soc_schedule_kwh,
+        price_forecast=price_forecast[:n_steps],
+        feed_in_forecast=(
+            feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps]
+        ),
+        pv_forecast=pv_forecast[:n_steps],
+        consumption_forecast=consumption_forecast[:n_steps],
+        step_durations_hours=step_durations_hours[:n_steps],
+        degradation_cost_per_kwh=degradation_cost_per_kwh,
+        terminal_price=terminal_price,
+        pv_dc_forecast=pv_dc_forecast[:n_steps],
+    )
 
     baseline_cost = _calculate_baseline_cost(
         price_forecast=price_forecast[:n_steps],
@@ -1416,6 +1557,18 @@ def _filter_micro_cycles(
     filtered_mode = list(mode_schedule)
     any_filtered = False
 
+    # Step 0 is artificially shortened to align with the current price-period
+    # boundary, and can be as little as one minute. Measuring the block on that
+    # duration judged an action by when the optimizer happened to run rather
+    # than by its economics, so an isolated first step was suppressed purely for
+    # starting late in a period. Size it on the reference (full) interval
+    # instead — the same correction the oscillation filter already applies.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
+
     i = 0
     while i < len(filtered_mode):
         current_dir = filtered_mode[i]
@@ -1427,11 +1580,12 @@ def _filter_micro_cycles(
         j = i
         total_energy_kwh = 0.0
         while j < len(filtered_mode) and filtered_mode[j] == current_dir:
-            step_h = (
-                step_durations_hours[j]
-                if j < len(step_durations_hours)
-                else step_durations_hours[-1]
-            )
+            if j == 0:
+                step_h = ref_step_h
+            elif j < len(step_durations_hours):
+                step_h = step_durations_hours[j]
+            else:
+                step_h = step_durations_hours[-1]
             total_energy_kwh += abs(filtered_power[j]) * step_h
             j += 1
 

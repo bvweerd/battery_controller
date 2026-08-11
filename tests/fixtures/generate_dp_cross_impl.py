@@ -237,6 +237,7 @@ def run_sim(case):
         inp["consumption"],
         inp["degradation_cost_per_kwh"],
         power_step_w,
+        arbitrage_cost_per_kwh=max(0.0, inp["min_price_spread"]) / 2.0,
     )
     return power, soc
 

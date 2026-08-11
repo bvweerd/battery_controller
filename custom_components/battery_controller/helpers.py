@@ -665,6 +665,85 @@ def resample_forecast(
     return resampled
 
 
+def resample_to_steps(
+    values: list[float],
+    source_start: datetime,
+    source_interval_minutes: float,
+    step_starts: list[datetime],
+    step_durations_hours: list[float],
+) -> list[float]:
+    """Project a time-anchored series onto the optimizer's actual step windows.
+
+    ``resample_forecast`` converts between interval lengths but assumes both
+    series begin at the same instant. They do not: the forecast pipeline emits
+    quarter-hourly values anchored to the current quarter, while DP step k is
+    anchored to a price-period boundary and step 0 is the (shortened) remainder
+    of the current period. With quarter-hourly prices the two anchors coincide,
+    but with hourly prices a run starting at HH:30 shifted the whole PV and
+    consumption series 30 minutes late — every step got the production of the
+    following half hour, which matters most around the dawn/dusk ramps and the
+    midday peak. The same applies to a feed-in sensor whose native interval
+    differs from the grid price sensor's.
+
+    Each step takes the duration-weighted average of the source intervals it
+    overlaps, so the result is mean-preserving for powers and a proper
+    time-average for prices. Steps beyond the end of the source series are not
+    produced: the returned list stops at the last step with any overlap, and
+    the caller pads the remainder with whatever its own fallback is (zero for
+    PV, the last value for consumption).
+
+    Args:
+        values: Source series, one value per source interval.
+        source_start: UTC start of ``values[0]``.
+        source_interval_minutes: Length of each source interval in minutes.
+        step_starts: UTC start of each target step.
+        step_durations_hours: Length of each target step in hours.
+
+    Returns:
+        One value per covered step, in step order.
+    """
+    if not values or not step_starts or source_interval_minutes <= 0:
+        return []
+
+    source_s = float(source_interval_minutes) * 60.0
+    # Work in seconds relative to source_start so the arithmetic stays exact
+    # for the sub-minute offsets that step 0 can have.
+    result: list[float] = []
+    total_source_s = len(values) * source_s
+
+    for i, step_start in enumerate(step_starts):
+        duration_h = (
+            step_durations_hours[i]
+            if i < len(step_durations_hours)
+            else (step_durations_hours[-1] if step_durations_hours else 0.25)
+        )
+        window_start = (step_start - source_start).total_seconds()
+        window_end = window_start + duration_h * 3600.0
+        # Clip to the source range; a step reaching past the end is still
+        # produced from the part that is covered.
+        clipped_start = max(0.0, window_start)
+        clipped_end = min(total_source_s, window_end)
+        if clipped_end <= clipped_start:
+            break
+
+        first = int(clipped_start // source_s)
+        last = min(len(values) - 1, int((clipped_end - 1e-9) // source_s))
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for j in range(first, last + 1):
+            overlap = min(clipped_end, (j + 1) * source_s) - max(
+                clipped_start, j * source_s
+            )
+            if overlap > 0:
+                weighted_sum += values[j] * overlap
+                total_weight += overlap
+        if total_weight <= 0:
+            break
+        result.append(weighted_sum / total_weight)
+
+    return result
+
+
 def clamp(value: float, min_value: float, max_value: float) -> float:
     """Clamp a value between min and max."""
     return max(min_value, min(max_value, value))
@@ -970,7 +1049,10 @@ def calculate_pv_forecast(
         deviation = min(abs(orientation_deg - 180), abs(orientation_deg - 180 + 360))
         orientation_factor = max(0.5, 1.0 - deviation / 180)
 
-    tilt_factor = 1.0 - abs(tilt_deg - 35) * 0.01
+    # Clamped: the linear penalty goes negative past 135° of tilt, which would
+    # turn the fallback estimate into negative production. The UI cannot reach
+    # that, but this function is public and also serves the diagnostics path.
+    tilt_factor = max(0.1, 1.0 - abs(tilt_deg - 35) * 0.01)
 
     forecast = []
     for radiation in solar_radiation_wm2:

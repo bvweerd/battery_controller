@@ -5,8 +5,16 @@ import math
 import pytest
 
 from custom_components.battery_controller.battery_model import BatteryConfig
-from custom_components.battery_controller.const import MAX_SOC_STATES
-from custom_components.battery_controller.efficiency_curve import EfficiencyCurve
+from custom_components.battery_controller.const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
+    MAX_SOC_STATES,
+)
+from custom_components.battery_controller.efficiency_curve import (
+    EfficiencyCurve,
+    interpolate_efficiency,
+)
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
     _filter_micro_cycles,
@@ -2011,14 +2019,19 @@ class TestOptimizeWithMultiplePacks:
     # ------------------------------------------------------------------
 
     def test_derating_one_pack_only_limits_combined_power(self):
-        """When only one of two packs has high-SoC derating, the combined derated
-        power is the sum of individual derated powers (0 + 0.45 = 0.45 kW).
+        """When only one of two packs derates, the other keeps its full rating.
 
-        The combined threshold is a capacity-weighted average:
-          (100.0 * 5 + 95.0 * 5) / 10 = 97.5 %  →  9.75 kWh of 10 kWh
+        Above the fleet threshold each pack contributes what it can still do
+        there: the derating pack its reduced limit (0.45 kW), the plain pack its
+        nominal rating (1.2 kW) → 1.65 kW combined, not 0.45 kW.
+
+        The threshold is the first one reached, i.e. the lowest of the packs
+        that actually derate (95 %), not a capacity-weighted average that mixes
+        in the disabling 100 % sentinel of the plain pack →  9.5 kWh of 10 kWh.
 
         Starting at 9.8 kWh (98 %) puts us above the combined threshold, so the
-        DP must respect the 0.45 kW derated limit instead of the nominal 2.4 kW.
+        DP must respect the 1.65 kW combined limit instead of the nominal
+        2.4 kW.
         """
         from custom_components.battery_controller.battery_model import (
             aggregate_battery_configs,
@@ -2046,16 +2059,16 @@ class TestOptimizeWithMultiplePacks:
         )
         combined = aggregate_battery_configs([plain, derated])
 
-        # Only the derated pack contributes → combined derated kw = 0 + 0.45 = 0.45
-        assert combined.high_soc_max_charge_kw == pytest.approx(0.45)
-        # Capacity-weighted threshold: (100*5 + 95*5)/10 = 97.5 %
-        assert combined.high_soc_charge_threshold_pct == pytest.approx(97.5)
+        # Plain pack keeps its nominal 1.2 kW, derated pack contributes 0.45 kW
+        assert combined.high_soc_max_charge_kw == pytest.approx(1.65)
+        # Threshold = lowest threshold among the packs that actually derate
+        assert combined.high_soc_charge_threshold_pct == pytest.approx(95.0)
 
         combined_threshold_kwh = (
             combined.high_soc_charge_threshold_pct / 100.0 * combined.capacity_kwh
-        )  # = 9.75 kWh
+        )  # = 9.5 kWh
 
-        # Start at 9.8 kWh (98 %), clearly above the 97.5 % threshold
+        # Start at 9.8 kWh (98 %), clearly above the 95 % threshold
         start_soc = 9.8
         result = self._run(
             combined,
@@ -2063,7 +2076,7 @@ class TestOptimizeWithMultiplePacks:
             price_forecast=[0.05] * 4 + [0.30] * 4,
         )
         # Any charge step while SoC is at or above the combined threshold must
-        # not exceed the derated limit (0.45 kW).
+        # not exceed the combined derated limit (1.65 kW).
         for i, (mode, power) in enumerate(
             zip(result.mode_schedule, result.power_schedule_kw)
         ):
@@ -2071,9 +2084,24 @@ class TestOptimizeWithMultiplePacks:
                 mode == "charging"
                 and result.soc_schedule_kwh[i] >= combined_threshold_kwh
             ):
-                assert power <= 0.46, (
-                    f"step {i}: charge {power:.3f} kW exceeds derated limit 0.45 kW"
+                assert power <= 1.66, (
+                    f"step {i}: charge {power:.3f} kW exceeds derated limit 1.65 kW"
                 )
+
+    def test_derating_absent_on_all_packs_stays_disabled(self):
+        """With no pack derating, the combined config must keep derating off."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        a = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        b = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=2.0)
+        combined = aggregate_battery_configs([a, b])
+
+        assert combined.high_soc_max_charge_kw == 0.0
+        assert combined.low_soc_max_discharge_kw == 0.0
+        # Sentinel of 0 kW means "no derating": full rating at every SoC.
+        assert combined.max_charge_at_soc(combined.max_soc_kwh) == pytest.approx(3.2)
 
     # ------------------------------------------------------------------
     # 7. Floating-point SoC boundary regression (known bug #3)
@@ -2830,3 +2858,321 @@ class TestSocGridBudget:
             cfg.min_soc_kwh - 1e-6 <= s <= cfg.max_soc_kwh + 1e-6
             for s in result.soc_schedule_kwh
         )
+
+
+class TestArbitrageHurdleInObjective:
+    """min_price_spread is part of the DP objective, not a post-hoc filter."""
+
+    @staticmethod
+    def _cfg():
+        return BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+
+    @staticmethod
+    def _run(cfg, prices, spread):
+        n = len(prices)
+        return optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=cfg.min_soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=[p * 0.5 for p in prices],
+            pv_forecast=[0.0] * n,
+            consumption_forecast=[0.5] * n,
+            step_durations_hours=[1.0] * n,
+            degradation_cost_per_kwh=0.002,
+            min_price_spread=spread,
+        )
+
+    def test_thin_spread_is_rejected_by_the_dp_itself(self):
+        """A spread below the hurdle must not be planned in the first place.
+
+        Previously the DP planned it (its objective had no hurdle) and the
+        oscillation filter deleted it afterwards, but only when a counterpart
+        happened to fall inside the lookahead window.
+        """
+        cfg = self._cfg()
+        # 3 ct spread: above 2 x degradation, below a 10 ct hurdle.
+        prices = [0.20, 0.20, 0.23, 0.23, 0.20, 0.20]
+        result = self._run(cfg, prices, spread=0.10)
+        assert all(m == ACTION_IDLE for m in result.mode_schedule)
+
+    def test_wide_spread_is_still_taken(self):
+        """A spread comfortably above the hurdle must survive."""
+        cfg = self._cfg()
+        prices = [0.05, 0.05, 0.60, 0.60, 0.05, 0.05]
+        result = self._run(cfg, prices, spread=0.10)
+        assert ACTION_CHARGING in result.mode_schedule
+        assert ACTION_DISCHARGING in result.mode_schedule
+
+    def test_raising_the_spread_never_increases_cycling(self):
+        """The hurdle is monotone: a higher spread cycles no more than a lower one."""
+        cfg = self._cfg()
+        prices = [0.10, 0.12, 0.18, 0.22, 0.16, 0.11, 0.19, 0.24]
+
+        def throughput(spread):
+            r = self._run(cfg, prices, spread)
+            return sum(abs(p) for p in r.power_schedule_kw)
+
+        assert throughput(0.20) <= throughput(0.05) + 1e-9
+        assert throughput(0.05) <= throughput(0.0) + 1e-9
+
+    def test_reported_costs_exclude_the_hurdle(self):
+        """The hurdle steers decisions; it is not money and must not be billed.
+
+        Two runs whose schedules are identical must report identical costs,
+        whatever hurdle produced them.
+        """
+        cfg = self._cfg()
+        prices = [0.05, 0.05, 0.60, 0.60, 0.05, 0.05]
+        low = self._run(cfg, prices, spread=0.0)
+        high = self._run(cfg, prices, spread=0.10)
+        assert low.power_schedule_kw == pytest.approx(high.power_schedule_kw)
+        assert low.total_cost == pytest.approx(high.total_cost)
+        assert low.savings == pytest.approx(high.savings)
+
+    def test_passive_dc_pv_is_exempt_from_the_hurdle(self):
+        """Free DC PV is not an arbitrage decision and must not be discouraged."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=True,
+            pv_dc_efficiency=0.97,
+        )
+        common = dict(
+            time_step_hours=1.0,
+            soc_wh=cfg.min_soc_kwh * 1000,
+            action_w=0.0,
+            grid_price=0.20,
+            feed_in_price=0.10,
+            pv_production_w=0.0,
+            consumption_w=500.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.002,
+            battery_config=cfg,
+            pv_dc_production_w=2000.0,
+        )
+        without = calculate_step_cost(**common, arbitrage_cost_per_kwh=0.0)
+        with_hurdle = calculate_step_cost(**common, arbitrage_cost_per_kwh=0.05)
+        assert with_hurdle == pytest.approx(without)
+
+    def test_commanded_throughput_carries_the_hurdle(self):
+        """One full cycle costs 2 x degradation + min_price_spread per kWh."""
+        cfg = self._cfg()
+        common = dict(
+            time_step_hours=1.0,
+            soc_wh=5000.0,
+            grid_price=0.20,
+            feed_in_price=0.10,
+            pv_production_w=0.0,
+            consumption_w=0.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.0,
+            battery_config=cfg,
+        )
+        hurdle = 0.025  # = min_price_spread / 2
+        charge = calculate_step_cost(
+            **common, action_w=1000.0, arbitrage_cost_per_kwh=hurdle
+        )
+        charge_free = calculate_step_cost(
+            **common, action_w=1000.0, arbitrage_cost_per_kwh=0.0
+        )
+        stored_kwh = 1.0 * math.sqrt(0.90)
+        assert charge - charge_free == pytest.approx(stored_kwh * hurdle)
+
+
+class TestSocGridExactFit:
+    """The DP SoC grid must land exactly on max_soc_kwh."""
+
+    @pytest.mark.parametrize(
+        "capacity_kwh, min_pct, max_pct",
+        [
+            (10.0, 10.0, 90.0),  # 8000 Wh: whole multiple of the 10 Wh target
+            (10.005, 10.0, 90.0),  # 8004 Wh: not a whole multiple
+            (7.68, 15.0, 95.0),
+            (55.0, 5.0, 95.0),  # coarsened by the MAX_SOC_STATES budget
+        ],
+    )
+    def test_top_state_is_max_soc(self, capacity_kwh, min_pct, max_pct):
+        cfg = BatteryConfig(
+            capacity_kwh=capacity_kwh,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=min_pct,
+            max_soc_percent=max_pct,
+        )
+        min_wh = round(cfg.min_soc_kwh * 1000)
+        max_wh = round(cfg.max_soc_kwh * 1000)
+        res = compute_soc_resolution_wh(min_wh, max_wh)
+        n = int(round((max_wh - min_wh) / res)) + 1
+        assert n <= MAX_SOC_STATES + 1
+        exact_res = (max_wh - min_wh) / (n - 1)
+        top = min_wh + (n - 1) * exact_res
+        assert top == pytest.approx(max_wh, abs=1e-6)
+
+    def test_fill_to_max_reaches_max_soc(self):
+        """The fill-to-max boundary action must end exactly at max_soc."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.005,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=cfg.max_soc_kwh - 0.05,
+            price_forecast=[0.01, 0.90, 0.90],
+            feed_in_forecast=[0.005, 0.45, 0.45],
+            pv_forecast=[0.0] * 3,
+            consumption_forecast=[0.0] * 3,
+            step_durations_hours=[1.0] * 3,
+            degradation_cost_per_kwh=0.001,
+            min_price_spread=0.0,
+        )
+        assert max(result.soc_schedule_kwh) <= cfg.max_soc_kwh + 1e-6
+
+
+class TestStepCostCacheInvariant:
+    """The per-step cost cache relies on step cost being SoC-independent.
+
+    simulate_diagnostics.py has no such cache, so tests/test_cross_impl.py is
+    the end-to-end check that it changes no result. These tests pin the
+    precondition the cache is built on.
+    """
+
+    @staticmethod
+    def _cfg(dc_coupled):
+        return BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve="0:0.88, 5:0.96",
+            discharge_efficiency_curve="0:0.86, 5:0.95",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=dc_coupled,
+            pv_dc_efficiency=0.97,
+        )
+
+    def _cost(self, cfg, soc_wh, action_w, pv_dc_w):
+        return calculate_step_cost(
+            time_step_hours=0.25,
+            soc_wh=soc_wh,
+            action_w=action_w,
+            grid_price=0.22,
+            feed_in_price=0.08,
+            pv_production_w=300.0,
+            consumption_w=700.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.003,
+            battery_config=cfg,
+            pv_dc_production_w=pv_dc_w,
+            arbitrage_cost_per_kwh=0.02,
+        )
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0, 0.0, 100.0, 3000.0])
+    def test_soc_independent_without_dc_pv(self, action_w):
+        """No DC PV: cost is the same at every SoC, so one probe covers all."""
+        cfg = self._cfg(dc_coupled=False)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 0.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 9000.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0])
+    def test_discharge_soc_independent_with_dc_pv(self, action_w):
+        """Discharging never reads the SoC, DC PV or not."""
+        cfg = self._cfg(dc_coupled=True)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 2000.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 8999.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [0.0, 1000.0])
+    def test_charge_and_idle_soc_independent_below_headroom_limit(self, action_w):
+        """With DC PV, charge/idle cost is constant until headroom clips it."""
+        cfg = self._cfg(dc_coupled=True)
+        pv_dc_w = 2000.0
+        max_soc_wh = cfg.max_soc_kwh * 1000
+        charge_eff = interpolate_efficiency(
+            cfg.charge_efficiency_curve_parsed, abs(action_w) / 1000.0
+        )
+        ac_stored_wh = action_w * 0.25 * charge_eff if action_w > 0 else 0.0
+        passive_full_wh = pv_dc_w * cfg.pv_dc_efficiency * 0.25
+        limit = max_soc_wh - ac_stored_wh - passive_full_wh
+
+        below = [
+            self._cost(cfg, soc_wh, action_w, pv_dc_w)
+            for soc_wh in (1000.0, 3000.0, limit - 1.0, limit)
+        ]
+        assert below == pytest.approx([below[0]] * len(below))
+
+        # Above the limit the headroom clips the passive charge, so the cost
+        # genuinely does depend on SoC and the cache must not be used.
+        clipped = self._cost(cfg, limit + 200.0, action_w, pv_dc_w)
+        assert clipped != pytest.approx(below[0])
+
+
+class TestMicroCycleFirstStep:
+    """The shortened first step must not be judged as a micro-cycle."""
+
+    def test_short_first_step_is_sized_on_the_reference_interval(self):
+        """A one-minute step 0 is a full-period action seen late, not a micro-cycle.
+
+        Step 0 covers only the remainder of the current price period, so a
+        2 kW action there moves 0.03 kWh on paper and used to be suppressed for
+        falling under MIN_CYCLE_KWH — purely because the optimizer happened to
+        run just before a period boundary.
+        """
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[2.0, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 2 kW over the 0.25 h reference interval = 0.5 kWh > 0.2 kWh
+        assert mode[0] == ACTION_CHARGING
+        assert power[0] == pytest.approx(2.0)
+
+    def test_genuine_micro_cycle_is_still_removed(self):
+        """A block that is small on its own full interval is still suppressed."""
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[0.2, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 0.2 kW over 0.25 h = 0.05 kWh < 0.2 kWh
+        assert mode[0] == ACTION_IDLE
+        assert power[0] == pytest.approx(0.0)

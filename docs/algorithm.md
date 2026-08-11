@@ -72,7 +72,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `consumption_forecast[t]` | kW | Expected household consumption for each step |
 | `step_durations_hours[t]` | h | Duration of each time step (typically 0.25 h = 15 min) |
 | `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ (2 × usable_kwh)` — one cycle is charge + discharge throughput) |
-| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage |
+| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage. Enters the DP objective as `min_price_spread / 2` per kWh of commanded throughput (see §4.5), so a full cycle must clear `2 × degradation + min_price_spread` |
 
 **Battery configuration:**
 
@@ -102,9 +102,10 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
-n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
-soc_states[i] = min_soc_wh + i × soc_resolution_wh
+soc_res_target   = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
+n_soc_states     = round((max_soc_wh - min_soc_wh) / soc_res_target) + 1
+soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)   # exact fit
+soc_states[i]    = min_soc_wh + i × soc_resolution_wh
 ```
 
 - **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the base grid constant; the power step is derived from it.
@@ -112,6 +113,7 @@ soc_states[i] = min_soc_wh + i × soc_resolution_wh
 - The cap engages only above 10 kWh of usable range (`MAX_SOC_STATES × SOC_RESOLUTION_WH`). Typical home batteries keep the exact 10 Wh grid and are unaffected.
 - At the cap the resolution is 0.1% of usable capacity (e.g. 44 Wh on a 44 kWh range), well below SoC sensor accuracy (~1%). Changing the grid does shift which SoC levels are representable, so realized savings move by a few percent in either direction — this is discretization jitter, not a systematic loss, and is inherent to any grid choice.
 - Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
+- The resolution is shrunk so the grid divides the usable range exactly, making the top state exactly `max_soc_wh`. With a fixed resolution a range that is not a whole multiple of it left the last few Wh unreachable, and the fill-to-max boundary action then charged to a SoC that the state it was credited to did not represent. Shrinking the step rather than adding a state keeps the `MAX_SOC_STATES` budget intact.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
@@ -216,7 +218,10 @@ When charging at AC setpoint `P` (W):
 
 3. **Remaining DC PV** not absorbed by the battery flows to AC through the inverter at 96% efficiency.
 
-4. **Throughput**: `(ac_stored_wh + passive_charge_wh) / 1000` kWh (for degradation).
+4. **Throughput**: tracked in two buckets — `ac_stored_wh / 1000` kWh commanded
+   by the setpoint and `passive_charge_wh / 1000` kWh absorbed passively by the
+   MPPT. Degradation applies to both; the arbitrage hurdle (§4.5) only to the
+   commanded part.
 
 ### 4.3 Discharging (`action_w < 0`)
 
@@ -256,10 +261,35 @@ grid_cost = energy_kwh × grid_price      (if net_grid_w > 0: buying)
           = -energy_kwh × feed_in_price  (if net_grid_w < 0: selling)
 
 degradation_cost_per_kwh = degradation_cost_per_cycle / (2 × usable_kwh)  (conversion in coordinator; a full cycle = 2 × usable_kwh throughput)
-degradation_cost = throughput_kwh × degradation_cost_per_kwh
+degradation_cost = (ac_throughput_kwh + passive_throughput_kwh) × degradation_cost_per_kwh
 
-step_cost = grid_cost + degradation_cost
+arbitrage_cost_per_kwh = min_price_spread / 2
+arbitrage_cost = ac_throughput_kwh × arbitrage_cost_per_kwh
+
+step_cost = grid_cost + degradation_cost + arbitrage_cost
 ```
+
+**Arbitrage hurdle.** `min_price_spread` is the user's "do not bother below this"
+threshold. Charging half of it per kWh of **commanded** throughput in each
+direction makes one full cycle carry `2 × degradation + min_price_spread` — the
+same threshold the oscillation filter (§8.1) applies, but now inside the
+objective the DP minimises.
+
+Passive DC-PV charging is exempt: the MPPT absorbs it whatever the AC setpoint
+is, so it is not an arbitrage decision and must not be discouraged. That is why
+throughput is tracked in two buckets.
+
+The hurdle steers decisions but is not money: `total_cost`, `raw_total_cost` and
+`savings` are all recomputed over the resulting schedule with
+`arbitrage_cost_per_kwh = 0`, so reported figures stay comparable to the
+battery-free baseline.
+
+Applying the hurdle only afterwards, as the filter used to do on its own, meant
+the DP solved a different problem than the one configured and a window
+heuristic then thinned out the answer. On quarter-hourly prices that cost 12 %
+to 61 % of the achievable savings in measured scenarios; with the hurdle in the
+objective the same filter removes 0.1 % to 1 %, because there is little left for
+it to find.
 
 ---
 
@@ -377,7 +407,10 @@ After the forward pass, two filters clean up the schedule.
 
 ### 8.1 Oscillation Filter
 
-The DP sometimes schedules rapid charge↔discharge switches that are technically cost-optimal within the discrete state space but produce excessive battery cycling with little financial benefit.
+Since `min_price_spread` moved into the DP objective (§4.5), the schedule
+reaching this filter already respects the arbitrage threshold. The filter is now
+a safety net for discretisation artefacts rather than the mechanism that
+enforces the threshold, and it typically changes nothing.
 
 **Minimum profitable spread**: For arbitrage to be worthwhile, the discharge price must exceed the charge price by at least:
 
@@ -435,6 +468,8 @@ This flag is a manual override, intended to be toggled by a Home Assistant autom
 ### 8.2 Micro-Cycle Filter
 
 Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
+
+Step 0 is sized on the reference (full) interval rather than its own, shortened duration. It covers only the remainder of the current price period and can be as little as a minute, so measuring it on that duration judged an action by when the optimizer happened to run rather than by its economics — the same correction the oscillation filter applies to its lookahead window.
 
 ---
 
@@ -502,6 +537,8 @@ Several implementation details prevent subtle correctness bugs:
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | Efficiency curve scalar | `round_trip_efficiency = chg_eff_repr × dis_eff_repr`, each the mean of its curve over 5..95 % of nominal power — never the zero-power value, which is the worst point of a realistic curve |
 | Derating precomputed outside `t`-loop | `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are arrays computed once from `soc_states` before the backward pass, avoiding repeated method calls in the tight inner loop |
+| Step cost recomputed per SoC state | The step cost only depends on SoC through the DC-PV headroom term. Each step precomputes one cost per action plus the SoC below which it is valid: unbounded without DC PV and for every discharge action, the headroom threshold for charge/idle under DC PV. Roughly a 3.4x solve-time reduction; results are unchanged, which `tests/test_cross_impl.py` proves because `simulate_diagnostics.py` has no such cache |
+| Forecast series anchored elsewhere | PV, consumption and feed-in are projected onto the DP's own step windows with `resample_to_steps` rather than resampled by interval length, which assumed both series started at the same instant and shifted them by up to 45 minutes on hourly prices |
 
 ## 12. Variable Price Intervals (15-min / 30-min / hourly)
 
@@ -613,6 +650,10 @@ Output: power_schedule_kw, mode_schedule, soc_schedule_kwh,
 ## 12. Multi-Battery Dispatch
 
 The DP optimizer treats all configured batteries as a single aggregated virtual battery (`aggregate_battery_configs`). After the optimizer produces a combined setpoint, `_split_setpoint` distributes it across the individual inverters.
+
+**Aggregating SoC-dependent derating.** The fleet is assumed to sit at a common relative SoC, so above the fleet threshold the combined limit is the sum of what each pack can still do there: its own derated limit if it derates, its full rating if it does not. The threshold is the first one reached — the lowest of the packs that actually derate for charging, the highest for discharging — not a capacity-weighted average, which would mix real thresholds with the 100 %/0 % sentinels of packs that do not derate and, paired with a sum of only the derated powers, cap the whole fleet at one pack's reduced rating.
+
+Entry-level settings (the grid capacity cap, DC coupling) are not battery properties and are overlaid onto the aggregate by the coordinator's `_apply_entry_level_config`.
 
 ### SoC-gap triggered concentration
 

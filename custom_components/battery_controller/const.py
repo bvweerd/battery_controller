@@ -168,7 +168,24 @@ DEFAULT_PV_DC_EFFICIENCY = 0.97
 # Default values - Advanced settings
 DEFAULT_TIME_STEP_MINUTES = 15
 DEFAULT_OPTIMIZATION_INTERVAL_MINUTES = 15
-DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.04  # EUR per full charge+discharge cycle
+# EUR per full charge+discharge cycle, derived rather than guessed:
+#
+#   replacement cost      250 EUR/kWh   (installed LFP home battery)
+#   cycle life           6000 cycles    (at 80 % depth of discharge)
+#   usable capacity          8 kWh      (the 10 kWh default at 10-90 % SoC)
+#
+#   per kWh throughput = 250 / 6000 / (2 x 0.8) = 0.026 EUR/kWh
+#   per cycle          = 0.026 x 2 x 8          = 0.42 EUR/cycle
+#
+# The coordinator converts back with degradation / (2 x usable_kwh), so the
+# per-kWh figure the optimizer sees is independent of battery size; only the
+# per-cycle presentation scales with the default capacity.
+#
+# The previous default of 0.04 EUR/cycle worked out at 0.0025 EUR/kWh, an order
+# of magnitude below any plausible replacement cost, which left the DP with
+# almost no reason to avoid cycling. Users who set their own value keep it;
+# this only changes the starting point.
+DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.42
 DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
 
 # Default values - Manual control
@@ -227,9 +244,12 @@ CONF_MAX_GRID_POWER_KW = "max_grid_power_kw"
 DEFAULT_MAX_GRID_POWER_KW = 0.0  # kW, 0 = no cap
 
 # Algorithm thresholds
-MIN_PV_SURPLUS_KW = (
-    0.05  # kW (50 W) — minimum surplus to apply PV opportunity-cost pricing
-)
+# kW (50 W) — minimum surplus to apply PV opportunity-cost pricing.
+# Not read by the integration: the DP prices PV surplus through the feed-in
+# forecast directly. It is the authoritative copy of the value the diagnostic
+# analyzer applies in docs/analyzer/index.html, kept here so the two do not
+# drift apart silently.
+MIN_PV_SURPLUS_KW = 0.05
 POWER_IDLE_THRESHOLD_KW = (
     0.001  # kW (1 W) — power below this is treated as idle in the schedule
 )
@@ -251,10 +271,6 @@ WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this 
 # Such a sample is unbounded in magnitude — observed values reach 10^8 kW — and
 # a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
 MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
-
-SOC_UNCERTAINTY_RESERVE_FRACTION = (
-    0.10  # max fraction of capacity reserved for solar forecast uncertainty
-)
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode

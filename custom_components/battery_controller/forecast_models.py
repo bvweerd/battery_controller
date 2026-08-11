@@ -767,12 +767,26 @@ class PriceForecastModel:
         overall = self._overall_avg or 0.20
 
         def _sharpen(vals: list[float]) -> float:
-            """Return avg ± k×std, direction based on deviation from overall avg."""
-            avg = sum(vals) / len(vals)
-            variance = sum((v - avg) ** 2 for v in vals) / len(vals)
+            """Return avg ± k×std, direction based on deviation from overall avg.
+
+            The amplification is shrunk by (n-1)/n. A bin only needs
+            _MIN_SAMPLES (2) observations to be used, and at n = 2 the spread of
+            two points is not evidence of a peak — it is the difference between
+            two draws. Shrinking towards the plain average there, and relaxing
+            to the full amplification as samples accumulate, keeps the
+            peak/valley structure the sharpening exists for without letting two
+            noisy hours invent one. The sample standard deviation (n-1
+            denominator) is used for the same reason.
+            """
+            n = len(vals)
+            avg = sum(vals) / n
+            if n < 2:
+                return float(avg)
+            variance = sum((v - avg) ** 2 for v in vals) / (n - 1)
             std = variance**0.5
             direction = 1.0 if avg >= overall else -1.0
-            return float(avg + direction * self._STD_AMPLIFICATION * std)
+            shrink = (n - 1) / n
+            return float(avg + direction * self._STD_AMPLIFICATION * shrink * std)
 
         result = []
         for h in range(hours):

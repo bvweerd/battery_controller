@@ -350,7 +350,12 @@ def calculate_step_cost(
     pv_dc_production_w=0.0,
     charge_eff=None,
     discharge_eff=None,
+    arbitrage_cost_per_kwh=0.0,
 ):
+    # arbitrage_cost_per_kwh is half the configured min_price_spread, charged
+    # per kWh of COMMANDED AC throughput so one full cycle carries
+    # 2 x degradation + min_price_spread.  Passive DC PV is exempt: it happens
+    # whatever the setpoint is, so it is not an arbitrage decision.
     # charge_eff / discharge_eff may be supplied pre-interpolated (hot-path
     # optimisation); they MUST come from the same curves passed above.
     # Interpolate only when the caller did not pre-compute (mirrors optimizer.py).
@@ -368,14 +373,15 @@ def calculate_step_cost(
     pv_dc_production_w = max(0.0, pv_dc_production_w)
 
     dc_pv_excess_w = pv_dc_production_w
-    throughput_kwh = 0.0
+    ac_throughput_kwh = 0.0
+    passive_throughput_kwh = 0.0
 
     if action_w > 0:
         # AC charging: grid draws the AC setpoint; passive DC MPPT charging
         # continues on top, limited by the remaining headroom.
         grid_to_battery_w = action_w  # grid draws AC setpoint power
         ac_stored_wh = action_w * time_step_hours * charge_eff
-        throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
+        ac_throughput_kwh = ac_stored_wh / 1000  # actual stored Wh via AC
         if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
             max_soc_wh = battery_config.max_soc_kwh * 1000
             headroom_wh = max(0.0, max_soc_wh - soc_wh - ac_stored_wh)
@@ -387,12 +393,12 @@ def calculate_step_cost(
             )
             dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
             dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
-            throughput_kwh += passive_charge_wh / 1000
+            passive_throughput_kwh = passive_charge_wh / 1000
     elif action_w < 0:
         dc_pv_excess_w = pv_dc_production_w
         usable_power_w = abs(action_w)  # AC output = discharge setpoint
         grid_to_battery_w = -usable_power_w
-        throughput_kwh = (
+        ac_throughput_kwh = (
             abs(action_w) * time_step_hours / discharge_eff / 1000
         )  # actual battery-drawn Wh
     else:
@@ -408,10 +414,9 @@ def calculate_step_cost(
             )
             dc_pv_consumed_w = passive_charge_w / dc_eff if dc_eff > 0 else 0.0
             dc_pv_excess_w = max(0.0, pv_dc_production_w - dc_pv_consumed_w)
-            throughput_kwh = passive_charge_wh / 1000
+            passive_throughput_kwh = passive_charge_wh / 1000
         else:
             dc_pv_excess_w = pv_dc_production_w
-            throughput_kwh = 0.0
 
     dc_pv_to_ac_w = (
         dc_pv_excess_w * DC_TO_AC_INVERTER_EFFICIENCY if dc_pv_excess_w > 0 else 0.0
@@ -429,8 +434,11 @@ def calculate_step_cost(
     else:
         grid_cost = -energy_kwh * feed_in_price
 
-    degradation_cost = throughput_kwh * degradation_cost_per_kwh
-    return grid_cost + degradation_cost
+    degradation_cost = (
+        ac_throughput_kwh + passive_throughput_kwh
+    ) * degradation_cost_per_kwh
+    arbitrage_cost = ac_throughput_kwh * arbitrage_cost_per_kwh
+    return grid_cost + degradation_cost + arbitrage_cost
 
 
 def _find_nearest_soc_idx(soc_wh, soc_states):
@@ -497,6 +505,10 @@ def run_dp(
     )
     cost_charge_curve = battery_config.charge_efficiency_curve
     cost_discharge_curve = battery_config.discharge_efficiency_curve
+
+    # Arbitrage hurdle: half the configured spread per direction, so a full
+    # cycle carries 2 x degradation + min_price_spread (mirrors optimizer.py).
+    arbitrage_cost_per_kwh = max(0.0, min_price_spread) / 2.0
     # Scalar at zero power for boundary action estimation
     _chg_eff_seed = _representative_efficiency(
         charge_curve, battery_config.max_charge_power_kw
@@ -506,6 +518,9 @@ def run_dp(
     )
 
     n_soc_states = int(round((max_soc_wh - min_soc_wh) / soc_resolution_wh)) + 1
+    if n_soc_states > 1:
+        # Exact-fit grid so the top state IS max_soc_wh (mirrors optimizer.py).
+        soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)
     soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     INF = float("inf")
@@ -627,6 +642,7 @@ def run_dp(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     charge_eff=cost_charge_eff[action_w],
                     discharge_eff=cost_discharge_eff[action_w],
                 )
@@ -654,6 +670,7 @@ def run_dp(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
                     total_cost = step_cost + V[t + 1][0]
                     if total_cost < best_cost:
@@ -677,6 +694,7 @@ def run_dp(
                         degradation_cost_per_kwh=degradation_cost_per_kwh,
                         battery_config=battery_config,
                         pv_dc_production_w=pv_dc_w,
+                        arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
                     total_cost = step_cost + V[t + 1][n_soc_states - 1]
                     if total_cost < best_cost:
@@ -717,8 +735,15 @@ def forward_pass(
     power_step_w,
     charge_eff_curve_override=None,
     discharge_eff_curve_override=None,
+    *,
+    arbitrage_cost_per_kwh,
 ):
-    """Execute the forward pass via V-table re-evaluation at the actual continuous SoC."""
+    """Execute the forward pass via V-table re-evaluation at the actual continuous SoC.
+
+    arbitrage_cost_per_kwh has no default on purpose: the backward pass applies
+    the hurdle, so a forward pass that silently omitted it would re-evaluate the
+    V table under a different objective and pick different actions.
+    """
     # Overrides apply to SoC TRANSITIONS only; costs use the nominal curves
     # (mirrors optimizer.py).
     charge_curve = (
@@ -836,6 +861,7 @@ def forward_pass(
                 degradation_cost_per_kwh=degradation_cost_per_kwh,
                 battery_config=battery_config,
                 pv_dc_production_w=pv_dc_w,
+                arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 charge_eff=cost_charge_eff[action_w],
                 discharge_eff=cost_discharge_eff[action_w],
             )
@@ -867,6 +893,7 @@ def forward_pass(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
                 total_cost = step_cost + V[t + 1][0]
                 if total_cost < best_cost:
@@ -892,6 +919,7 @@ def forward_pass(
                     degradation_cost_per_kwh=degradation_cost_per_kwh,
                     battery_config=battery_config,
                     pv_dc_production_w=pv_dc_w,
+                    arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
                 total_cost = step_cost + V[t + 1][n_soc_states - 1]
                 if total_cost < best_cost:
@@ -926,9 +954,16 @@ def profitability_analysis(
     battery_config,
     degradation_cost_per_kwh,
     terminal_price,
+    arbitrage_cost_per_kwh=0.0,
 ):
-    """For each step, compute the profitability of charging/discharging."""
+    """For each step, compute the profitability of charging/discharging.
+
+    arbitrage_cost_per_kwh (= min_price_spread / 2) is part of the DP objective,
+    so break-even prices must include it or this report says an action was
+    profitable that the optimizer correctly refused.
+    """
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
+    decision_cost = degradation_cost_per_kwh + arbitrage_cost_per_kwh
     rows = []
 
     for t, (price, feed_in, dt, pv, cons) in enumerate(
@@ -946,18 +981,16 @@ def profitability_analysis(
         # Net profit of charging 1 kWh into battery now (vs idle)
         # vs gaining terminal_price per kWh at end
         charge_grid_cost = effective_charge_price / sqrt_rte  # EUR per kWh stored
-        charge_profit_vs_terminal = (
-            terminal_price - charge_grid_cost - degradation_cost_per_kwh
-        )
+        charge_profit_vs_terminal = terminal_price - charge_grid_cost - decision_cost
 
         # Net profit of discharging 1 kWh from battery (vs using terminal value)
         discharge_revenue = price * sqrt_rte  # EUR per kWh discharged
         discharge_profit_vs_terminal = (
-            discharge_revenue - terminal_price - degradation_cost_per_kwh
+            discharge_revenue - terminal_price - decision_cost
         )
 
         # Break-even discharge price needed to beat terminal value
-        breakeven_discharge = (terminal_price + degradation_cost_per_kwh) / sqrt_rte
+        breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
 
         rows.append(
             {
@@ -993,10 +1026,12 @@ def print_schedule(
     recorded_power=None,
     recorded_mode=None,
     recorded_soc=None,
+    arbitrage_cost=0.0,
 ):
     """Print a detailed schedule table."""
     sqrt_rte = math.sqrt(battery_config.round_trip_efficiency)
-    breakeven_discharge = (terminal_price + degradation_cost) / sqrt_rte
+    decision_cost = degradation_cost + arbitrage_cost
+    breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
 
     print()
     print("=" * 110)
@@ -1035,8 +1070,8 @@ def print_schedule(
         soc_before = soc_schedule_kwh[t]
         pv_surplus = pv - cons
         eff_charge_price = feed_in if pv_surplus > MIN_PV_SURPLUS_KW else price
-        charge_profit = terminal_price - eff_charge_price / sqrt_rte - degradation_cost
-        discharge_profit = price * sqrt_rte - terminal_price - degradation_cost
+        charge_profit = terminal_price - eff_charge_price / sqrt_rte - decision_cost
+        discharge_profit = price * sqrt_rte - terminal_price - decision_cost
 
         # Mark interesting steps
         marker = ""
@@ -1098,11 +1133,13 @@ def print_summary(
     degradation_cost,
     price_forecast,
     feed_in_forecast,
+    arbitrage_cost=0.0,
 ):
     sqrt_rte = math.sqrt(battery.round_trip_efficiency)
-    breakeven_discharge = (terminal_price + degradation_cost) / sqrt_rte
+    decision_cost = degradation_cost + arbitrage_cost
+    breakeven_discharge = (terminal_price + decision_cost) / sqrt_rte
     breakeven_charge = (
-        terminal_price - degradation_cost
+        terminal_price - decision_cost
     ) * sqrt_rte  # max price to charge at
 
     print()
@@ -1122,6 +1159,14 @@ def print_summary(
     print(
         f"  Degradation cost:         {degradation_cost:.4f} €/kWh"
         f"  ({degradation_cost * usable_kwh_disp:.4f} €/cycle, usable={usable_kwh_disp:.3f} kWh)"
+    )
+    print(
+        f"  Arbitrage hurdle:         {arbitrage_cost:.4f} €/kWh"
+        f"  (min_price_spread / 2, charged on commanded throughput)"
+    )
+    print(
+        f"  Decision cost per kWh:    {decision_cost:.4f} €/kWh"
+        f"  (degradation + hurdle; drives every break-even below)"
     )
     print()
     print(f"  Terminal price (last step): {terminal_price:.4f} €/kWh")
@@ -1143,14 +1188,10 @@ def print_summary(
     print()
 
     discharge_profitable = [
-        p
-        for p in price_forecast
-        if p * sqrt_rte - terminal_price - degradation_cost > 0
+        p for p in price_forecast if p * sqrt_rte - terminal_price - decision_cost > 0
     ]
     charge_profitable = [
-        p
-        for p in price_forecast
-        if terminal_price - p / sqrt_rte - degradation_cost > 0
+        p for p in price_forecast if terminal_price - p / sqrt_rte - decision_cost > 0
     ]
     print(f"  Steps where discharge is profitable: {len(discharge_profitable)}")
     print(f"  Steps where charging is profitable:  {len(charge_profitable)}")
@@ -1187,6 +1228,7 @@ def print_whatif(
     """Show what would happen with different terminal price assumptions."""
     sqrt_rte = math.sqrt(battery.round_trip_efficiency)
     max_price = max(price_forecast)
+    decision_cost = degradation_cost + max(0.0, min_price_spread) / 2.0
 
     print()
     print("=" * 70)
@@ -1204,10 +1246,10 @@ def print_whatif(
         terminal_price,
         terminal_price * 0.8,
         terminal_price * 0.6,
-        (max_price * sqrt_rte - degradation_cost) * 0.99,  # just profitable
+        (max_price * sqrt_rte - decision_cost) * 0.99,  # just profitable
     ]:
         tp = round(tp, 4)
-        breakeven = (tp + degradation_cost) / sqrt_rte
+        breakeven = (tp + decision_cost) / sqrt_rte
         possible = "YES ✓" if max_price >= breakeven else "NO ✗"
         marker = " ← actual" if abs(tp - terminal_price) < 1e-6 else ""
         print(
@@ -1461,6 +1503,7 @@ def main():
         power_step_w=power_step_w,
         charge_eff_curve_override=charge_eff_curve_override,
         discharge_eff_curve_override=discharge_eff_curve_override,
+        arbitrage_cost_per_kwh=max(0.0, min_price_spread) / 2.0,
     )
 
     # Recorded schedule from diagnostics
@@ -1468,6 +1511,7 @@ def main():
     rec_mode = sched.get("mode_schedule")
     rec_soc = sched.get("soc_schedule_kwh")
 
+    arbitrage_cost = max(0.0, min_price_spread) / 2.0
     print_summary(
         battery,
         current_soc_kwh,
@@ -1475,6 +1519,7 @@ def main():
         degradation_cost,
         price_forecast,
         feed_in_forecast,
+        arbitrage_cost=arbitrage_cost,
     )
 
     # Raw vs processed cost comparison from diagnostics
@@ -1508,6 +1553,7 @@ def main():
         recorded_power=rec_power,
         recorded_mode=rec_mode,
         recorded_soc=rec_soc,
+        arbitrage_cost=arbitrage_cost,
     )
 
     print_min_spread_analysis(

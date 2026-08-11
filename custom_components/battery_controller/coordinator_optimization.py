@@ -42,12 +42,12 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
+    CONF_MAX_GRID_POWER_KW,
+    DEFAULT_MAX_GRID_POWER_KW,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
-    CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_DEADBAND_W,
-    DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_HYBRID_PLUS,
@@ -66,10 +66,10 @@ from .forecast_models import PriceForecastModel
 from .helpers import (
     synthesize_timestamps,
     compute_step_durations_hours,
-    extract_price_forecast_with_interval,
     extract_price_forecast_with_timestamps,
     get_sensor_value,
     resample_forecast,
+    resample_to_steps,
 )
 from .optimizer import optimize_battery_schedule, OptimizationResult
 from .zero_grid_controller import create_zero_grid_controller
@@ -133,7 +133,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
+        self._apply_entry_level_config()
 
         # Per-battery state cache (updated by get_current_battery_state)
         self._per_battery_states: dict[str, BatteryState] = {}
@@ -445,11 +445,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._power_consumption_sensors or self._power_production_sensors
         )
         if has_power_sensors:
-            interval_s = float(
-                self.config.get(
-                    CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-                )
-            )
+            # Single source: create_zero_grid_controller already parsed this
+            # from the config, so re-reading it here could drift.
+            interval_s = self.zero_grid_controller.config.response_time_s
             self._unsub_realtime = async_track_time_interval(
                 self.hass,
                 self._handle_realtime_update,
@@ -674,10 +672,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # controller in an over-committed setpoint (e.g. the battery left
         # discharging after a Quooker/kettle spike), which only the next full
         # optimizer run would clear. Instead the flag is handled per-mode below.
-        stale_limit_s = STALE_SENSOR_MULTIPLIER * float(
-            self.config.get(
-                CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-            )
+        stale_limit_s = (
+            STALE_SENSOR_MULTIPLIER * self.zero_grid_controller.config.response_time_s
         )
         grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
 
@@ -812,7 +808,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         battery_setpoints = self._split_setpoint(
-            control_action["target_power_kw"], control_action["mode"]
+            control_action["target_power_kw"], self._control_mode
         )
         self.async_set_updated_data(
             {
@@ -1223,6 +1219,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def _split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
         """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
 
+        ``mode`` is the user-selected CONTROL mode (``self._control_mode``), not
+        the resolved zero-grid-controller mode. The controller only ever reports
+        ``zero_grid`` / ``follow_schedule`` / ``idle`` / ``manual``, so passing
+        that made the hybrid branch below unreachable and put hybrid runs on the
+        directional (charge/discharge) selection criterion, which switches
+        inverters whenever the schedule reverses direction.
+
         Uses SoC-gap triggered concentration:
         - Gap < _SOC_SPLIT_THRESHOLD: concentrate on one battery. Avoids
           splitting tiny setpoints across inverters and provides stable
@@ -1454,16 +1457,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
+        self._apply_entry_level_config()
+        # The zero-grid controller clamps every real-time setpoint with these
+        # limits. It holds its own reference, so rebinding self.battery_config
+        # above would otherwise leave it clamping on the configuration captured
+        # at integration setup — SoC limits and power ratings changed in a
+        # battery subentry would reach the DP but not the ~5 s control loop.
+        self.zero_grid_controller.battery_config = self.battery_config
 
-    def _apply_dc_pv_config(self) -> None:
-        """Overlay entry-level DC-PV configuration onto the aggregated battery config.
+    def _apply_entry_level_config(self) -> None:
+        """Overlay entry-level settings onto the aggregated battery config.
 
-        DC coupling is configured on the PV-array subentries, not on the battery
-        subentries, so BatteryConfig.from_subentry can never set pv_dc_coupled.
-        Without this overlay the optimizer always sees pv_dc_coupled=False and
-        never models passive DC MPPT charging.
+        Two groups of settings live on the config entry rather than on a
+        battery subentry, so ``BatteryConfig.from_subentry`` (the only factory
+        the coordinator uses) can never populate them:
+
+        - **DC coupling** is configured on the PV-array subentries. Without
+          this overlay the optimizer always sees ``pv_dc_coupled=False`` and
+          never models passive DC MPPT charging.
+        - **The grid capacity cap** is a property of the house connection, not
+          of any single battery. ``aggregate_battery_configs`` treats an
+          unset per-battery cap as "unlimited", so without this overlay the
+          configured cap silently never reaches ``calculate_step_cost`` and the
+          optimizer plans (and the baseline credits) grid flows beyond the
+          physical connection.
         """
+        self.battery_config.max_grid_power_kw = float(
+            self.config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
+        )
         if not self.config.get(CONF_PV_DC_COUPLED):
             return
         self.battery_config.pv_dc_coupled = True
@@ -1981,13 +2002,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Native interval of the feed-in forecast; may differ from the grid
         # price sensor (e.g. hourly feed-in vs 15-min grid prices).
         feed_in_interval = price_interval
+        # Anchor of feed_in_forecast[0]. A fixed price has no timeline of its
+        # own, so it inherits the run time and lines up with step 0 by
+        # construction; a sensor forecast carries its own period starts.
+        feed_in_start: datetime = dt_util.utcnow()
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
         if feed_in_sensor:
             feed_in_state = self.hass.states.get(feed_in_sensor)
             if feed_in_state and feed_in_state.state not in ("unknown", "unavailable"):
-                feed_in_forecast, feed_in_interval = (
-                    extract_price_forecast_with_interval(feed_in_state)
+                feed_in_forecast, feed_in_starts, feed_in_interval = (
+                    extract_price_forecast_with_timestamps(feed_in_state)
                 )
+                if feed_in_starts:
+                    feed_in_start = feed_in_starts[0]
                 feed_in_is_dynamic = True
             else:
                 # Sensor unavailable - fall back to fixed price
@@ -2103,18 +2130,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         for ts in price_start_times[1 : len(resampled_prices)]:
             step_start_times_iso.append(ts.isoformat())
 
+        # Absolute step windows, used to project every other series onto the
+        # DP's own time grid. Step 0 runs from now to the next price boundary;
+        # each later step spans one full price period.
+        step_starts: list[datetime] = [now_utc] + list(
+            price_start_times[1 : len(resampled_prices)]
+        )
+        while len(step_starts) < len(resampled_prices):
+            step_starts.append(
+                step_starts[-1] + timedelta(minutes=price_interval)
+                if step_starts
+                else now_utc
+            )
+
         resampled_feed_in = None
         if feed_in_forecast:
-            # Resample from the feed-in sensor's own interval to the grid price
-            # interval. Using price_interval for both would silently misalign
-            # the feed-in series whenever the two sensors publish at different
-            # resolutions (e.g. hourly feed-in with 15-min grid prices).
-            resampled_feed_in = resample_forecast(
-                feed_in_forecast, feed_in_interval, price_interval
+            # Project the feed-in series onto the DP step windows using its own
+            # start time. Resampling by interval alone assumed both series began
+            # at the same instant, which silently shifted the feed-in prices by
+            # up to one grid-price period whenever the two sensors publish at
+            # different resolutions (e.g. hourly feed-in with 15-min prices).
+            resampled_feed_in = resample_to_steps(
+                feed_in_forecast,
+                feed_in_start,
+                feed_in_interval,
+                step_starts,
+                step_durations_hours,
             )
             if not resampled_feed_in:
-                # Downsampling a feed-in series shorter than one grid-price
-                # period yields an empty list. An empty feed-in forecast must
+                # A feed-in series that does not reach the first step window
+                # yields an empty list. An empty feed-in forecast must
                 # never reach the optimizer: each step would fall back to the
                 # grid buy price and the terminal value of stored energy would
                 # become 0, making PV arbitrage look unprofitable. Fall back to
@@ -2126,17 +2171,26 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 resampled_feed_in = [fixed_price] * len(resampled_prices)
 
-        # Resample PV / consumption forecasts from the forecast pipeline's
-        # native interval (15 min; 60 for data produced by older versions)
-        # to the price sensor's native interval.
+        # Project PV / consumption onto the DP step windows. The forecast
+        # pipeline anchors its series to the current quarter hour, the DP steps
+        # to price-period boundaries; with hourly prices those differ by up to
+        # 45 minutes, so resampling by interval length alone shifted the whole
+        # series (see resample_to_steps).
         fc_interval = int(forecast_data.get("forecast_interval_minutes", 60))
-        pv_forecast = resample_forecast(
-            forecast_data.get("pv_forecast_kw", []), fc_interval, price_interval
-        )
-        consumption_forecast = resample_forecast(
-            forecast_data.get("consumption_forecast_kw", []),
+        fc_start = forecast_data.get("forecast_start_utc") or now_utc
+        pv_forecast = resample_to_steps(
+            forecast_data.get("pv_forecast_kw", []),
+            fc_start,
             fc_interval,
-            price_interval,
+            step_starts,
+            step_durations_hours,
+        )
+        consumption_forecast = resample_to_steps(
+            forecast_data.get("consumption_forecast_kw", []),
+            fc_start,
+            fc_interval,
+            step_starts,
+            step_durations_hours,
         )
 
         # Horizon = length of price forecast (the binding constraint)
@@ -2147,7 +2201,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if forecast_data.get("pv_dc_coupled"):
             raw_dc = forecast_data.get("pv_dc_forecast_kw", [])
             if raw_dc and any(v > 0 for v in raw_dc):
-                pv_dc_forecast = resample_forecast(raw_dc, fc_interval, price_interval)
+                pv_dc_forecast = resample_to_steps(
+                    raw_dc, fc_start, fc_interval, step_starts, step_durations_hours
+                )
 
         # PV curtailment override: zero out all PV when the switch is active.
         # The optimizer then plans charging from the grid instead of relying on
@@ -2656,7 +2712,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
         battery_setpoints = self._split_setpoint(
-            combined_setpoint_kw, control_action["mode"]
+            combined_setpoint_kw, self._control_mode
         )
 
         return {
