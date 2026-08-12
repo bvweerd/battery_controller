@@ -631,8 +631,19 @@ PV production and household consumption forecasts are emitted by the forecast co
 
 The optimization coordinator resamples from the pipeline's native interval (published as `forecast_interval_minutes` in the coordinator data; 60 is assumed for data from older versions) to the price interval:
 
-- `resample_forecast(pv_forecast_kw, forecast_interval_minutes, price_interval)` — repetition when upsampling, weighted-average when downsampling
-- Because the forecast series starts at the current quarter-hour (not the current hour), step k of the forecast aligns with price period k for 15-minute price intervals — previously hourly-based series could be misaligned by up to 45 minutes at hour boundaries
+- `resample_to_steps(pv_forecast_kw, forecast_start_utc, forecast_interval_minutes, step_starts, step_durations_hours)` — each DP step takes the duration-weighted average of the source intervals its own window overlaps
+- The projection is by timestamp, not by interval length, because the two series have different anchors: the forecast series starts at the current quarter-hour, while step k starts at a price-period boundary and step 0 is the shortened remainder of the current period. Resampling by interval length alone shifted the whole series by up to 45 minutes at hour boundaries
+
+### Historical-model alignment
+
+The historical price model predicts **per local hour** (its lookup key is hour-of-day × weekday × GHI bin × wind bin). Both places its output is used are anchored on real timestamps rather than on a step count:
+
+- **Horizon extension** — the model starts at the first step the live forecast does not cover (`last live period start + price_interval`), and its hourly output is projected onto those step windows with `resample_to_steps`.
+- **Reference series** (`price_forecast_predicted` / `feed_in_price_forecast_predicted`, published for prediction-vs-actual comparison; never an optimizer input) — the model starts at the local hour containing step 0 and is projected onto the DP's own step grid.
+
+The weather features are sliced from the weather coordinator's own `forecast_start_utc`, so the GHI/wind values handed to the model belong to the hours it is predicting even when the weather series was fetched in an earlier hour.
+
+Anchoring on a step count instead breaks this whenever the live prices do not cover a whole number of hours from the top of the current hour — the normal case for a 15-minute price sensor publishing through midnight — and shifts the entire modelled tail up to a full hour, which moves the next day's charge and discharge windows with it.
 
 ### Past-entry exclusion for timestamp-bearing sensors
 

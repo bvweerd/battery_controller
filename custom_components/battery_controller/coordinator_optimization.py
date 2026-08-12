@@ -88,7 +88,6 @@ from .helpers import (
     compute_step_durations_hours,
     extract_price_forecast_with_timestamps,
     get_sensor_value,
-    resample_forecast,
     resample_to_steps,
     state_has_value,
     usable_state,
@@ -1771,52 +1770,93 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._discharge_calibration, battery_state, energy_totals_now
         )
 
+    def _weather_hour_offset(self, weather: dict[str, Any], target: datetime) -> int:
+        """Index into the weather series for the hour containing ``target``.
+
+        The weather series is anchored to the hour of its own last fetch, which
+        is up to one refresh interval behind the optimizer run. Deriving the
+        offset from that anchor — rather than assuming element 0 is the current
+        hour — keeps the model's GHI/wind features on the hours they describe.
+        """
+        start = weather.get("forecast_start_utc")
+        if isinstance(start, str):
+            start = dt_util.parse_datetime(start)
+        if not isinstance(start, datetime):
+            # No anchor published: fall back to the current hour, which is what
+            # the weather coordinator writes when it does publish one.
+            start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        offset = int(
+            (dt_util.as_utc(target) - dt_util.as_utc(start)).total_seconds() // 3600
+        )
+        return max(0, offset)
+
+    def _model_series(
+        self,
+        model: PriceForecastModel,
+        step_starts: list[datetime],
+        step_durations_hours: list[float],
+    ) -> list[float]:
+        """Project the historical model's hourly prediction onto step windows.
+
+        The model is asked for the hours the steps actually occupy, its weather
+        features are sliced to the same instant, and its hourly output is
+        projected back onto the step windows. Anchoring on real timestamps is
+        what keeps the prediction on the hours it describes: deriving the anchor
+        from a step count instead placed the series up to a full hour late
+        whenever the steps did not start on the hour — which is every run with a
+        15-minute price sensor, and moved the next day's charge and discharge
+        windows with it.
+        """
+        if not step_starts:
+            return []
+        weather = self.weather_coordinator.data or {}
+        # The model buckets by local hour-of-day and weekday, so the anchor is
+        # the start of the local hour containing the first step.
+        model_start = dt_util.as_local(step_starts[0]).replace(
+            minute=0, second=0, microsecond=0
+        )
+        last_duration = step_durations_hours[-1] if step_durations_hours else 1.0
+        horizon_end = step_starts[-1] + timedelta(hours=last_duration)
+        span_s = (horizon_end - model_start).total_seconds()
+        total_hours = max(1, int(-(-span_s // 3600)))  # ceiling
+        offset = self._weather_hour_offset(weather, model_start)
+        ghi = weather.get("radiation_forecast", [])
+        wind = weather.get("wind_speed_forecast", [])
+        raw = model.forecast(
+            hours=total_hours,
+            start_time=model_start,
+            ghi_forecast=ghi[offset:] if ghi else None,
+            wind_forecast=wind[offset:] if wind else None,
+        )
+        series = resample_to_steps(
+            raw, model_start, 60, step_starts, step_durations_hours
+        )
+        # A step past the end of the model output keeps the last known value:
+        # both callers need one value per step, and the model can only run out
+        # at the very end of the horizon.
+        while len(series) < len(step_starts):
+            series.append(series[-1] if series else 0.0)
+        return series[: len(step_starts)]
+
     def _model_extension(
         self,
         model: PriceForecastModel,
-        steps_covered: int,
+        extension_start: datetime,
         steps_needed: int,
         interval_minutes: int,
     ) -> list[float]:
         """Extend a price series past the live forecast with a historical model.
 
-        ``steps_covered`` steps are already covered, so the model is asked for
-        the hours after them and the weather series are sliced to the same
-        offset — the model's GHI/wind features must line up with the hours it
-        is predicting.
+        ``extension_start`` is the start of the first step the extension fills;
+        the steps after it follow at one price period each.
         """
-        hours_already = int(steps_covered * interval_minutes / 60)
-        hours_for_model = (steps_needed * interval_minutes + 59) // 60  # ceiling
-        extension_start = dt_util.now().replace(
-            minute=0, second=0, microsecond=0
-        ) + timedelta(hours=hours_already)
-        weather = self.weather_coordinator.data or {}
-        ghi = weather.get("radiation_forecast", [])
-        wind = weather.get("wind_speed_forecast", [])
-        raw = model.forecast(
-            hours=hours_for_model,
-            start_time=extension_start,
-            ghi_forecast=ghi[hours_already:] if ghi else None,
-            wind_forecast=wind[hours_already:] if wind else None,
+        step_starts = [
+            extension_start + timedelta(minutes=i * interval_minutes)
+            for i in range(steps_needed)
+        ]
+        return self._model_series(
+            model, step_starts, [interval_minutes / 60.0] * steps_needed
         )
-        return resample_forecast(raw, 60, interval_minutes)[:steps_needed]
-
-    def _model_reference_series(
-        self, model: PriceForecastModel, n_steps: int, interval_minutes: int
-    ) -> list[float]:
-        """What the historical model predicts for the horizon being optimized.
-
-        Published alongside the live prices so users can compare prediction
-        against actual; it never feeds the optimizer.
-        """
-        weather = self.weather_coordinator.data or {}
-        total_hours = (n_steps * interval_minutes + 59) // 60
-        raw = model.forecast(
-            hours=total_hours,
-            ghi_forecast=weather.get("radiation_forecast"),
-            wind_forecast=weather.get("wind_speed_forecast"),
-        )
-        return resample_forecast(raw, 60, interval_minutes)[:n_steps]
 
     def _resolve_effective_mode(
         self,
@@ -2283,11 +2323,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
             original_steps = len(resampled_prices)
+            # The extension starts one price period after the last live step,
+            # and the model must be anchored on that same instant.
+            last_ts = price_start_times[-1] if price_start_times else now_utc
+            extension_start = last_ts + timedelta(minutes=price_interval)
             resampled_prices = resampled_prices + self._model_extension(
-                self._price_model, original_steps, steps_needed, price_interval
+                self._price_model, extension_start, steps_needed, price_interval
             )
             # Synthesise timestamps for the extension steps
-            last_ts = price_start_times[-1] if price_start_times else now_utc
             for i in range(1, len(resampled_prices) - original_steps + 1):
                 price_start_times.append(
                     last_ts + timedelta(minutes=i * price_interval)
@@ -2298,14 +2341,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "Extended price horizon from %d to %d steps with historical model",
                 original_steps,
                 len(resampled_prices),
-            )
-
-        # Generate model forecast for price accuracy comparison.
-        # Always computed when live prices are used, so users can compare prediction vs actual.
-        price_forecast_model: list[float] | None = None
-        if self._price_model.has_data() and price_forecast_source.startswith("live"):
-            price_forecast_model = self._model_reference_series(
-                self._price_model, len(resampled_prices), price_interval
             )
 
         # Compute per-step durations: first step = remaining time in current price period,
@@ -2338,6 +2373,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 step_starts[-1] + timedelta(minutes=price_interval)
                 if step_starts
                 else now_utc
+            )
+
+        # Generate model forecast for price accuracy comparison. Always computed
+        # when live prices are used, so users can compare prediction vs actual.
+        # Projected onto the DP step windows, which is why it is built here and
+        # not next to the horizon extension above.
+        price_forecast_model: list[float] | None = None
+        if self._price_model.has_data() and price_forecast_source.startswith("live"):
+            price_forecast_model = self._model_series(
+                self._price_model, step_starts, step_durations_hours
             )
 
         resampled_feed_in = None
@@ -2416,13 +2461,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
             steps_needed = n_steps - len(resampled_feed_in)
             if feed_in_is_dynamic and self._feed_in_price_model.has_data():
-                # Own feed-in model has historical data — use it directly.
+                # Own feed-in model has historical data — use it directly. The
+                # feed-in series is already projected onto the DP step windows,
+                # so the extension picks up at the first step it does not cover.
                 resampled_feed_in.extend(
-                    self._model_extension(
+                    self._model_series(
                         self._feed_in_price_model,
-                        len(resampled_feed_in),
-                        steps_needed,
-                        price_interval,
+                        step_starts[len(resampled_feed_in) :],
+                        step_durations_hours[len(resampled_feed_in) :],
                     )
                 )
                 _LOGGER.debug(
@@ -2449,8 +2495,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             and price_forecast_source.startswith("live")
             and self._feed_in_price_model.has_data()
         ):
-            feed_in_price_forecast_model = self._model_reference_series(
-                self._feed_in_price_model, len(resampled_prices), price_interval
+            feed_in_price_forecast_model = self._model_series(
+                self._feed_in_price_model, step_starts, step_durations_hours
             )
 
         # Get current battery state

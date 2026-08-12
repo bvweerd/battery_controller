@@ -71,7 +71,6 @@ class OptimizationRunHarness:
         self.entry_options: dict[str, Any] = {}
         self.price_model_has_data = False
         self.feed_in_model_has_data = False
-        self.passthrough_resample = True
         # Leave compute_step_durations_hours alone when a test is about
         # the real step windows (a shortened first step, for instance).
         self.real_step_durations = False
@@ -174,11 +173,6 @@ class OptimizationRunHarness:
             mp.setattr(
                 f"{module}.compute_step_durations_hours", lambda *a: self._durations()
             )
-        if self.passthrough_resample:
-            mp.setattr(
-                f"{module}.resample_forecast", lambda values, src, dst: list(values)
-            )
-
         mp.setattr(coord, "_refresh_battery_config", lambda: None)
         mp.setattr(coord, "get_current_battery_state", lambda: self.battery_state)
         mp.setattr(coord, "_get_realtime_grid_w", lambda: self.grid_w)
