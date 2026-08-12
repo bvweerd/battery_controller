@@ -1366,7 +1366,7 @@ function runSimulator() {
           (pv[t]||0)*1000, (consump[t]||0)*1000,
           p.chargeCurve, p.dischargeCurve, degrad,
           p.pvDcCoupled, 0, p.pvDcEfficiency, p.maxGridPowerKw, p.maxSocKwh * 1000,
-          null, null, arbCostSim
+          null, null, arbCostSim, p.maxChargeKw
         );
         const mode = res.modes[t];
         const tr = document.createElement('tr');

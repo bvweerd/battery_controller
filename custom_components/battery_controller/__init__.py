@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -89,6 +89,9 @@ class BatteryControllerData:
     device: DeviceInfo
     battery_devices: dict[str, DeviceInfo]  # keyed by subentry_id
     pv_devices: dict[str, DeviceInfo]  # keyed by subentry_id
+    # entry.options exactly as they stood at setup. Used by _update_listener to
+    # tell an options change from the derived keys `config` also carries.
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 async def _async_handle_reset_efficiency_calibration(
@@ -302,6 +305,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         forecast_coordinator=forecast_coordinator,
         optimization_coordinator=optimization_coordinator,
         config=config,
+        options=dict(entry.options),
         device=device,
         battery_devices=battery_devices,
         pv_devices=pv_devices,
@@ -327,12 +331,20 @@ async def _update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if entry.runtime_data is None:
         return
 
-    # Snapshot from setup: coordinator.config was built as entry.data | entry.options
-    old_snapshot: dict[str, Any] = entry.runtime_data.config
+    # Options as they stood at setup. Compared against the live options over the
+    # UNION of both key sets, so a structural key that was REMOVED counts too:
+    # iterating the new options alone missed that case entirely, and clearing a
+    # sensor selection left the coordinator running on the entity it was set up
+    # with. The options are snapshotted in their own field rather than read off
+    # `config`, which also carries entry.data and derived keys (pv_arrays,
+    # battery_subentries, ...) that are absent from options by construction and
+    # would every one of them read as a removal.
+    old_options: dict[str, Any] = entry.runtime_data.options
 
+    missing = object()
     needs_reload = any(
-        key not in _NO_RELOAD_KEYS and old_snapshot.get(key) != val
-        for key, val in entry.options.items()
+        old_options.get(key, missing) != entry.options.get(key, missing)
+        for key in (set(old_options) | set(entry.options)) - _NO_RELOAD_KEYS
     )
 
     if needs_reload:

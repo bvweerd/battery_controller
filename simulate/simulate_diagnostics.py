@@ -335,6 +335,50 @@ MIN_PV_SURPLUS_KW = 0.05
 DC_TO_AC_INVERTER_EFFICIENCY = 0.96
 
 
+def grid_cap_charge_limit_w(
+    max_grid_power_kw: float, consumption_w: float, ac_pv_w: float
+) -> float:
+    """Largest AC charge setpoint that keeps grid import within the connection cap.
+
+    Mirrors optimizer.grid_cap_charge_limit_w: the cap bounds the action, not
+    the price of the flow. Clipping import cost instead made every watt above
+    the cap free, so the DP charged at full power whenever the cap was binding.
+    """
+    if max_grid_power_kw <= 0:
+        return float("inf")
+    return max(0.0, max_grid_power_kw * 1000.0 - consumption_w + ac_pv_w)
+
+
+def charge_budget_wh(
+    max_charge_power_kw: float, time_step_hours: float, ac_stored_wh: float
+) -> float:
+    """Battery-side charge energy still available in this step, in Wh."""
+    return max(0.0, max_charge_power_kw * 1000.0 * time_step_hours - ac_stored_wh)
+
+
+def passive_dc_charge_wh(
+    pv_dc_production_w: float,
+    dc_efficiency: float,
+    time_step_hours: float,
+    headroom_wh: float,
+    budget_wh: float,
+) -> float:
+    """Energy the DC MPPT absorbs into the battery over one step, in Wh.
+
+    Bounded by production, SoC headroom AND the battery's remaining charge-power
+    budget — the last one stops a DC array larger than the inverter charging the
+    pack faster than it physically can.
+    """
+    return max(
+        0.0,
+        min(
+            pv_dc_production_w * dc_efficiency * time_step_hours,
+            headroom_wh,
+            budget_wh,
+        ),
+    )
+
+
 def calculate_step_cost(
     time_step_hours,
     soc_wh,
@@ -385,8 +429,14 @@ def calculate_step_cost(
         if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
             max_soc_wh = battery_config.max_soc_kwh * 1000
             headroom_wh = max(0.0, max_soc_wh - soc_wh - ac_stored_wh)
-            passive_charge_wh = min(
-                pv_dc_production_w * dc_eff * time_step_hours, headroom_wh
+            passive_charge_wh = passive_dc_charge_wh(
+                pv_dc_production_w,
+                dc_eff,
+                time_step_hours,
+                headroom_wh,
+                charge_budget_wh(
+                    battery_config.max_charge_power_kw, time_step_hours, ac_stored_wh
+                ),
             )
             passive_charge_w = (
                 passive_charge_wh / time_step_hours if time_step_hours > 0 else 0.0
@@ -406,8 +456,14 @@ def calculate_step_cost(
         if battery_config.pv_dc_coupled and pv_dc_production_w > 0:
             max_soc_wh = battery_config.max_soc_kwh * 1000
             headroom_wh = max(0.0, max_soc_wh - soc_wh)
-            passive_charge_wh = min(
-                pv_dc_production_w * dc_eff * time_step_hours, headroom_wh
+            passive_charge_wh = passive_dc_charge_wh(
+                pv_dc_production_w,
+                dc_eff,
+                time_step_hours,
+                headroom_wh,
+                charge_budget_wh(
+                    battery_config.max_charge_power_kw, time_step_hours, 0.0
+                ),
             )
             passive_charge_w = (
                 passive_charge_wh / time_step_hours if time_step_hours > 0 else 0.0
@@ -424,9 +480,11 @@ def calculate_step_cost(
     total_ac_pv_w = pv_production_w + dc_pv_to_ac_w
     net_grid_w = consumption_w - total_ac_pv_w + grid_to_battery_w
 
+    # Export side only: curtailed PV earns nothing, which is the right model.
+    # Import is bounded on the action set instead (grid_cap_charge_limit_w), so
+    # that over-cap import does not become free.
     if battery_config.max_grid_power_kw > 0:
-        cap_w = battery_config.max_grid_power_kw * 1000
-        net_grid_w = max(-cap_w, min(cap_w, net_grid_w))
+        net_grid_w = max(-battery_config.max_grid_power_kw * 1000, net_grid_w)
 
     energy_kwh = abs(net_grid_w) * time_step_hours / 1000
     if net_grid_w > 0:
@@ -585,10 +643,16 @@ def run_dp(
             consumption_forecast[t] * 1000 if t < len(consumption_forecast) else 0
         )
 
+        # Charging is bounded by the battery (SoC derating) and by the grid
+        # connection; whichever binds first wins.
+        step_charge_cap_w = grid_cap_charge_limit_w(
+            battery_config.max_grid_power_kw, consumption_w, pv_w
+        )
+
         for s_idx, soc_wh in enumerate(soc_states):
             best_cost = INF
             best_action = 0.0
-            max_chg_w = soc_max_charge_w[s_idx]
+            max_chg_w = min(soc_max_charge_w[s_idx], step_charge_cap_w)
             max_dis_w = soc_max_discharge_w[s_idx]
 
             for action_w in actions:
@@ -601,10 +665,17 @@ def run_dp(
                     if new_soc_wh > max_soc_wh:
                         continue
                     if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                        dc_eff = battery_config.pv_dc_efficiency
                         headroom_wh = max(0.0, max_soc_wh - new_soc_wh)
-                        new_soc_wh += min(
-                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        new_soc_wh += passive_dc_charge_wh(
+                            pv_dc_w,
+                            battery_config.pv_dc_efficiency,
+                            time_step_hours,
+                            headroom_wh,
+                            charge_budget_wh(
+                                battery_config.max_charge_power_kw,
+                                time_step_hours,
+                                energy_change_wh,
+                            ),
                         )
                 elif action_w < 0:
                     if -action_w > max_dis_w:
@@ -616,12 +687,18 @@ def run_dp(
                         continue
                 else:
                     if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                        dc_eff = battery_config.pv_dc_efficiency
                         headroom_wh = max(0.0, max_soc_wh - soc_wh)
-                        passive_wh = min(
-                            pv_dc_w * dc_eff * time_step_hours, headroom_wh
+                        new_soc_wh = soc_wh + passive_dc_charge_wh(
+                            pv_dc_w,
+                            battery_config.pv_dc_efficiency,
+                            time_step_hours,
+                            headroom_wh,
+                            charge_budget_wh(
+                                battery_config.max_charge_power_kw,
+                                time_step_hours,
+                                0.0,
+                            ),
                         )
-                        new_soc_wh = soc_wh + passive_wh
                     else:
                         new_soc_wh = soc_wh
 
@@ -809,7 +886,13 @@ def forward_pass(
         )
 
         soc_idx = _find_nearest_soc_idx(current_soc, soc_states)
-        max_chg_w = battery_config.max_charge_at_soc(current_soc / 1000) * 1000
+        step_charge_cap_w = grid_cap_charge_limit_w(
+            battery_config.max_grid_power_kw, consumption_w, pv_w
+        )
+        max_chg_w = min(
+            battery_config.max_charge_at_soc(current_soc / 1000) * 1000,
+            step_charge_cap_w,
+        )
         max_dis_w = battery_config.max_discharge_at_soc(current_soc / 1000) * 1000
 
         best_cost = INF
@@ -825,9 +908,18 @@ def forward_pass(
                 if new_soc_wh > max_soc_wh:
                     continue
                 if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                    dc_eff = battery_config.pv_dc_efficiency
                     headroom_wh = max(0.0, float(max_soc_wh) - new_soc_wh)
-                    new_soc_wh += min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
+                    new_soc_wh += passive_dc_charge_wh(
+                        pv_dc_w,
+                        battery_config.pv_dc_efficiency,
+                        time_step_hours,
+                        headroom_wh,
+                        charge_budget_wh(
+                            battery_config.max_charge_power_kw,
+                            time_step_hours,
+                            action_w * time_step_hours * _chg_eff,
+                        ),
+                    )
             elif action_w < 0:
                 if -action_w > max_dis_w:
                     continue
@@ -837,10 +929,16 @@ def forward_pass(
                     continue
             else:
                 if battery_config.pv_dc_coupled and pv_dc_w > 0:
-                    dc_eff = battery_config.pv_dc_efficiency
                     headroom_wh = max(0.0, float(max_soc_wh) - current_soc)
-                    passive_wh = min(pv_dc_w * dc_eff * time_step_hours, headroom_wh)
-                    new_soc_wh = current_soc + passive_wh
+                    new_soc_wh = current_soc + passive_dc_charge_wh(
+                        pv_dc_w,
+                        battery_config.pv_dc_efficiency,
+                        time_step_hours,
+                        headroom_wh,
+                        charge_budget_wh(
+                            battery_config.max_charge_power_kw, time_step_hours, 0.0
+                        ),
+                    )
                 else:
                     new_soc_wh = current_soc
 

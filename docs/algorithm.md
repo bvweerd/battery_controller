@@ -85,7 +85,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `discharge_efficiency_curve` | Discharge efficiency as a function of power (see §4.1) |
 | `pv_dc_coupled` | Whether DC-coupled PV is present |
 | `pv_dc_efficiency` | DC MPPT + DC-DC conversion efficiency (~0.97) |
-| `max_grid_power_kw` | Grid connection cap (0 = unlimited) |
+| `max_grid_power_kw` | Grid connection cap, applied to the action set on import and as curtailment on export (0 = unlimited) — see §4.5 |
 | `high_soc_charge_threshold_pct` | Above this SoC (%), charge is limited to `high_soc_max_charge_kw` |
 | `high_soc_max_charge_kw` | Derated charge limit above threshold (0 = no derating) |
 | `low_soc_discharge_threshold_pct` | Below this SoC (%), discharge is limited to `low_soc_max_discharge_kw` |
@@ -213,7 +213,8 @@ When charging at AC setpoint `P` (W):
    that remains after the AC-charged energy:
    ```
    headroom_wh       = max(0, max_soc_wh - soc_wh - ac_stored_wh)
-   passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh)
+   charge_budget_wh  = max_charge_power_kw × 1000 × dt − ac_stored_wh
+   passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh, charge_budget_wh)
    ```
 
 3. **Remaining DC PV** not absorbed by the battery flows to AC through the inverter at 96% efficiency.
@@ -241,7 +242,8 @@ No explicit grid power, but DC-coupled PV still passively charges the battery up
 
 ```
 headroom_wh      = max_soc_wh - soc_wh
-passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh)
+charge_budget_wh  = max_charge_power_kw × 1000 × dt
+passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh, charge_budget_wh)
 throughput_kwh    = passive_charge_wh / 1000
 ```
 
@@ -252,7 +254,29 @@ total_ac_pv_w = pv_production_w + dc_pv_excess_w × DC_TO_AC_INVERTER_EFF
 net_grid_w    = consumption_w - total_ac_pv_w + grid_to_battery_w
 ```
 
-If `max_grid_power_kw > 0`, `net_grid_w` is clamped to `[-cap, +cap]`.
+If `max_grid_power_kw > 0`, only the **export** side is clamped: `net_grid_w = max(-cap, net_grid_w)`.
+PV that cannot be exported is curtailed, and zero revenue is what curtailment
+costs, so discharging past the cap is self-limiting — it earns nothing and still
+pays degradation.
+
+**Import is deliberately not clamped here.** Capping the *price* of over-cap
+import makes that import free: the SoC keeps rising while the cost stops
+growing, so the DP charges at full power whenever the cap is binding. A 4 kW cap
+produced plans with 7.1 kW of grid flow. The connection limit is a constraint on
+what the battery may *do*, so it bounds the action set instead:
+
+```
+charge_limit_w = max(0, max_grid_power_kw × 1000 − consumption_w + ac_pv_w)
+```
+
+applied alongside the SoC-dependent battery limit in both DP passes
+(`max_chg_w = min(soc_max_charge_w, charge_limit_w)`). `ac_pv_w` is AC-side PV
+only: how much DC-coupled PV reaches the AC bus depends on how much the battery
+absorbs, and assuming none of it does is the bound that cannot be violated.
+
+When household load alone exceeds the cap the headroom is zero, so no charging
+is scheduled — and the resulting over-cap import is still priced in full, in the
+schedule and in the baseline alike.
 
 ```
 energy_kwh = |net_grid_w| × dt / 1000
@@ -326,7 +350,7 @@ V[t][s] = min over all actions a of:
 
 where `s'` is the SoC state after applying action `a`:
 
-- **Charging**: `s' = s + a × dt × charge_eff(|a|/1000)` plus passive DC PV charging up to the remaining headroom (if DC-coupled)
+- **Charging**: `s' = s + a × dt × charge_eff(|a|/1000)` plus passive DC PV charging up to the remaining headroom **and the remaining charge-power budget** (if DC-coupled). The AC setpoint and the MPPT share one battery-side budget of `max_charge_power_kw × dt`, so an array larger than the inverter cannot charge the pack faster than its rating, and an AC command cannot be stacked on top of a full-rate passive charge
 - **Discharging**: `s' = s - |a| × dt / dis_eff(|a|/1000)` (energy drawn from battery, with losses)
 - **Idle**: `s' = s` (or passive DC PV charging if DC-coupled)
 
@@ -412,6 +436,18 @@ reaching this filter already respects the arbitrage threshold. The filter is now
 a safety net for discretisation artefacts rather than the mechanism that
 enforces the threshold, and it typically changes nothing.
 
+**Cost guard.** Its verdict is accepted only when it does not cost money: both
+the raw and the filtered schedule are priced with `_calculate_schedule_total_cost`
+(real money, no arbitrage hurdle) and the cheaper one is returned. The DP
+evaluates the exact cost model, while this filter works from a much cruder
+proxy — it prices every discharged watt above the instantaneous residual load at
+the feed-in price, ignores the terminal value of stored energy, and pairs steps
+by a fixed lookahead window instead of by the SoC trajectory that actually links
+them. Where the two disagree, the DP is right. Measured over simulated days the
+guard was worth ~3 % of achievable savings on quarter-hourly prices and ~0.1 %
+on hourly ones: the finer the price resolution, the more the window heuristic
+misfires.
+
 **Minimum profitable spread**: For arbitrage to be worthwhile, the discharge price must exceed the charge price by at least:
 
 ```
@@ -467,7 +503,11 @@ This flag is a manual override, intended to be toggled by a Home Assistant autom
 
 ### 8.2 Micro-Cycle Filter
 
-Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
+Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that wear per kWh of useful storage becomes disproportionately high — the part of ageing that a per-kWh degradation price cannot express, because it is per cycle rather than per throughput. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
+
+Block energy is measured on the **battery** side — `P × charge_eff × dt` when charging, `P / discharge_eff × dt` when discharging — which is the quantity that actually wears the cells and the same one degradation is priced on. Measuring the AC setpoint instead misjudged blocks near the threshold by the efficiency factor, in opposite directions for the two directions.
+
+Unlike the oscillation filter this is deliberately **not** gated on cost: the wear it avoids is real but unpriced, so a cost guard would disable it entirely. It is not free either — over simulated quarter-hourly days it suppresses a handful of steps per day and costs on the order of 2 % of achievable savings. `MIN_CYCLE_KWH` is the knob: raise it to trade more savings for less wear, lower it for the reverse.
 
 Step 0 is sized on the reference (full) interval rather than its own, shortened duration. It covers only the remainder of the current price period and can be as little as a minute, so measuring it on that duration judged an action by when the optimizer happened to run rather than by its economics — the same correction the oscillation filter applies to its lookahead window.
 

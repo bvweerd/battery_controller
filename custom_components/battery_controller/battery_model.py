@@ -7,6 +7,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from .const import (
+    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+)
 from .efficiency_curve import (
     EfficiencyCurve,
     aggregate_curves,
@@ -346,11 +350,11 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
         )
     else:
         # No battery derates: keep the disabled sentinel (kw == 0) so
-        # max_charge_at_soc returns the nominal rating at every SoC.
-        combined_high_threshold = (
-            sum(c.high_soc_charge_threshold_pct * c.capacity_kwh for c in configs)
-            / total_cap
-        )
+        # max_charge_at_soc returns the nominal rating at every SoC, and the
+        # sentinel threshold to match. A capacity-weighted average of the
+        # per-battery thresholds used to be computed here, which read as if it
+        # mattered — max_charge_at_soc never looks at it while the kW limit is 0.
+        combined_high_threshold = DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT
         combined_high_max_charge_kw = 0.0
 
     discharge_derated = [c for c in configs if c.low_soc_max_discharge_kw > 0]
@@ -365,10 +369,7 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
             for c in configs
         )
     else:
-        combined_low_threshold = (
-            sum(c.low_soc_discharge_threshold_pct * c.capacity_kwh for c in configs)
-            / total_cap
-        )
+        combined_low_threshold = DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT
         combined_low_max_discharge_kw = 0.0
 
     return BatteryConfig._from_aggregated(

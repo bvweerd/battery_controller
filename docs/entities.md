@@ -38,7 +38,7 @@ the entity registry. They are disabled to keep recorder load down.
 | Entity | Unit | Description |
 |--------|------|-------------|
 | Shadow Price of Storage | EUR/kWh | Marginal value of 1 kWh stored right now, derived from the DP value function. Usable as a charge/discharge decision threshold in your own automations. |
-| Estimated Savings | EUR | Cumulative financial benefit versus doing nothing (running total) |
+| Estimated Savings | EUR | Expected benefit of the **current plan** versus doing nothing, over the optimization horizon (up to 36 h). Recomputed on every run, so it moves up and down — it is not a running total. Attributes carry the underlying `baseline_cost` and `optimized_cost`. |
 
 ### Forecast
 

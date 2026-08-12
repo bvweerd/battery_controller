@@ -22,10 +22,9 @@ import pytest
 def coord_with_fake_stores(optimization_coordinator):
     """Coordinator whose calibration stores are in-memory doubles."""
     coord = optimization_coordinator
-    for name in ("_charge_eff_store", "_discharge_eff_store"):
-        store = getattr(coord, name)
-        store.async_load = AsyncMock(return_value=None)
-        store.async_save = AsyncMock()
+    for calibration in (coord._charge_calibration, coord._discharge_calibration):
+        calibration.store.async_load = AsyncMock(return_value=None)
+        calibration.store.async_save = AsyncMock()
     return coord
 
 
@@ -47,7 +46,7 @@ async def test_load_without_stored_data_leaves_nominal_state(coord_with_fake_sto
 async def test_load_restores_samples_and_correction(coord_with_fake_stores):
     """The whole point: learning survives a restart."""
     coord = coord_with_fake_stores
-    coord._charge_eff_store.async_load = AsyncMock(
+    coord._charge_calibration.store.async_load = AsyncMock(
         return_value={"samples": [0.93, 0.94, 0.92], "correction": 0.935}
     )
 
@@ -61,7 +60,7 @@ async def test_load_keeps_only_the_most_recent_samples(coord_with_fake_stores):
     """The window is bounded, so an oversized file must not grow it."""
     coord = coord_with_fake_stores
     stored = [0.90 + i / 1000 for i in range(30)]
-    coord._charge_eff_store.async_load = AsyncMock(
+    coord._charge_calibration.store.async_load = AsyncMock(
         return_value={"samples": stored, "correction": 0.95}
     )
 
@@ -75,7 +74,7 @@ async def test_load_keeps_only_the_most_recent_samples(coord_with_fake_stores):
 async def test_load_coerces_a_string_correction(coord_with_fake_stores):
     """JSON round-trips can hand back a string; it must not poison the maths."""
     coord = coord_with_fake_stores
-    coord._charge_eff_store.async_load = AsyncMock(
+    coord._charge_calibration.store.async_load = AsyncMock(
         return_value={"samples": [], "correction": "0.97"}
     )
 
@@ -90,7 +89,9 @@ async def test_load_falls_back_to_nominal_when_correction_is_absent(
 ):
     """A partial file must not leave the correction undefined."""
     coord = coord_with_fake_stores
-    coord._charge_eff_store.async_load = AsyncMock(return_value={"samples": [0.9]})
+    coord._charge_calibration.store.async_load = AsyncMock(
+        return_value={"samples": [0.9]}
+    )
 
     await coord._async_load_charge_eff_calibration()
 
@@ -109,7 +110,7 @@ async def test_save_writes_samples_and_correction(coord_with_fake_stores):
 
     await coord._async_save_charge_eff_calibration()
 
-    coord._charge_eff_store.async_save.assert_awaited_once_with(
+    coord._charge_calibration.store.async_save.assert_awaited_once_with(
         {"samples": [0.91, 0.93], "correction": 0.92}
     )
 
@@ -121,7 +122,7 @@ async def test_save_serialises_the_deque_as_a_list(coord_with_fake_stores):
 
     await coord._async_save_discharge_eff_calibration()
 
-    payload = coord._discharge_eff_store.async_save.await_args.args[0]
+    payload = coord._discharge_calibration.store.async_save.await_args.args[0]
     assert isinstance(payload["samples"], list)
 
 
@@ -132,11 +133,11 @@ async def test_save_then_load_round_trips(coord_with_fake_stores):
     coord._charge_eff_correction = 0.945
 
     await coord._async_save_charge_eff_calibration()
-    written = coord._charge_eff_store.async_save.await_args.args[0]
+    written = coord._charge_calibration.store.async_save.await_args.args[0]
 
     coord._charge_eff_samples = deque(maxlen=20)
     coord._charge_eff_correction = 1.0
-    coord._charge_eff_store.async_load = AsyncMock(return_value=written)
+    coord._charge_calibration.store.async_load = AsyncMock(return_value=written)
     await coord._async_load_charge_eff_calibration()
 
     assert list(coord._charge_eff_samples) == [0.94, 0.95]
@@ -158,7 +159,7 @@ async def test_reset_charge_clears_state_and_persists(coord_with_fake_stores):
 
     assert list(coord._charge_eff_samples) == []
     assert coord.charge_eff_correction == 1.0
-    coord._charge_eff_store.async_save.assert_awaited_once_with(
+    coord._charge_calibration.store.async_save.assert_awaited_once_with(
         {"samples": [], "correction": 1.0}
     )
 
@@ -172,7 +173,7 @@ async def test_reset_discharge_clears_state_and_persists(coord_with_fake_stores)
 
     assert list(coord._discharge_eff_samples) == []
     assert coord.discharge_eff_correction == 1.0
-    coord._discharge_eff_store.async_save.assert_awaited_once_with(
+    coord._discharge_calibration.store.async_save.assert_awaited_once_with(
         {"samples": [], "correction": 1.0}
     )
 
@@ -184,7 +185,7 @@ async def test_reset_of_untouched_calibration_still_persists(coord_with_fake_sto
     await coord.async_reset_charge_eff_calibration()
 
     assert coord.charge_eff_correction == 1.0
-    coord._charge_eff_store.async_save.assert_awaited_once()
+    coord._charge_calibration.store.async_save.assert_awaited_once()
 
 
 async def test_charge_and_discharge_calibrations_are_independent(
@@ -199,4 +200,4 @@ async def test_charge_and_discharge_calibrations_are_independent(
 
     assert list(coord._discharge_eff_samples) == [0.88, 0.89]
     assert coord.discharge_eff_correction == pytest.approx(0.885)
-    coord._discharge_eff_store.async_save.assert_not_awaited()
+    coord._discharge_calibration.store.async_save.assert_not_awaited()

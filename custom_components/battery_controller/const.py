@@ -208,6 +208,30 @@ DEFAULT_ZERO_GRID_ENABLED = True
 DEFAULT_ZERO_GRID_DEADBAND_W = 50.0
 DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
 
+# Loop gain of the zero-grid integrator: target -= gain x grid_error.
+#
+# Must be < 1. At exactly 1 the loop is only stable when the grid meter already
+# reflects the setpoint issued on the previous tick. With one tick of delay —
+# an inverter still ramping, or a meter polled on its own cycle — the error
+# obeys e[n+1] = e[n] - e[n-1], whose roots sit exactly on the unit circle: the
+# loop never converges and never diverges but oscillates forever with a period
+# of six ticks. Measured against a steady 2 kW load it swung between 0 and
+# -4 kW indefinitely, and with two ticks of delay between -5 kW and +4 kW. The
+# deadband cannot damp that; the swings are far larger than it.
+#
+# With gain g the same recurrence becomes e[n+1] = e[n] - g x e[n-2..n-1], which
+# is stable for any g < 1. Ticks to settle within 5 % of a step load:
+#
+#   gain   no delay   1 tick   2 ticks
+#   1.0           0    never     never
+#   0.7           2       16     never
+#   0.5           4        8        48
+#   0.4           5        6        23
+#
+# 0.5 keeps the common cases fast (4 ticks = 40 s at the default 10 s interval)
+# while staying stable in the pathological one.
+ZERO_GRID_LOOP_GAIN = 0.5
+
 # Default values - Fixed prices
 DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+)
 
@@ -242,6 +266,13 @@ POWER_STEP_W = 100  # Minimum practical power action granularity in W
 # typical home batteries keep the exact 10 Wh resolution and are bit-for-bit
 # unaffected. At the cap the resolution is 0.1% of usable capacity (e.g.
 # 45 Wh on a 45 kWh range), far below SoC sensor accuracy (~1%).
+#
+# This is the number of state INTERVALS, so the grid ends up with one more
+# state than this (1001): both endpoints are included, and the top state has to
+# be exactly max_soc for the fill-to-max boundary action to be credited to a
+# state that represents it. One state either way is immaterial to the solve
+# time; the name is kept as-is because changing it would shift every large
+# battery's SoC grid for no benefit.
 MAX_SOC_STATES = 1000
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)

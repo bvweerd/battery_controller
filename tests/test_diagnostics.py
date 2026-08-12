@@ -9,10 +9,45 @@ import pytest
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from custom_components.battery_controller import const
 from custom_components.battery_controller.diagnostics import (
+    TO_REDACT,
     async_get_config_entry_diagnostics,
 )
 from custom_components.battery_controller.__init__ import BatteryControllerData
+
+
+def test_every_sensor_config_key_is_redacted() -> None:
+    """No config key holding an entity ID may leak into diagnostics.
+
+    Diagnostics are routinely pasted into public issue trackers, and the redact
+    list is maintained by hand, so it silently fell behind: it once carried a
+    key name that did not exist while eight real ones were missing. Derive the
+    expectation from const.py so adding a sensor option cannot repeat that.
+    """
+    sensor_keys = {
+        value
+        for name, value in vars(const).items()
+        if name.startswith("CONF_")
+        and isinstance(value, str)
+        and (name.endswith("_SENSOR") or name.endswith("_SENSORS"))
+    }
+    assert sensor_keys, "no sensor config keys discovered — check the naming rule"
+    assert sensor_keys <= TO_REDACT, (
+        f"unredacted sensor config keys: {sorted(sensor_keys - TO_REDACT)}"
+    )
+
+
+def test_redact_list_has_no_dead_entries() -> None:
+    """Every redacted key must correspond to a real config key."""
+    all_conf_values = {
+        value
+        for name, value in vars(const).items()
+        if name.startswith("CONF_") and isinstance(value, str)
+    }
+    assert TO_REDACT <= all_conf_values, (
+        f"redact entries matching no config key: {sorted(TO_REDACT - all_conf_values)}"
+    )
 
 
 @pytest.fixture
