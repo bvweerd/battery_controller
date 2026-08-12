@@ -60,6 +60,7 @@ from custom_components.battery_controller.const import CONF_BATTERY_POWER_SENSOR
 from custom_components.battery_controller.const import CONF_MANUAL_POWER_SETPOINT_W
 from custom_components.battery_controller.const import MODE_MANUAL
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.util import dt as dt_util
 from unittest.mock import AsyncMock
 from unittest.mock import patch as upatch
 
@@ -3312,10 +3313,6 @@ async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
         lambda *a: [1.0, 1.0],
     )
     monkeypatch.setattr(
-        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
-        lambda values, src, dst: list(values),
-    )
-    monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: fixed_now,
     )
@@ -3419,10 +3416,6 @@ async def _run_hybrid_mode_sequence(
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.compute_step_durations_hours",
         lambda *a: [1.0, 1.0],
-    )
-    monkeypatch.setattr(
-        "custom_components.battery_controller.coordinator_optimization.resample_forecast",
-        lambda values, src, dst: list(values),
     )
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
@@ -3921,7 +3914,6 @@ async def test_pv_forecast_aligned_to_price_steps_on_mid_period_run(
     h.price_start_times = [
         datetime(2026, 3, 21, 10 + i, 0, 0, tzinfo=timezone.utc) for i in range(3)
     ]
-    h.passthrough_resample = False
     h.real_step_durations = True
     h.forecast_data = {
         # Quarter-hourly from 10:30: 1 kW until 11:00, then 5 kW, then 9 kW.
@@ -3941,6 +3933,150 @@ async def test_pv_forecast_aligned_to_price_steps_on_mid_period_run(
     assert h.captured["durations"][:3] == pytest.approx([0.5, 1.0, 1.0])
     # Each step gets the production of its OWN window, not the next half hour.
     assert h.captured["pv"][:3] == pytest.approx([1.0, 5.0, 9.0])
+
+
+# ---------------------------------------------------------------------------
+# Historical price model alignment
+# ---------------------------------------------------------------------------
+
+
+def _hour_coded_model(recorder: list[dict] | None = None):
+    """Price model whose forecast encodes the local hour it is predicting.
+
+    Local hour H becomes 1.0 + H/100 EUR/kWh, so any misalignment between the
+    hours the model is asked for and the steps its answer lands on is directly
+    readable from the resulting series. The model buckets by local hour-of-day,
+    which is why the coding is local too.
+    """
+
+    def _forecast(hours, start_time=None, ghi_forecast=None, wind_forecast=None):
+        if recorder is not None:
+            recorder.append(
+                {
+                    "hours": hours,
+                    "start_time": start_time,
+                    "ghi_forecast": ghi_forecast,
+                    "wind_forecast": wind_forecast,
+                }
+            )
+        # Same default as PriceForecastModel.forecast: the current local hour.
+        start = start_time or dt_util.now().replace(minute=0, second=0, microsecond=0)
+        return [1.0 + (start + timedelta(hours=h)).hour / 100 for h in range(hours)]
+
+    model = MagicMock()
+    model.has_data = lambda: True
+    model.forecast = _forecast
+    return model
+
+
+def _quarter_hourly_day_ahead_run(h) -> None:
+    """Set up a run like a 15-minute price sensor published through midnight.
+
+    13:22 local, prices known through 23:45 local: 43 live steps covering a
+    non-integral number of hours from the top of the current hour. The
+    remaining 101 steps of the 36-hour horizon come from the price model.
+    """
+    h.now = datetime(2026, 8, 12, 11, 22, 34, tzinfo=timezone.utc)
+    h.price_interval = 15
+    h.price_start_times = [
+        datetime(2026, 8, 12, 11, 15, tzinfo=timezone.utc) + timedelta(minutes=15 * i)
+        for i in range(43)
+    ]
+    h.prices = [0.20] * 43
+    h.price_model_has_data = True
+    h.real_step_durations = True
+    h.forecast_data = {
+        "pv_forecast_kw": [0.0] * 144,
+        "consumption_forecast_kw": [0.5] * 144,
+        "forecast_interval_minutes": 15,
+        "forecast_start_utc": h.now,
+        "current_pv_kw": 0.0,
+        "current_dc_pv_kw": 0.0,
+        "current_consumption_kw": 0.5,
+    }
+    h.result = _make_fake_result(
+        mode_schedule=["idle"] * 144, soc_schedule_kwh=[5.0] * 145
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_extension_lands_on_the_hours_it_predicts(hass, optimization_run):
+    """The modelled tail must not be shifted off the steps it fills.
+
+    A 15-minute price sensor publishing through the end of the day leaves a
+    live series covering a non-integral number of hours from the top of the
+    current hour. Deriving the model's start from that step count (instead of
+    from the first uncovered step's own timestamp) placed the whole modelled
+    tail an hour late, moving the next day's charge and discharge windows with
+    it.
+    """
+    await hass.config.async_set_time_zone("Europe/Amsterdam")
+    h = optimization_run()
+    _quarter_hourly_day_ahead_run(h)
+    h.coord._price_model = _hour_coded_model()
+
+    data = await h.run()
+
+    prices = h.captured["prices"]
+    # 36 hours of horizon at 15 minutes per step.
+    assert len(prices) == 144
+    # Steps 0..42 are the live prices; the model fills the rest, starting at
+    # the step right after the last live one — 00:00 local, not 23:00.
+    assert prices[:43] == [0.20] * 43
+    assert prices[43:47] == pytest.approx([1.00] * 4)
+    # Each following hour keeps its own value, four steps at a time.
+    assert prices[47:51] == pytest.approx([1.01] * 4)
+    assert prices[51:55] == pytest.approx([1.02] * 4)
+    # And the tail of the horizon is still on the hour: step 143 starts at
+    # 01:00 local on the day after tomorrow.
+    assert prices[143] == pytest.approx(1.01)
+
+    # The reference series published for comparison follows the same grid.
+    model_series = data["price_forecast_model"]
+    assert len(model_series) == 144
+    # Step 0 is the 13:22-13:30 remainder of the current period, still hour 13.
+    assert model_series[0] == pytest.approx(1.13)
+    # Step 3 starts at 14:00 — the hour must turn over with the clock, not one
+    # step later because step 0 was a partial period.
+    assert model_series[2] == pytest.approx(1.13)
+    assert model_series[3] == pytest.approx(1.14)
+    assert model_series[43] == pytest.approx(1.00)
+
+
+@pytest.mark.asyncio
+async def test_model_extension_slices_weather_from_its_own_anchor(
+    hass, optimization_run
+):
+    """GHI/wind must be sliced relative to the weather series' own start.
+
+    The weather coordinator refreshes on its own schedule and anchors its
+    series to the hour of its last fetch, which can be an hour behind the
+    optimizer run. Assuming element 0 is the current hour fed the model the
+    wrong hours' weather.
+    """
+    await hass.config.async_set_time_zone("Europe/Amsterdam")
+    calls: list[dict] = []
+    h = optimization_run()
+    _quarter_hourly_day_ahead_run(h)
+    h.coord._price_model = _hour_coded_model(calls)
+    # Weather last fetched at 10:00 UTC — an hour before the run. Element i is
+    # the hour 10:00 + i, so the extension starting at 22:00 UTC needs element
+    # 12 and the reference series, starting at 11:00 UTC, element 1.
+    h.coord.weather_coordinator.data = {
+        "forecast_start_utc": datetime(2026, 8, 12, 10, 0, tzinfo=timezone.utc),
+        "radiation_forecast": [float(i) for i in range(48)],
+        "wind_speed_forecast": [float(i) / 10 for i in range(48)],
+    }
+
+    await h.run()
+
+    by_start = {dt_util.as_utc(c["start_time"]): c for c in calls}
+    extension = by_start[datetime(2026, 8, 12, 22, 0, tzinfo=timezone.utc)]
+    assert extension["ghi_forecast"][0] == pytest.approx(12.0)
+    assert extension["wind_forecast"][0] == pytest.approx(1.2)
+    reference = by_start[datetime(2026, 8, 12, 11, 0, tzinfo=timezone.utc)]
+    assert reference["ghi_forecast"][0] == pytest.approx(1.0)
+    assert reference["wind_forecast"][0] == pytest.approx(0.1)
 
 
 # ---------------------------------------------------------------------------

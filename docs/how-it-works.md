@@ -92,6 +92,10 @@ flowchart TD
 ```
 
 The same model **extends the planning horizon** when live prices cover less than 24 hours.
+The modelled hours are anchored to the first hour the live prices do not cover, so the
+predicted price curve stays on the clock — the cheap and expensive windows it fills in sit
+at the hours the model actually predicts for them.
+
 It builds lookup tables from data in the Home Assistant recorder, keyed on:
 
 - hour of day
