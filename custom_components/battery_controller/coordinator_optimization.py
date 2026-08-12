@@ -21,7 +21,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
-from .efficiency_curve import EfficiencyCurve
+from .efficiency_curve import EfficiencyCurve, interpolate_efficiency
 from .const import (
     DOMAIN,
     ACTION_CHARGING,
@@ -363,17 +363,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # flip the mode every realtime-update tick.
         self._last_hybrid_charge_decision: str = ACTION_CHARGING
 
-        # Hysteresis state for the hybrid+ surplus-capture decision: tracks
-        # whether the last decision was to store PV surplus ("zero_grid") or
-        # export it ("idle") so a shadow price hovering near the feed-in price
-        # doesn't flip the mode every optimization run.
-        self._last_hybrid_plus_capture_decision: str = "zero_grid"
+        # Hysteresis state for the surplus-capture decision: tracks whether the
+        # last decision was to store PV surplus ("zero_grid") or export it
+        # ("idle") so a shadow price hovering near the feed-in price doesn't
+        # flip the mode every optimization run.
+        self._last_surplus_capture_decision: str = "zero_grid"
 
-        # Whether hybrid+ currently blocks PV-surplus capture (exporting at the
-        # current feed-in price is worth more than storing). Gates the
-        # realtime idle→zero_grid upgrade in _resolve_controller_mode so a
-        # surplus appearing between optimizer runs isn't captured anyway.
-        self._hybrid_plus_capture_blocked: bool = False
+        # Whether the last optimizer run found PV-surplus capture uneconomical
+        # (exporting at the current feed-in price is worth more than storing).
+        # Gates the realtime idle→zero_grid upgrade in _resolve_controller_mode
+        # so a surplus appearing between optimizer runs isn't captured anyway.
+        self._surplus_capture_blocked: bool = False
 
         # Diagnostic history ring buffers (not persisted across restarts).
         # optimizer_run_log: one entry per 15-min optimizer run (24 h @ 15 min = 96).
@@ -442,8 +442,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._committed_price = 0.0
         self._committed_power = 0.0
         self._committed_step_start = None
-        self._last_hybrid_plus_capture_decision = "zero_grid"
-        self._hybrid_plus_capture_blocked = False
+        self._last_surplus_capture_decision = "zero_grid"
+        self._surplus_capture_blocked = False
         # Reset cached setpoint so the real-time loop uses idle immediately
         # instead of applying stale setpoints from the previous mode while the
         # re-optimization triggered by the mode change is still running.
@@ -1025,15 +1025,48 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return feed_in_forecast[0]
         return self._fixed_feed_in_price()
 
-    def _hybrid_plus_should_capture_surplus(
-        self, shadow_price_eur_kwh: float, current_feed_in: float
-    ) -> bool:
-        """Return whether hybrid+ should store PV surplus rather than export it.
+    def _charge_efficiency_at(self, power_kw: float) -> float:
+        """Charge efficiency for a specific AC power, from the curve.
 
-        Storing 1 kWh of AC surplus puts sqrt(RTE) kWh in the battery, each
+        The DP values every action at its curve efficiency, so the thresholds
+        that arbitrate between the DP plan and zero-grid must use the same
+        number. The representative scalar (``charge_efficiency``) is a mean over
+        5..95 % of nominal power and sits well below the curve at the powers a
+        real decision is taken at, which biases those comparisons against the
+        DP's own decision. It is only the fallback for a power of zero, where
+        the curve's idle-loss point says nothing useful.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.charge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.charge_efficiency_curve_parsed, power_kw
+        )
+
+    def _discharge_efficiency_at(self, power_kw: float) -> float:
+        """Discharge efficiency for a specific AC power, from the curve.
+
+        Mirrors _charge_efficiency_at for the discharge direction.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.discharge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.discharge_efficiency_curve_parsed, power_kw
+        )
+
+    def _should_capture_surplus(
+        self,
+        shadow_price_eur_kwh: float,
+        current_feed_in: float,
+        surplus_kw: float,
+    ) -> bool:
+        """Return whether PV surplus is worth storing rather than exporting.
+
+        Storing 1 kWh of AC surplus puts ``charge_eff`` kWh in the battery, each
         worth the DP shadow price λ — the marginal value of stored energy given
         the full price and PV forecast. Exporting the same kWh yields the
-        current feed-in price. When λ × sqrt(RTE) is below the feed-in price,
+        current feed-in price. When λ × charge_eff is below the feed-in price,
         the forecast says the battery can be filled more cheaply later (e.g.
         the midday PV peak at low prices), so exporting now is worth more than
         storing.
@@ -1041,18 +1074,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Applies a ±5% hysteresis band around the feed-in threshold (same
         pattern as the hybrid discharge decision) so a shadow price hovering
         near the feed-in price doesn't flip the decision every run.
+
+        Args:
+            shadow_price_eur_kwh: DP shadow price λ (value per stored kWh).
+            current_feed_in: Feed-in price for the step being executed.
+            surplus_kw: AC surplus that would be stored, in kW. Prices the
+                charge at its curve efficiency instead of a nominal scalar.
         """
         if current_feed_in <= 0:
             # Exporting earns nothing (or costs money): always capture.
-            self._last_hybrid_plus_capture_decision = "zero_grid"
+            self._last_surplus_capture_decision = "zero_grid"
             return True
-        sqrt_rte = float(self.battery_config.round_trip_efficiency) ** 0.5
-        store_value = shadow_price_eur_kwh * sqrt_rte
-        if self._last_hybrid_plus_capture_decision == "zero_grid":
+        store_value = shadow_price_eur_kwh * self._charge_efficiency_at(surplus_kw)
+        if self._last_surplus_capture_decision == "zero_grid":
             should_capture = bool(store_value >= current_feed_in * 0.95)
         else:
             should_capture = bool(store_value >= current_feed_in * 1.05)
-        self._last_hybrid_plus_capture_decision = (
+        self._last_surplus_capture_decision = (
             "zero_grid" if should_capture else ACTION_IDLE
         )
         return should_capture
@@ -1087,9 +1125,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         deadband does not damp it, because the swing between the zero_grid
         setpoint and idle's 0 W is far larger than the deadband.
 
-        In hybrid+ mode the upgrade is suppressed while surplus capture is
-        blocked (exporting is worth more than storing per the shadow price),
-        so idle genuinely means "export the surplus".
+        The upgrade is suppressed while the last optimizer run found surplus
+        capture uneconomical (exporting is worth more than storing per the
+        shadow price), so idle genuinely means "export the surplus" — otherwise
+        the realtime loop would re-capture the surplus the run just refused.
 
         Args:
             effective_mode: The resolved mode from optimization logic.
@@ -1105,16 +1144,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if effective_mode == "zero_grid":
             return "zero_grid"
         # Upgrade idle → zero_grid only in zero_grid/hybrid/hybrid+ modes (not
-        # follow_schedule or manual, where idle must mean truly stop). Hybrid+
-        # additionally requires that surplus capture is economical per the last
-        # optimizer run.
+        # follow_schedule or manual, where idle must mean truly stop), and only
+        # while the last optimizer run found surplus capture economical.
         if effective_mode == ACTION_IDLE:
             upgrade_allowed = (
                 self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
-                and not (
-                    self._control_mode == MODE_HYBRID_PLUS
-                    and self._hybrid_plus_capture_blocked
-                )
+                and not self._surplus_capture_blocked
                 and has_power_sensors
             )
             if not upgrade_allowed:
@@ -2224,6 +2259,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # Hybrid+ additionally consults the price forecast (via the shadow
             # price) before storing PV surplus, so surplus is exported when the
             # battery can be filled more cheaply later.
+            # Default to allowing capture; the idle and discharge branches
+            # overrule it so a block never outlives the run that decided it.
+            self._surplus_capture_blocked = False
             if result.optimal_mode == ACTION_IDLE:
                 # Optimizer wants to preserve battery capacity.
                 # This means: don't charge (even with PV surplus) and don't discharge.
@@ -2256,10 +2294,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 capture_blocked = False
                 if self._control_mode == MODE_HYBRID_PLUS:
                     current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                    capture_blocked = not self._hybrid_plus_should_capture_surplus(
-                        result.shadow_price_eur_kwh, current_feed_in
+                    capture_blocked = not self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
                     )
-                self._hybrid_plus_capture_blocked = capture_blocked
+                self._surplus_capture_blocked = capture_blocked
                 if has_upcoming_discharge and not has_pv_surplus:
                     # Preserve capacity (discharge planned, no PV surplus)
                     effective_mode = ACTION_IDLE
@@ -2275,17 +2315,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 effective_power = 0.0
             elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
-                # Use shadow price as the threshold: net sell value per kWh stored
-                # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
-                # value of keeping the energy for future use), exporting is better.
+                # Use shadow price as the threshold: net sell value per kWh
+                # stored = feed_in × discharge_eff at the planned power — the
+                # same efficiency the DP priced this action with. If that
+                # exceeds the shadow price (the value of keeping the energy for
+                # future use), exporting is better.
                 #
                 # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
                 # oscillation when shadow_price ≈ net_sell_value.
                 # • Was discharging → continue unless net_sell_value < threshold × 0.95
                 # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                sqrt_rte = self.battery_config.round_trip_efficiency**0.5
-                net_sell_value = current_feed_in * sqrt_rte
+                net_sell_value = current_feed_in * self._discharge_efficiency_at(
+                    result.optimal_power_kw
+                )
                 threshold = result.shadow_price_eur_kwh
                 if self._last_hybrid_decision == ACTION_DISCHARGING:
                     should_discharge = net_sell_value >= threshold * 0.95
@@ -2296,11 +2339,28 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     effective_mode = ACTION_DISCHARGING
                     effective_power = result.optimal_power_kw
                     self._last_hybrid_decision = ACTION_DISCHARGING
+                    self._surplus_capture_blocked = False
                 else:
-                    # Shadow price > sell value: energy is more valuable later
-                    effective_mode = "zero_grid"
+                    # Shadow price > sell value: energy is more valuable later.
+                    # That is a decision to *hold*, so falling back to zero_grid
+                    # unconditionally would be a contradiction: zero_grid buys
+                    # PV surplus that would otherwise be exported, at the cost
+                    # of the feed-in price the veto just refused to sell at.
+                    # Only capture the surplus when storing it actually beats
+                    # exporting it (λ × charge_eff ≥ feed_in); otherwise hold
+                    # and let the surplus go to the grid. Unlike the idle
+                    # branch, this test runs in plain hybrid too — hybrid's
+                    # unconditional surplus capture applies when the DP has no
+                    # opinion, not when it is overruling an explicit plan.
+                    capture = self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
+                    )
+                    effective_mode = "zero_grid" if capture else ACTION_IDLE
                     effective_power = 0.0
-                    self._last_hybrid_decision = "zero_grid"
+                    self._last_hybrid_decision = effective_mode
+                    self._surplus_capture_blocked = not capture
             elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
                 if current_feed_in < 0:
