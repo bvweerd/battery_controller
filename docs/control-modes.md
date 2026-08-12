@@ -97,6 +97,15 @@ for resilience. Keeping headroom filled means the battery can absorb real-time
 consumption spikes — a cloud passing over the panels while a large appliance switches on
 — instead of pulling from the grid.
 
+The one exception is a **vetoed discharge**. When the DP plans to discharge but the
+shadow price says the energy is worth more later than the current feed-in price pays,
+Hybrid overrules the plan and holds. That veto is a decision to keep energy, so it does
+not fall through to zero-grid unless storing the surplus also beats exporting it
+(`λ × charge_eff ≥ feed-in`) — otherwise the mode that just refused to sell at the
+feed-in price would immediately buy PV surplus at that same price. Both Hybrid and
+Hybrid+ apply this test; Hybrid's unconditional surplus capture applies where the DP has
+no opinion, not where it is overruling an explicit plan.
+
 !!! info "Hybrid is recommended for robustness, not for maximum arbitrage profit"
     If you want surplus capture to follow the price forecast instead, use **Hybrid+**.
     For the strictly cost-optimal schedule with no opportunistic charging at all, use

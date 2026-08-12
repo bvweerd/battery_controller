@@ -97,6 +97,22 @@ Usually one of three things:
 Upload your diagnostics to the [analyzer](analyzer/index.html); it explains every
 individual charge and discharge decision, including the ones it declined to make.
 
+### The schedule says `discharging` but the battery is charging
+
+In Hybrid and Hybrid+ the DP schedule is a plan, not a command: **Optimal Mode** is what
+the controller actually does, **Schedule Mode** is what the plan wanted. They differ when
+the shadow price overrules the plan — a planned discharge is only executed while
+`feed_in × discharge_eff ≥ λ`, because below that the energy is worth more later than
+selling it now pays.
+
+A held discharge means idle, not charging. If you see charging while the plan says
+discharging, the surplus capture must have been worth more than exporting
+(`λ × charge_eff ≥ feed-in`); check **Shadow Price of Storage** and its
+`charge_threshold_eur_kwh` attribute against your current feed-in price. In plain Hybrid
+the battery does still capture PV surplus during planned `idle` steps regardless of
+price — that is the mode's [deliberate trade](control-modes.md#hybrid-recommended). Use
+**Hybrid+** if you want those steps to follow the price forecast as well.
+
 ---
 
 ## Sensors and forecasts
