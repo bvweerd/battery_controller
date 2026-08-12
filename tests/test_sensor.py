@@ -32,10 +32,13 @@ from custom_components.battery_controller.sensor import (
     BatterySoCSensor,
     BatterySubentrySetpointSensor,
     BatterySubentrySoCSensor,
+    ChargeEfficiencyCalibrationSensor,
     ConsumptionForecastSensor,
     CurrentGridPowerSensor,
+    DischargeEfficiencyCalibrationSensor,
     NetGridForecastSensor,
     OptimizationStatusSensor,
+    PVArrayCalibrationSensor,
     PVArrayForecastSensor,
     PVForecastSensor,
     SolarIrradianceSensor,
@@ -1109,7 +1112,7 @@ async def test_sensor_async_setup_entry_no_subentries():
 
     # Main entity list added
     assert len(added_calls) >= 1
-    assert len(added_calls[0][0]) == 16  # 16 main sensors
+    assert len(added_calls[0][0]) == 18  # 18 main sensors
 
 
 @pytest.mark.asyncio
@@ -1196,7 +1199,8 @@ async def test_sensor_async_setup_entry_with_pv_subentry():
         (c for c in added_calls if c[1].get("config_subentry_id") == "pv1"), None
     )
     assert pv_call is not None
-    assert len(pv_call[0]) == 1
+    # Forecast series + calibration sensor
+    assert len(pv_call[0]) == 2
 
 
 @pytest.mark.asyncio
@@ -1294,3 +1298,131 @@ def test_native_value_is_none_without_coordinator_data(sensor_cls, kind):
 def test_extra_attributes_empty_without_coordinator_data(sensor_cls, kind):
     """Attributes stay empty rather than exposing half-built values."""
     assert _build(sensor_cls, kind).extra_state_attributes == {}
+
+
+# ---------------------------------------------------------------------------
+# Calibration sensors
+#
+# These do not read coordinator.data: a correction exists from the moment the
+# integration starts (restored from storage), long before the first successful
+# optimizer run, so they read the coordinator's accessors directly.
+# ---------------------------------------------------------------------------
+
+
+def _make_calibration_coord(
+    correction=0.94, samples=7, applied=True, last_result="sampled"
+):
+    coord = _make_opt_coord()
+    coord.charge_eff_correction = correction
+    coord.charge_eff_sample_count = samples
+    coord.charge_eff_applied = applied
+    coord.charge_eff_last_result = last_result
+    coord.discharge_eff_correction = correction
+    coord.discharge_eff_sample_count = samples
+    coord.discharge_eff_applied = applied
+    coord.discharge_eff_last_result = last_result
+    return coord
+
+
+@pytest.mark.parametrize(
+    "sensor_cls",
+    [ChargeEfficiencyCalibrationSensor, DischargeEfficiencyCalibrationSensor],
+    ids=lambda v: v.__name__,
+)
+def test_efficiency_calibration_reports_percentage(sensor_cls):
+    """The correction factor is published as a percentage of nominal."""
+    sensor = sensor_cls(_make_calibration_coord(0.94), _make_device(), _make_entry())
+
+    assert sensor.native_value == pytest.approx(94.0)
+
+
+@pytest.mark.parametrize(
+    "sensor_cls",
+    [ChargeEfficiencyCalibrationSensor, DischargeEfficiencyCalibrationSensor],
+    ids=lambda v: v.__name__,
+)
+def test_efficiency_calibration_publishes_sample_count_and_reason(sensor_cls):
+    """A bare percentage cannot be read; the evidence behind it travels with it."""
+    coord = _make_calibration_coord(
+        correction=1.0, samples=0, applied=False, last_result="dc_coupled_pv"
+    )
+    sensor = sensor_cls(coord, _make_device(), _make_entry())
+
+    attrs = sensor.extra_state_attributes
+
+    assert attrs["samples"] == 0
+    assert attrs["applied"] is False
+    assert attrs["last_result"] == "dc_coupled_pv"
+    assert attrs["correction_factor"] == pytest.approx(1.0)
+
+
+def test_efficiency_calibration_sensors_have_distinct_unique_ids():
+    """Both directions must survive side by side in the entity registry."""
+    coord = _make_calibration_coord()
+    entry = _make_entry()
+
+    charge = ChargeEfficiencyCalibrationSensor(coord, _make_device(), entry)
+    discharge = DischargeEfficiencyCalibrationSensor(coord, _make_device(), entry)
+
+    assert charge.unique_id != discharge.unique_id
+
+
+def _make_pv_calibration_coord(
+    correction=1.12, samples=40, applied=True, last_result="sampled"
+):
+    coord = _make_forecast_coord()
+    coord.pv_correction = MagicMock(return_value=correction)
+    coord.pv_sample_count = MagicMock(return_value=samples)
+    coord.pv_correction_applied = MagicMock(return_value=applied)
+    coord.pv_last_result = MagicMock(return_value=last_result)
+    return coord
+
+
+def test_pv_array_calibration_reports_percentage():
+    """A array producing 12% above forecast reads as 112%."""
+    sensor = PVArrayCalibrationSensor(
+        _make_pv_calibration_coord(1.12), _make_device(), _make_entry(), "pv1", "South"
+    )
+
+    assert sensor.native_value == pytest.approx(112.0)
+
+
+def test_pv_array_calibration_explains_an_array_that_never_learns():
+    """Without a production meter an array sits at 100% forever; say so."""
+    coord = _make_pv_calibration_coord(
+        correction=1.0,
+        samples=0,
+        applied=False,
+        last_result="no_measured_production_sensor",
+    )
+    sensor = PVArrayCalibrationSensor(
+        coord, _make_device(), _make_entry(), "pv1", "South"
+    )
+
+    attrs = sensor.extra_state_attributes
+
+    assert attrs["applied"] is False
+    assert attrs["last_result"] == "no_measured_production_sensor"
+
+
+def test_pv_array_calibration_is_scoped_to_its_own_array():
+    """Each sensor must ask about its own subentry, not the first one."""
+    coord = _make_pv_calibration_coord()
+    sensor = PVArrayCalibrationSensor(
+        coord, _make_device(), _make_entry(), "pv_east", "East"
+    )
+
+    sensor.native_value
+
+    coord.pv_correction.assert_called_with("pv_east")
+
+
+def test_pv_array_calibration_sensors_have_distinct_unique_ids():
+    """Two arrays must not collide in the entity registry."""
+    coord = _make_pv_calibration_coord()
+    entry = _make_entry()
+
+    east = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_east", "East")
+    west = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_west", "West")
+
+    assert east.unique_id != west.unique_id

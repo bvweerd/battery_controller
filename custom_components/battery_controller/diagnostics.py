@@ -134,6 +134,12 @@ async def async_get_config_entry_diagnostics(
             "per_pv_array_forecasts": _remap_keys(
                 forecast_coord.data.get("per_pv_array_forecasts") or {}, name_map
             ),
+            # Per-array forecast calibration: the learned gain, how many
+            # observations back it, whether it is being applied, and — when it
+            # is not — why the array is not learning anything.
+            "pv_calibration": _remap_keys(
+                forecast_coord.data.get("pv_calibration") or {}, name_map
+            ),
             "forecast_interval_minutes": forecast_coord.data.get(
                 "forecast_interval_minutes", 60
             ),
@@ -196,8 +202,12 @@ async def async_get_config_entry_diagnostics(
             },
             "charge_eff_correction": data.get("charge_eff_correction"),
             "charge_eff_samples": data.get("charge_eff_samples"),
+            "charge_eff_applied": data.get("charge_eff_applied"),
+            "charge_eff_last_result": data.get("charge_eff_last_result"),
             "discharge_eff_correction": data.get("discharge_eff_correction"),
             "discharge_eff_samples": data.get("discharge_eff_samples"),
+            "discharge_eff_applied": data.get("discharge_eff_applied"),
+            "discharge_eff_last_result": data.get("discharge_eff_last_result"),
             "timestamp": str(data.get("timestamp")),
         }
 
