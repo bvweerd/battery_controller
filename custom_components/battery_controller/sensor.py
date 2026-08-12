@@ -102,6 +102,22 @@ async def async_setup_entry(
                         subentry.subentry_id,
                         subentry.title,
                     ),
+                    # Per-battery calibration: the fleet sensors average the
+                    # packs together, which describes neither when they differ.
+                    BatterySubentryChargeCalibrationSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
+                    BatterySubentryDischargeCalibrationSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
                 ],
                 config_subentry_id=subentry.subentry_id,
             )
@@ -919,7 +935,12 @@ class BatteryEfficiencyCalibrationSensor(BatteryControllerSensor):
 
 
 class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
-    """Learned correction on the charge-side SoC transition."""
+    """Learned correction on the charge-side SoC transition, fleet-wide.
+
+    The capacity-weighted aggregate of the per-battery corrections — what the
+    DP is actually handed, since it plans one SoC for the whole fleet. The
+    per-battery sensors say which pack the number came from.
+    """
 
     _attr_translation_key = "charge_eff_correction"
     _attr_name = "Charge Efficiency Correction"
@@ -935,7 +956,7 @@ class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
 
 
 class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
-    """Learned correction on the discharge-side SoC transition."""
+    """Learned correction on the discharge-side SoC transition, fleet-wide."""
 
     _attr_translation_key = "discharge_eff_correction"
     _attr_name = "Discharge Efficiency Correction"
@@ -948,6 +969,61 @@ class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
             self.coordinator.discharge_eff_applied,
             self.coordinator.discharge_eff_last_result,
         )
+
+
+class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
+    """One battery's own learned efficiency correction.
+
+    Reported per battery because the causes are per battery: the dispatcher
+    concentrates a setpoint on one pack at a time, so a single fleet number
+    describes whichever machine happened to be picked. A pack that is losing
+    capacity shows up here as a correction below 100% while its sibling stays
+    at nominal — on the fleet sensor the two are averaged into something that
+    describes neither.
+
+    ``last_result`` says why a pack is not learning; ``battery_not_dispatched``
+    is the common one and is not a fault — it means the other battery has been
+    doing the work.
+    """
+
+    _action: str = ACTION_CHARGING
+
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        battery_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"{self._title} {battery_title}"
+
+    _title = ""
+
+    def _calibration(self) -> tuple[float, int, bool, str]:
+        return self.coordinator.battery_calibration_state(
+            self._subentry_id, self._action
+        )
+
+
+class BatterySubentryChargeCalibrationSensor(BatterySubentryCalibrationSensor):
+    """One battery's learned charge-side correction."""
+
+    _attr_translation_key = "battery_charge_eff_correction"
+    _action = ACTION_CHARGING
+    _key = "charge_eff_correction"
+    _title = "Charge Efficiency Correction"
+
+
+class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor):
+    """One battery's learned discharge-side correction."""
+
+    _attr_translation_key = "battery_discharge_eff_correction"
+    _action = ACTION_DISCHARGING
+    _key = "discharge_eff_correction"
+    _title = "Discharge Efficiency Correction"
 
 
 class PVArrayCalibrationSensor(BatteryForecastSensor):

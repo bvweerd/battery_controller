@@ -848,6 +848,15 @@ function renderDiagnostics(raw) {
     return kv(label, `${pct} <span class="text-gray-400">(n=${n})</span> ${state}${why}`);
   };
   const pvCal = fc.pv_calibration || {};
+  // The two battery rows above are the fleet aggregate the DP plans with. With
+  // more than one pack that average describes neither of them — the dispatcher
+  // concentrates on one battery at a time — so each pack's own measurement is
+  // listed underneath it.
+  const batCal = opt.battery_calibration || {};
+  const batteryRows = Object.entries(batCal).flatMap(([name, e]) => [
+    calRow(`&nbsp;&nbsp;↳ ${name} · charge`, e.charge),
+    calRow(`&nbsp;&nbsp;↳ ${name} · discharge`, e.discharge),
+  ]).join('');
   document.getElementById('cfg-calibration').innerHTML =
     calRow('Battery charge efficiency', {
       correction: chgEffCorr, samples: chgEffSamples,
@@ -857,6 +866,7 @@ function renderDiagnostics(raw) {
       correction: disEffCorr, samples: disEffSamples,
       applied: opt.discharge_eff_applied, last_result: opt.discharge_eff_last_result,
     }) +
+    batteryRows +
     (Object.keys(pvCal).length
       ? Object.entries(pvCal).map(([name, e]) => calRow(`PV forecast · ${name}`, e)).join('')
       : kv('PV forecast', '<span class="text-gray-400">no PV arrays reported</span>'));

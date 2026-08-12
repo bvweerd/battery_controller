@@ -1549,6 +1549,29 @@ def main():
             f"  discharge_eff_correction: {_discharge_eff_correction:.4f}{samples_str}{flag}"
         )
 
+    # The two figures above are the fleet aggregate the DP plans with. Each pack
+    # also measures itself, and with more than one battery the average describes
+    # neither of them — that breakdown is where a single derated pack shows up.
+    for _name, _entry in (opt_top.get("battery_calibration") or {}).items():
+        for _direction in ("charge", "discharge"):
+            _cal = (_entry or {}).get(_direction) or {}
+            _correction = _cal.get("correction")
+            if _correction is None:
+                continue
+            _n = _cal.get("samples", 0)
+            _why = _cal.get("last_result", "")
+            _state = (
+                "never measured"
+                if not _n
+                else "applied"
+                if _cal.get("applied")
+                else "stored, not applied"
+            )
+            print(
+                f"    {_name} {_direction}: {_correction:.4f}, n={_n} "
+                f"({_state}; last: {_why})"
+            )
+
     # Run DP
     (
         V,

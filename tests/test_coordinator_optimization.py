@@ -16,7 +16,10 @@ from custom_components.battery_controller.battery_model import (
     BatteryState,
 )
 from custom_components.battery_controller.const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
     CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_CAPACITY_KWH,
     CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CHARGE_EFFICIENCY_CURVE,
@@ -30,6 +33,7 @@ from custom_components.battery_controller.const import (
     CONF_MAX_GRID_POWER_KW,
     CONF_MAX_SOC_PERCENT,
     CONF_MIN_SOC_PERCENT,
+    CONF_NAME,
     CONF_OPTIMIZATION_INTERVAL_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
@@ -53,6 +57,7 @@ from custom_components.battery_controller.efficiency_calibration import (
     CALIBRATION_DC_COUPLED,
     CALIBRATION_NO_PLAN,
     CALIBRATION_NO_RESULT,
+    CALIBRATION_NOT_DISPATCHED,
     CALIBRATION_PLAN_NOT_EXECUTED,
     CALIBRATION_SAMPLED,
 )
@@ -2453,15 +2458,74 @@ def _mark_plan_executed(coord) -> None:
     coord._controller_schedule_w = coord._last_result.power_schedule_kw[0] * 1000
 
 
+def _calibration(coord, action=ACTION_CHARGING, index=0):
+    """One battery's calibration for one direction."""
+    sid, _data = coord._battery_subentries[index]
+    return coord.battery_calibrations[sid].for_action(action)
+
+
+def _plan_battery_step(
+    coord,
+    *,
+    planned_delta_kwh: float,
+    actual_delta_kwh: float | None = None,
+    action: str = ACTION_CHARGING,
+    index: int = 0,
+    step_hours: float = 1.0,
+    prev_soc_kwh: float = 5.0,
+    executed: bool = True,
+):
+    """Give one battery a previous step: what it was told, and what it did.
+
+    Calibration scores each pack against the setpoint the dispatcher gave *it*,
+    so a test states the SoC change that was planned and this works back to the
+    setpoint producing it at that battery's own efficiency. ``actual_delta_kwh``
+    of None leaves the pack's SoC unmeasured, for the counter-driven cases.
+    """
+    sid, _data = coord._battery_subentries[index]
+    cfg = dict(coord._individual_battery_configs)[sid]
+    charging = action == ACTION_CHARGING
+    efficiency = cfg.charge_efficiency if charging else cfg.discharge_efficiency
+    power_kw = (
+        planned_delta_kwh / (step_hours * efficiency)
+        if charging
+        else planned_delta_kwh * efficiency / step_hours
+    )
+    signed_kw = power_kw if charging else -power_kw
+
+    coord._last_result = _make_fake_result(
+        mode_schedule=[action],
+        soc_schedule_kwh=[prev_soc_kwh, prev_soc_kwh + planned_delta_kwh],
+        power_schedule_kw=[signed_kw],
+    )
+    if coord.data is None:
+        coord.data = {}
+    coord.data = {**coord.data, "step_durations_hours": [step_hours]}
+    coord._last_battery_setpoints[sid] = signed_kw
+    coord._soc_snapshot_kwh[sid] = prev_soc_kwh
+    if actual_delta_kwh is not None:
+        reached = (
+            prev_soc_kwh + actual_delta_kwh
+            if charging
+            else prev_soc_kwh - actual_delta_kwh
+        )
+        coord._per_battery_states[sid] = BatteryState(
+            soc_kwh=reached,
+            soc_percent=reached / max(cfg.capacity_kwh, 1e-9) * 100,
+            power_kw=signed_kw,
+            mode=action,
+        )
+    if executed:
+        _mark_plan_executed(coord)
+    return sid
+
+
 def test_calibration_no_sample_without_previous_result(hass):
     """No calibration sample when _last_result is None."""
     coord = _make_coordinator(hass)
     assert coord.charge_eff_correction == 1.0
 
-    battery_state = BatteryState(
-        soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_correction == 1.0
     assert coord.charge_eff_sample_count == 0
@@ -2475,27 +2539,42 @@ def test_calibration_no_sample_for_idle_step(hass):
         soc_schedule_kwh=[5.0, 5.0, 6.2],
     )
 
-    battery_state = BatteryState(
-        soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_correction == 1.0
 
 
+def test_calibration_no_sample_for_a_battery_that_was_not_dispatched(hass):
+    """A pack that sat idle while its sibling worked has nothing to report.
+
+    The dispatcher concentrates a setpoint on one battery at a time, so
+    crediting the fleet plan to every pack would attribute one machine's
+    throughput to another.
+    """
+    coord = _make_coordinator(
+        hass,
+        battery_subentries=[
+            ("bat1", {CONF_MAX_CHARGE_POWER_KW: 1.2, CONF_MAX_DISCHARGE_POWER_KW: 1.2}),
+            ("bat2", {CONF_MAX_CHARGE_POWER_KW: 1.2, CONF_MAX_DISCHARGE_POWER_KW: 1.2}),
+        ],
+    )
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.8, index=0)
+    coord._last_battery_setpoints["bat2"] = 0.0
+
+    coord._update_charge_eff_calibration()
+
+    assert _calibration(coord, index=0).sample_count == 1
+    assert _calibration(coord, index=1).sample_count == 0
+    assert _calibration(coord, index=1).last_result == CALIBRATION_NOT_DISPATCHED
+
+
 def test_calibration_no_sample_when_planned_delta_too_small(hass):
     """No sample when planned charge delta is below 0.1 kWh threshold."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 5.05],  # only 0.05 kWh planned
-    )
+    _plan_battery_step(coord, planned_delta_kwh=0.05, actual_delta_kwh=0.03)
 
-    battery_state = BatteryState(
-        soc_kwh=5.03, soc_percent=50.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
 
@@ -2503,45 +2582,30 @@ def test_calibration_no_sample_when_planned_delta_too_small(hass):
 def test_calibration_perfect_efficiency_no_correction(hass):
     """When actual delta equals planned delta, correction stays at 1.0."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
-    )
-    _mark_plan_executed(coord)
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=1.0)
 
-    # Actual SoC reached exactly the planned value
-    battery_state = BatteryState(
-        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 1
-    assert coord._charge_eff_samples[0] == pytest.approx(1.0)
+    assert _calibration(coord).samples[0] == pytest.approx(1.0)
     assert coord.charge_eff_correction == pytest.approx(1.0)
 
 
 def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
     """Do not sample halfway through the previously planned charging step."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],
-    )
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.25)
     coord.data = {
+        **coord.data,
         "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
-        "step_durations_hours": [1.0],
     }
 
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 10, 15, tzinfo=timezone.utc),
     )
-    _mark_plan_executed(coord)
 
-    battery_state = BatteryState(
-        soc_kwh=5.25, soc_percent=52.5, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_correction == 1.0
@@ -2550,48 +2614,33 @@ def test_calibration_waits_until_previous_step_has_elapsed(hass, monkeypatch):
 def test_calibration_samples_after_previous_step_has_elapsed(hass, monkeypatch):
     """Collect a sample once the previous planned charging step has finished."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],
-    )
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=1.0)
     coord.data = {
+        **coord.data,
         "step_start_times_iso": ["2026-04-15T10:00:00+00:00"],
-        "step_durations_hours": [1.0],
     }
 
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
         lambda: datetime(2026, 4, 15, 11, 0, tzinfo=timezone.utc),
     )
-    _mark_plan_executed(coord)
 
-    battery_state = BatteryState(
-        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 1
-    assert coord._charge_eff_samples[0] == pytest.approx(1.0)
+    assert _calibration(coord).samples[0] == pytest.approx(1.0)
     assert coord.charge_eff_correction == pytest.approx(1.0)
 
 
 def test_calibration_low_efficiency_updates_correction(hass):
     """When battery only charged to 80% of plan, correction moves below 1."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[4.0, 6.0],  # planned delta = 2.0 kWh
-    )
-    _mark_plan_executed(coord)
+    _plan_battery_step(coord, planned_delta_kwh=2.0, actual_delta_kwh=1.6)
 
-    # Actual delta = 1.6 kWh → ratio = 0.8
-    battery_state = BatteryState(
-        soc_kwh=5.6, soc_percent=56.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 1
-    assert coord._charge_eff_samples[0] == pytest.approx(0.8)
+    assert _calibration(coord).samples[0] == pytest.approx(0.8)
     assert coord.charge_eff_correction == pytest.approx(0.8)
 
 
@@ -2600,21 +2649,8 @@ def test_calibration_rolling_average_converges(hass):
     coord = _make_coordinator(hass)
 
     for _ in range(4):
-        coord._last_result = _make_fake_result(
-            mode_schedule=["charging"],
-            soc_schedule_kwh=[0.0, 1.0],
-        )
-        _mark_plan_executed(coord)
-        # actual delta = 0.85 kWh → ratio = 0.85
-        battery_state = BatteryState(
-            soc_kwh=0.85, soc_percent=8.5, power_kw=1.0, mode="charging"
-        )
-        coord._update_charge_eff_calibration(battery_state)
-        # Reset prev_soc for next iteration
-        coord._last_result = _make_fake_result(
-            mode_schedule=["charging"],
-            soc_schedule_kwh=[0.0, 1.0],
-        )
+        _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.85)
+        coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_correction == pytest.approx(0.85, abs=1e-9)
 
@@ -2627,17 +2663,10 @@ def test_calibration_drops_implausibly_low_ratio(hass):
     something else happened.
     """
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 7.0],  # planned delta = 2.0 kWh
-    )
-    _mark_plan_executed(coord)
+    # Actual delta 0.5 of a planned 2.0 → ratio 0.25, below the 0.5 floor.
+    _plan_battery_step(coord, planned_delta_kwh=2.0, actual_delta_kwh=0.5)
 
-    # Actual delta = 0.5 kWh → ratio 0.25, below the 0.5 acceptance floor
-    battery_state = BatteryState(
-        soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_correction == pytest.approx(1.0)
@@ -2646,17 +2675,10 @@ def test_calibration_drops_implausibly_low_ratio(hass):
 def test_calibration_drops_implausibly_high_ratio(hass):
     """A ratio above the acceptance window is dropped as well."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
-    )
-    _mark_plan_executed(coord)
+    # Ratio 2.0, above the 1.5 acceptance ceiling.
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=2.0)
 
-    # Actual delta = 2.0 kWh → ratio 2.0, above the 1.5 acceptance ceiling
-    battery_state = BatteryState(
-        soc_kwh=7.0, soc_percent=70.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
 
@@ -2668,19 +2690,12 @@ def test_calibration_correction_is_clamped_for_use(hass):
     the bound on what the optimizer is handed is applied to the mean instead.
     """
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
-    )
-    _mark_plan_executed(coord)
+    # Ratio 1.4, inside the acceptance window but above the apply ceiling.
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=1.4)
 
-    # Actual delta = 1.4 kWh → ratio 1.4, inside the window
-    battery_state = BatteryState(
-        soc_kwh=6.4, soc_percent=64.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
-    assert coord._charge_eff_samples[0] == pytest.approx(1.4)
+    assert _calibration(coord).samples[0] == pytest.approx(1.4)
     assert coord.charge_eff_correction == pytest.approx(1.05)
 
 
@@ -2730,10 +2745,7 @@ def test_calibration_not_applied_for_dc_coupled(hass):
     )
     _mark_plan_executed(coord)
 
-    battery_state = BatteryState(
-        soc_kwh=5.5, soc_percent=55.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     # No sample should have been added for DC-coupled system
     assert coord.charge_eff_sample_count == 0
@@ -3098,10 +3110,7 @@ def test_calibration_no_sample_when_plan_overridden_by_zero_grid(hass):
     coord._effective_mode = "zero_grid"
     coord._controller_schedule_w = 0.0
 
-    battery_state = BatteryState(
-        soc_kwh=4.1, soc_percent=41.0, power_kw=0.0, mode="idle"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_correction == 1.0
@@ -3118,10 +3127,7 @@ def test_calibration_no_sample_when_commitment_locked_other_power(hass):
     coord._effective_mode = "charging"
     coord._controller_schedule_w = 400.0
 
-    battery_state = BatteryState(
-        soc_kwh=4.4, soc_percent=44.0, power_kw=0.4, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state)
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_correction == 1.0
@@ -3137,10 +3143,7 @@ def test_discharge_calibration_no_sample_when_plan_overridden(hass):
     coord._effective_mode = "zero_grid"
     coord._controller_schedule_w = 0.0
 
-    battery_state = BatteryState(
-        soc_kwh=5.9, soc_percent=59.0, power_kw=0.0, mode="idle"
-    )
-    coord._update_discharge_eff_calibration(battery_state)
+    coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_sample_count == 0
     assert coord.discharge_eff_correction == 1.0
@@ -3149,20 +3152,18 @@ def test_discharge_calibration_no_sample_when_plan_overridden(hass):
 def test_discharge_calibration_samples_when_plan_executed(hass):
     """Discharge calibration samples normally when the plan was executed."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["discharging"],
-        soc_schedule_kwh=[6.0, 4.0],  # planned delta = 2.0 kWh down
+    _plan_battery_step(
+        coord,
+        action=ACTION_DISCHARGING,
+        planned_delta_kwh=2.0,
+        actual_delta_kwh=1.6,
+        prev_soc_kwh=6.0,
     )
-    _mark_plan_executed(coord)
 
-    # Actual delta = 1.6 kWh down → ratio = 0.8
-    battery_state = BatteryState(
-        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
-    )
-    coord._update_discharge_eff_calibration(battery_state)
+    coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_sample_count == 1
-    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.8)
     assert coord.discharge_eff_correction == pytest.approx(0.8)
 
 
@@ -3174,20 +3175,20 @@ def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
     corrupt the persisted calibration (mirror of the high-SoC charge guard).
     """
     coord = _make_coordinator(hass)
-    coord.battery_config.low_soc_discharge_threshold_pct = 50.0
-    coord.battery_config.low_soc_max_discharge_kw = 0.5
+    cfg = coord._individual_battery_configs[0][1]
+    cfg.low_soc_discharge_threshold_pct = 50.0
+    cfg.low_soc_max_discharge_kw = 0.5
 
     # capacity 10 kWh → threshold at 5.0 kWh; plan 6.0 → 4.0 crosses it
-    coord._last_result = _make_fake_result(
-        mode_schedule=["discharging"],
-        soc_schedule_kwh=[6.0, 4.0],
+    _plan_battery_step(
+        coord,
+        action=ACTION_DISCHARGING,
+        planned_delta_kwh=2.0,
+        actual_delta_kwh=0.8,
+        prev_soc_kwh=6.0,
     )
-    _mark_plan_executed(coord)
 
-    battery_state = BatteryState(
-        soc_kwh=5.2, soc_percent=52.0, power_kw=-1.0, mode="discharging"
-    )
-    coord._update_discharge_eff_calibration(battery_state)
+    coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_sample_count == 0
     assert coord.discharge_eff_correction == pytest.approx(1.0)
@@ -3196,23 +3197,23 @@ def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
 def test_discharge_calibration_samples_above_low_soc_derating(hass):
     """Sampling continues when derating is configured but the step stays above it."""
     coord = _make_coordinator(hass)
-    coord.battery_config.low_soc_discharge_threshold_pct = 20.0
-    coord.battery_config.low_soc_max_discharge_kw = 0.5
+    cfg = coord._individual_battery_configs[0][1]
+    cfg.low_soc_discharge_threshold_pct = 20.0
+    cfg.low_soc_max_discharge_kw = 0.5
 
     # threshold at 2.0 kWh; plan 6.0 → 4.0 stays well above it
-    coord._last_result = _make_fake_result(
-        mode_schedule=["discharging"],
-        soc_schedule_kwh=[6.0, 4.0],
+    _plan_battery_step(
+        coord,
+        action=ACTION_DISCHARGING,
+        planned_delta_kwh=2.0,
+        actual_delta_kwh=1.6,
+        prev_soc_kwh=6.0,
     )
-    _mark_plan_executed(coord)
 
-    battery_state = BatteryState(
-        soc_kwh=4.4, soc_percent=44.0, power_kw=-1.0, mode="discharging"
-    )
-    coord._update_discharge_eff_calibration(battery_state)
+    coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_sample_count == 1
-    assert coord._discharge_eff_samples[0] == pytest.approx(0.8)
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.8)
 
 
 # Feed-in interval handling
@@ -4114,96 +4115,108 @@ def _coordinator_with_counters(hass, capacity_kwh=10.0, soc_state="50"):
 def test_calibration_prefers_the_energy_counter_over_the_soc_delta(hass):
     """The counter measures the same energy without the SoC sensor's step size."""
     coord = _coordinator_with_counters(hass)
-    hass.states.async_set("sensor.bat_charged", "100.0", {"unit_of_measurement": "kWh"})
-    coord._energy_counter_snapshot = {"charged": 100.0, "discharged": 50.0}
+    coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
     hass.states.async_set("sensor.bat_charged", "100.9", {"unit_of_measurement": "kWh"})
     hass.states.async_set(
         "sensor.bat_discharged", "50.0", {"unit_of_measurement": "kWh"}
     )
 
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
-    )
-    _mark_plan_executed(coord)
+    # SoC sensor still reads its starting value — a SoC-based sample would be 0.
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.0)
+    coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
 
-    # SoC sensor still reads 50 % (5.0 kWh) — a SoC-based sample would be 0.0.
-    battery_state = BatteryState(
-        soc_kwh=5.0, soc_percent=50.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
 
     # 0.9 kWh counted against 1.0 kWh planned
-    assert coord._charge_eff_samples[0] == pytest.approx(0.9)
+    assert _calibration(coord).samples[0] == pytest.approx(0.9)
 
 
 def test_calibration_uses_the_discharge_counter(hass):
     coord = _coordinator_with_counters(hass)
-    coord._energy_counter_snapshot = {"charged": 100.0, "discharged": 50.0}
     hass.states.async_set("sensor.bat_charged", "100.0", {"unit_of_measurement": "kWh"})
     hass.states.async_set(
         "sensor.bat_discharged", "51.8", {"unit_of_measurement": "kWh"}
     )
 
-    coord._last_result = _make_fake_result(
-        mode_schedule=["discharging"],
-        soc_schedule_kwh=[6.0, 4.0],  # planned drop = 2.0 kWh
+    _plan_battery_step(
+        coord,
+        action=ACTION_DISCHARGING,
+        planned_delta_kwh=2.0,
+        actual_delta_kwh=0.0,
+        prev_soc_kwh=6.0,
     )
-    _mark_plan_executed(coord)
+    coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
 
-    battery_state = BatteryState(
-        soc_kwh=6.0, soc_percent=60.0, power_kw=-1.0, mode="discharging"
-    )
-    coord._update_discharge_eff_calibration(battery_state, coord._read_energy_totals())
+    coord._update_discharge_eff_calibration(coord._read_energy_totals())
 
-    assert coord._discharge_eff_samples[0] == pytest.approx(0.9)
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.9)
 
 
 def test_calibration_falls_back_to_soc_when_counters_absent(hass):
     """No counters configured: the SoC delta still drives the calibration."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],
-    )
-    _mark_plan_executed(coord)
-    battery_state = BatteryState(
-        soc_kwh=5.9, soc_percent=59.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.9)
 
-    assert coord._charge_eff_samples[0] == pytest.approx(0.9)
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
+
+    assert _calibration(coord).samples[0] == pytest.approx(0.9)
 
 
 def test_calibration_ignores_a_counter_reset(hass):
     """A total_increasing counter that jumped backwards must not be used."""
     coord = _coordinator_with_counters(hass)
-    coord._energy_counter_snapshot = {"charged": 100.0, "discharged": 50.0}
     # Meter replaced: the total restarted from zero.
     hass.states.async_set("sensor.bat_charged", "0.4", {"unit_of_measurement": "kWh"})
     hass.states.async_set(
         "sensor.bat_discharged", "50.0", {"unit_of_measurement": "kWh"}
     )
 
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],
-    )
-    _mark_plan_executed(coord)
     # SoC says the step went fine, so the fallback path produces the sample.
-    battery_state = BatteryState(
-        soc_kwh=5.9, soc_percent=59.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.9)
+    coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
 
-    assert coord._charge_eff_samples[0] == pytest.approx(0.9)
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
+
+    assert _calibration(coord).samples[0] == pytest.approx(0.9)
 
 
 def test_calibration_ignores_an_unavailable_counter(hass):
     coord = _coordinator_with_counters(hass)
-    coord._energy_counter_snapshot = {"charged": 100.0, "discharged": 50.0}
     hass.states.async_set("sensor.bat_charged", "unavailable")
-    assert coord._read_energy_totals()["charged"] is None
+    assert coord._read_energy_totals()["bat1"]["charged"] is None
+
+
+def test_counters_are_read_per_battery(hass):
+    """Each pack's throughput is kept apart; a fleet sum cannot say who moved it."""
+    coord = _make_coordinator(
+        hass,
+        battery_subentries=[
+            (
+                "bat1",
+                {
+                    CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.a_charged",
+                    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR: "sensor.a_discharged",
+                },
+            ),
+            (
+                "bat2",
+                {
+                    CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.b_charged",
+                    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR: "sensor.b_discharged",
+                },
+            ),
+        ],
+    )
+    hass.states.async_set("sensor.a_charged", "10.0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.a_discharged", "4.0", {"unit_of_measurement": "kWh"})
+    hass.states.async_set("sensor.b_charged", "7000", {"unit_of_measurement": "Wh"})
+    hass.states.async_set("sensor.b_discharged", "1.0", {"unit_of_measurement": "kWh"})
+
+    totals = coord._read_energy_totals()
+
+    assert totals["bat1"]["charged"] == pytest.approx(10.0)
+    assert totals["bat2"]["charged"] == pytest.approx(7.0)
+    assert totals["bat2"]["discharged"] == pytest.approx(1.0)
 
 
 def test_soc_quantum_raises_the_sampling_threshold(hass):
@@ -4233,15 +4246,10 @@ def test_small_step_is_skipped_on_a_coarse_soc_sensor(hass):
     coord._battery_subentries = [("bat1", {CONF_BATTERY_SOC_SENSOR: "sensor.test_soc"})]
     hass.states.async_set("sensor.test_soc", "50", {"unit_of_measurement": "%"})
 
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 5.2],  # planned delta = 0.2 kWh < 0.4 kWh floor
-    )
-    _mark_plan_executed(coord)
-    battery_state = BatteryState(
-        soc_kwh=5.1, soc_percent=51.0, power_kw=1.0, mode="charging"
-    )
-    coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
+    # planned delta = 0.2 kWh, below the 0.4 kWh floor this sensor implies
+    _plan_battery_step(coord, planned_delta_kwh=0.2, actual_delta_kwh=0.1)
+
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
 
     assert coord.charge_eff_sample_count == 0
 
@@ -4254,18 +4262,13 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
     battery.
     """
     coord = _coordinator_with_counters(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"],
-        soc_schedule_kwh=[5.0, 6.0],  # planned delta = 1.0 kWh
-    )
-    _mark_plan_executed(coord)
-    battery_state = BatteryState(
-        soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging"
-    )
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=1.0)
 
     charged = 100.0
     for actual in (0.8, 1.2, 0.9, 1.1, 1.3, 0.7):
-        coord._energy_counter_snapshot = {"charged": charged, "discharged": 0.0}
+        coord._energy_counter_snapshot = {
+            "bat1": {"charged": charged, "discharged": 0.0}
+        }
         charged += actual
         hass.states.async_set(
             "sensor.bat_charged", f"{charged}", {"unit_of_measurement": "kWh"}
@@ -4273,7 +4276,7 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
         hass.states.async_set(
             "sensor.bat_discharged", "0.0", {"unit_of_measurement": "kWh"}
         )
-        coord._update_charge_eff_calibration(battery_state, coord._read_energy_totals())
+        coord._update_charge_eff_calibration(coord._read_energy_totals())
 
     assert coord.charge_eff_sample_count == 6
     assert coord.charge_eff_correction == pytest.approx(1.0, abs=1e-6)
@@ -4291,14 +4294,9 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
 def test_calibration_reports_a_taken_sample(hass):
     """The happy path names itself, so 'no reason given' is never ambiguous."""
     coord = _make_coordinator(hass)
-    coord._last_result = _make_fake_result(
-        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
-    )
-    _mark_plan_executed(coord)
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=1.0)
 
-    coord._update_charge_eff_calibration(
-        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
-    )
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_last_result == CALIBRATION_SAMPLED
 
@@ -4312,9 +4310,7 @@ def test_calibration_reports_dc_coupling_as_the_blocker(hass):
     )
     _mark_plan_executed(coord)
 
-    coord._update_charge_eff_calibration(
-        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
-    )
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_last_result == CALIBRATION_DC_COUPLED
@@ -4330,9 +4326,7 @@ def test_calibration_reports_a_plan_that_was_never_executed(hass):
     coord._effective_mode = "zero_grid"
     coord._controller_schedule_w = 0.0
 
-    coord._update_charge_eff_calibration(
-        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
-    )
+    coord._update_charge_eff_calibration()
 
     assert coord.charge_eff_sample_count == 0
     assert coord.charge_eff_last_result == CALIBRATION_PLAN_NOT_EXECUTED
@@ -4346,9 +4340,7 @@ def test_calibration_reports_that_the_direction_was_not_planned(hass):
     )
     _mark_plan_executed(coord)
 
-    coord._update_discharge_eff_calibration(
-        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
-    )
+    coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_last_result == CALIBRATION_NO_PLAN
 
@@ -4366,9 +4358,111 @@ def test_calibration_starts_out_admitting_it_knows_nothing(hass):
 def test_a_correction_within_noise_of_nominal_is_reported_as_not_applied(hass):
     """1.0 is stored but never handed to the optimizer; applied must reflect that."""
     coord = _make_coordinator(hass)
+    calibration = _calibration(coord)
+    calibration.samples.append(1.0)
 
-    coord._charge_eff_correction = 0.999
+    calibration.correction = 0.999
     assert coord.charge_eff_applied is False
 
-    coord._charge_eff_correction = 0.94
+    calibration.correction = 0.94
     assert coord.charge_eff_applied is True
+
+
+def test_the_fleet_correction_is_capacity_weighted_across_batteries(hass):
+    """The DP gets one number, and it has to reflect how much pack it describes."""
+    coord = _make_coordinator(
+        hass,
+        battery_subentries=[
+            ("small", {CONF_MAX_CHARGE_POWER_KW: 1.0, CONF_CAPACITY_KWH: 5.0}),
+            ("large", {CONF_MAX_CHARGE_POWER_KW: 1.0, CONF_CAPACITY_KWH: 15.0}),
+        ],
+    )
+    for sid, correction in (("small", 0.80), ("large", 0.90)):
+        direction = coord.battery_calibrations[sid].charge
+        direction.samples.append(correction)
+        direction.correction = correction
+
+    # (0.80 x 5 + 0.90 x 15) / 20
+    assert coord.charge_eff_correction == pytest.approx(0.875)
+
+
+def test_the_calibration_report_names_every_battery_and_direction(hass):
+    """Diagnostics has to carry the breakdown, or the fleet average is all there is."""
+    coord = _make_coordinator(
+        hass,
+        battery_subentries=[
+            ("bat1", {CONF_NAME: "Marstek", CONF_MAX_CHARGE_POWER_KW: 1.2}),
+            ("bat2", {CONF_MAX_CHARGE_POWER_KW: 1.2}),
+        ],
+    )
+    charge = coord.battery_calibrations["bat1"].charge
+    charge.samples.append(0.88)
+    charge.correction = 0.88
+
+    report = coord.battery_calibration_report()
+
+    assert report["bat1"]["name"] == "Marstek"
+    assert report["bat1"]["charge"]["correction"] == pytest.approx(0.88)
+    assert report["bat1"]["charge"]["samples"] == 1
+    assert report["bat1"]["discharge"]["samples"] == 0
+    # A battery without a configured name still has to appear.
+    assert report["bat2"]["name"] == "bat2"
+
+
+def test_calibration_state_reports_the_battery_the_sensor_asked_for(hass):
+    """The per-battery sensors read through this, one pack and one direction."""
+    coord = _make_coordinator(hass)
+    charge = _calibration(coord, ACTION_CHARGING)
+    charge.samples.append(0.9)
+    charge.correction = 0.9
+
+    assert coord.battery_calibration_state("bat1", ACTION_CHARGING) == (
+        pytest.approx(0.9),
+        1,
+        True,
+        CALIBRATION_NO_RESULT,
+    )
+    correction, samples, applied, _ = coord.battery_calibration_state(
+        "bat1", ACTION_DISCHARGING
+    )
+    assert (correction, samples, applied) == (1.0, 0, False)
+
+
+def test_calibration_state_of_an_unknown_battery_admits_it_knows_nothing(hass):
+    """A subentry the coordinator has never seen must not report a clean 100%."""
+    coord = _make_coordinator(hass)
+
+    correction, samples, applied, last_result = coord.battery_calibration_state(
+        "not-a-battery", ACTION_CHARGING
+    )
+
+    assert (correction, samples, applied) == (1.0, 0, False)
+    assert last_result == CALIBRATION_NO_RESULT
+
+
+def test_the_fleet_reason_is_nothing_when_there_are_no_batteries(hass):
+    """With no packs configured there is no evidence and no reason to invent one."""
+    coord = _make_coordinator(hass, battery_subentries=[])
+
+    assert coord.charge_eff_last_result == CALIBRATION_NO_RESULT
+    assert coord.charge_eff_correction == 1.0
+
+
+def test_an_unmeasured_battery_does_not_dilute_a_measured_one(hass):
+    """A pack the dispatcher never used carries no evidence, so it carries no weight.
+
+    Averaging its nominal 1.0 in would report half the derating that was
+    actually observed on the pack that did the work.
+    """
+    coord = _make_coordinator(
+        hass,
+        battery_subentries=[
+            ("worked", {CONF_MAX_CHARGE_POWER_KW: 1.0, CONF_CAPACITY_KWH: 10.0}),
+            ("idle", {CONF_MAX_CHARGE_POWER_KW: 1.0, CONF_CAPACITY_KWH: 10.0}),
+        ],
+    )
+    measured = coord.battery_calibrations["worked"].charge
+    measured.samples.append(0.80)
+    measured.correction = 0.80
+
+    assert coord.charge_eff_correction == pytest.approx(0.80)

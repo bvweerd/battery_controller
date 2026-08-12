@@ -28,6 +28,7 @@ from .const import (
     DC_TO_AC_INVERTER_EFFICIENCY,
     DOMAIN,
     FORECAST_INTERVAL_MINUTES,
+    PV_CALIBRATION_APPLY_EPSILON,
     PV_CALIBRATION_APPLY_MAX,
     PV_CALIBRATION_APPLY_MIN,
     PV_CALIBRATION_MAX_LOAD_FRACTION,
@@ -63,6 +64,11 @@ PV_CAL_WINDOW_MISMATCH = "forecast_window_did_not_elapse"
 PV_CAL_CURTAILED = "pv_curtailed"
 PV_CAL_METER_RESET = "production_counter_reset"
 PV_CAL_IMPLAUSIBLE = "sample_dropped_implausible"
+
+
+def _pv_gain_is_significant(correction: float) -> bool:
+    """Whether a learned gain is far enough from nominal to change anything."""
+    return abs(correction - 1.0) > PV_CALIBRATION_APPLY_EPSILON
 
 
 class ForecastCoordinator(DataUpdateCoordinator):
@@ -261,10 +267,14 @@ class ForecastCoordinator(DataUpdateCoordinator):
     def pv_correction_applied(self, subentry_id: str) -> bool:
         """Whether one array's forecast is currently being corrected.
 
-        A correction is only derived once PV_CALIBRATION_MIN_SAMPLES
-        observations exist, so this stays False while the window fills.
+        This answers the question the user actually has — is my forecast being
+        changed right now — so it shares its gate with ``_sum_arrays``: a
+        correction has to be derived *and* be far enough from nominal to matter.
+        Membership of ``_pv_cal_correction`` alone was not enough. A correction
+        is only derived once PV_CALIBRATION_MIN_SAMPLES observations exist, so
+        this stays False while the window fills.
         """
-        return subentry_id in self._pv_cal_correction
+        return _pv_gain_is_significant(self.pv_correction(subentry_id))
 
     def pv_last_result(self, subentry_id: str) -> str:
         """What the last calibration attempt for one array did, and why."""
@@ -273,7 +283,15 @@ class ForecastCoordinator(DataUpdateCoordinator):
         return self._pv_cal_last_result.get(subentry_id, PV_CAL_OUTSIDE_LOAD_BAND)
 
     async def _async_load_pv_calibration(self) -> None:
-        """Restore per-array PV corrections from storage."""
+        """Restore per-array PV corrections from storage.
+
+        Only a correction that the sample floor actually backs is restored. The
+        samples of every array are persisted — including arrays still filling
+        their window — and reading those entries back unconditionally handed
+        each of them a correction of 1.0, which made ``pv_correction_applied``
+        report True for an array that had never derived anything. The value was
+        harmless; the claim was not.
+        """
         stored = await self._pv_cal_store.async_load()
         if not stored:
             return
@@ -283,7 +301,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 ((float(m), float(f)) for m, f in samples),
                 maxlen=PV_CALIBRATION_WINDOW,
             )
-            self._pv_cal_correction[sid] = float(entry.get("correction", 1.0))
+            if len(self._pv_cal_samples[sid]) >= PV_CALIBRATION_MIN_SAMPLES:
+                self._pv_cal_correction[sid] = float(entry.get("correction", 1.0))
         active = {
             sid: round(c, 3)
             for sid, c in self._pv_cal_correction.items()
@@ -360,6 +379,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
             # The window the forecast described is not the window that elapsed.
             self._set_pv_results(planned_by_sid, PV_CAL_WINDOW_MISMATCH)
             return
+        # Within that band the window still rarely lasts exactly one step: a
+        # weather update refreshes this coordinator off its own cadence, so the
+        # meter delta can cover 20 minutes while the snapshot describes 15. The
+        # planned energy is the first step's power held over the window, so it
+        # has to be stretched to the window that was actually measured —
+        # otherwise a late run alone reads as a +33 % array.
+        elapsed_scale = elapsed_min / step_min
 
         if self.pv_curtailed:
             # Production was deliberately suppressed; the shortfall is not a
@@ -368,7 +394,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
             return
 
         changed = False
-        for sid, planned_kwh in planned_by_sid.items():
+        for sid, snapshot_kwh in planned_by_sid.items():
+            planned_kwh = snapshot_kwh * elapsed_scale
             entity_id = self._pv_measured_sensors.get(sid)
             before = (snapshot["meter_kwh"] or {}).get(sid)
             if not entity_id or before is None or planned_kwh <= 0:
@@ -729,7 +756,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     raw_first_step_kw[sid] = series[0] if series else 0.0
                     kwp_by_sid[sid] = model.peak_power_kwp
                 gain = self.pv_correction(sid)
-                if gain != 1.0:
+                if _pv_gain_is_significant(gain):
                     series = [v * gain for v in series]
                 if sid:
                     per_pv_array_forecasts[sid] = [

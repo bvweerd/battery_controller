@@ -302,6 +302,12 @@
       },
       "discharge_eff_correction": {
         "name": "Ontlaadefficiëntie-correctie"
+      },
+      "battery_charge_eff_correction": {
+        "name": "Laadefficiëntie-correctie"
+      },
+      "battery_discharge_eff_correction": {
+        "name": "Ontlaadefficiëntie-correctie"
       }
     },
     "number": {

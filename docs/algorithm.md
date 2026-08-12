@@ -533,6 +533,12 @@ Charge-speed correction: when runtime calibration detects that the battery gains
 
 The observation is taken from the per-battery cumulative kWh counters when they are configured, and from the SoC delta otherwise. Both measure the same energy, but a SoC sensor reporting whole percent quantises at `capacity / 100` — 0.1 kWh on a 10 kWh pack — so on that path the minimum planned change worth sampling scales with the observed sensor resolution rather than a fixed 0.1 kWh. Samples outside `[0.5, 1.5]` are dropped rather than folded into the mean: an asymmetric clip (capped at 1.05, allowed down to 0.5) let symmetric measurement noise bias the correction below 1.0 for a healthy battery. Only the resulting mean is clamped, to `[0.5, 1.05]`, before it is applied.
 
+**One calibration per battery.** Each pack keeps its own window, its own storage key and its own pair of diagnostic sensors, and is scored against the setpoint *it* was given (`battery_setpoints`) rather than against the fleet plan. The dispatcher concentrates a setpoint on one battery at a time (see [Section 12](#12-multi-battery-dispatch)), so a single fleet-wide ratio measures whichever pack happened to be picked and then attributes it to all of them: a pack that is losing capacity is invisible, dragging the shared number down and having its healthy sibling planned pessimistically. A pack that was not dispatched in this direction reports `battery_not_dispatched` and takes no sample.
+
+The planned SoC change per pack is `|setpoint| × step_hours × charge_eff(|setpoint|)` for charging and `|setpoint| × step_hours / discharge_eff(|setpoint|)` for discharging, using that battery's own curve at its own power — the curves are power-dependent, so a pack running at 1.2 kW is not described by the fleet's 2.4 kW point. The derating guard likewise uses the pack's own threshold and its own SoC.
+
+The DP plans one SoC for the whole fleet, so it is handed the **capacity-weighted aggregate** of the per-battery corrections, taken over the packs that have actually measured something. A pack the dispatcher has never used carries no evidence, and averaging its nominal 1.0 in would report half the derating that was observed — an unmeasured pack is therefore assumed to behave like the measured ones rather than like the datasheet. The fleet sensors publish that aggregate; the per-battery sensors publish the individual measurements. On upgrade, a battery with nothing of its own seeds from the old fleet-wide store: that value is no longer the answer, but it is a better prior than nominal and each new sample replaces more of it.
+
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
 **Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
@@ -716,13 +722,31 @@ A quarter hour under cloud has a large relative error on a tiny amount of
 energy, and weighting by energy stops those steps dominating an estimate that
 is meant to describe a gain error.
 
-Samples are only taken in the middle of the array's rating (10–80 % of kWp):
+Samples are only taken in the middle of the array's rating (10–90 % of kWp):
 below the floor the signal is smaller than the noise, above the ceiling
-inverter clipping and thermal derating dominate and are not forecast errors.
+inverter clipping dominates and is not a forecast error. The ceiling has to sit
+above what an array genuinely reaches — a well-oriented array peaks near 85 %
+of its rating on a clear summer day, and a lower ceiling excludes exactly the
+steps with the best signal-to-noise ratio, leaving a south array learning only
+from its oblique, diffuse-dominated hours and then applying that error all day.
+Typical DC/AC ratios of 1.1–1.2 put real clipping at 83–91 %.
+
 Steps are skipped entirely while PV curtailment is active, when the elapsed
 window is not the window the forecast described, and when the counter jumps
-backwards. The applied factor is clamped and only used once enough samples
-exist.
+backwards. Within the accepted window the planned energy is stretched to the
+time that actually elapsed: this coordinator also refreshes when new weather
+arrives, so a meter delta covering 20 minutes is regularly scored against a
+snapshot describing 15, and a late run alone would read as a 33 % better array.
+
+The applied factor is clamped and only used once `PV_CALIBRATION_MIN_SAMPLES`
+observations exist. That floor is what separates a gain error from the weather:
+an array only ever samples in its own part of the day, so it picks up the
+radiation forecast's bias for those hours, and at a couple of dozen samples —
+one afternoon of production — that bias *is* the correction. A correction is
+reported as applied only when it has been derived *and* differs from nominal by
+more than `PV_CALIBRATION_APPLY_EPSILON`, the same gate the forecast itself
+uses, so "being corrected" cannot mean something different on the sensor than
+it does in the model.
 
 **What it can and cannot fix.** A wrong tilt or orientation entry, soiling and
 a string that is down are gain errors: the array produces a roughly constant

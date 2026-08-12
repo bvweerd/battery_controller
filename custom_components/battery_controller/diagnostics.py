@@ -231,6 +231,12 @@ async def async_get_config_entry_diagnostics(
             "discharge_eff_samples": data.get("discharge_eff_samples"),
             "discharge_eff_applied": data.get("discharge_eff_applied"),
             "discharge_eff_last_result": data.get("discharge_eff_last_result"),
+            # The fleet figures above are the capacity-weighted aggregate the DP
+            # plans with. This is where each pack's own measurement lives —
+            # which is the only place a single derated battery is visible.
+            "battery_calibration": _remap_keys(
+                data.get("battery_calibration") or {}, name_map
+            ),
             "timestamp": str(data.get("timestamp")),
         }
 
