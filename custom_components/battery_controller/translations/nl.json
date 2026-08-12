@@ -296,6 +296,12 @@
       },
       "pv_array_forecast": {
         "name": "PV Voorspelling"
+      },
+      "charge_eff_correction": {
+        "name": "Laadefficiëntie-correctie"
+      },
+      "discharge_eff_correction": {
+        "name": "Ontlaadefficiëntie-correctie"
       }
     },
     "number": {

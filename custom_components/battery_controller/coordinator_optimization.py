@@ -19,7 +19,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .battery_dispatch import BatteryDispatcher
+from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .efficiency_calibration import (
+    CALIBRATION_DC_COUPLED,
+    CALIBRATION_DELTA_TOO_SMALL,
+    CALIBRATION_DERATING,
+    CALIBRATION_NO_PLAN,
+    CALIBRATION_NO_RESULT,
+    CALIBRATION_PLAN_NOT_EXECUTED,
+    CALIBRATION_STEP_INCOMPLETE,
     CHARGE_CALIBRATION,
     DISCHARGE_CALIBRATION,
     DirectionCalibration,
@@ -28,7 +36,7 @@ from .efficiency_calibration import (
     discharge_curve_override,
     min_planned_delta_kwh,
 )
-from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
+from .efficiency_curve import interpolate_efficiency
 from .const import (
     DOMAIN,
     ACTION_CHARGING,
@@ -273,17 +281,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # flip the mode every realtime-update tick.
         self._last_hybrid_charge_decision: str = ACTION_CHARGING
 
-        # Hysteresis state for the hybrid+ surplus-capture decision: tracks
-        # whether the last decision was to store PV surplus ("zero_grid") or
-        # export it ("idle") so a shadow price hovering near the feed-in price
-        # doesn't flip the mode every optimization run.
-        self._last_hybrid_plus_capture_decision: str = "zero_grid"
+        # Hysteresis state for the surplus-capture decision: tracks whether the
+        # last decision was to store PV surplus ("zero_grid") or export it
+        # ("idle") so a shadow price hovering near the feed-in price doesn't
+        # flip the mode every optimization run.
+        self._last_surplus_capture_decision: str = "zero_grid"
 
-        # Whether hybrid+ currently blocks PV-surplus capture (exporting at the
-        # current feed-in price is worth more than storing). Gates the
-        # realtime idle→zero_grid upgrade in _resolve_controller_mode so a
-        # surplus appearing between optimizer runs isn't captured anyway.
-        self._hybrid_plus_capture_blocked: bool = False
+        # Whether the last optimizer run found PV-surplus capture uneconomical
+        # (exporting at the current feed-in price is worth more than storing).
+        # Gates the realtime idle→zero_grid upgrade in _resolve_controller_mode
+        # so a surplus appearing between optimizer runs isn't captured anyway.
+        self._surplus_capture_blocked: bool = False
 
         # Diagnostic history ring buffers (not persisted across restarts).
         # optimizer_run_log: one entry per 15-min optimizer run (24 h @ 15 min = 96).
@@ -321,26 +329,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         }
 
     @property
-    def _individual_battery_configs(self) -> list[tuple[str, BatteryConfig]]:
-        """Per-battery configs, owned by the dispatcher."""
-        return self._dispatcher.configs
-
-    @_individual_battery_configs.setter
-    def _individual_battery_configs(
-        self, value: list[tuple[str, BatteryConfig]]
-    ) -> None:
-        self._dispatcher.configs = value
-
-    @property
-    def _per_battery_states(self) -> dict[str, BatteryState]:
-        """Per-battery state cache, owned by the dispatcher."""
-        return self._dispatcher.states
-
-    @_per_battery_states.setter
-    def _per_battery_states(self, value: dict[str, BatteryState]) -> None:
-        self._dispatcher.states = value
-
-    @property
     def control_mode(self) -> str:
         """Get current control mode."""
         return self._control_mode
@@ -359,8 +347,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._committed_price = 0.0
         self._committed_power = 0.0
         self._committed_step_start = None
-        self._last_hybrid_plus_capture_decision = "zero_grid"
-        self._hybrid_plus_capture_blocked = False
+        self._last_surplus_capture_decision = "zero_grid"
+        self._surplus_capture_blocked = False
         # Reset cached setpoint so the real-time loop uses idle immediately
         # instead of applying stale setpoints from the previous mode while the
         # re-optimization triggered by the mode change is still running.
@@ -405,6 +393,76 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.forecast_coordinator.pv_curtailed = value
 
     @property
+    def charge_eff_correction(self) -> float:
+        """Learned multiplier on the charge-side SoC transition (1.0 = nominal).
+
+        Already published in ``data`` and in diagnostics; exposed here so the
+        current value can be read without a completed run, the same way
+        control_mode and optimization_enabled are.
+        """
+        return self._charge_calibration.correction
+
+    @property
+    def charge_eff_sample_count(self) -> int:
+        """Number of observations behind charge_eff_correction."""
+        return self._charge_calibration.sample_count
+
+    @property
+    def discharge_eff_correction(self) -> float:
+        """Learned multiplier on the discharge-side SoC transition."""
+        return self._discharge_calibration.correction
+
+    @property
+    def discharge_eff_sample_count(self) -> int:
+        """Number of observations behind discharge_eff_correction."""
+        return self._discharge_calibration.sample_count
+
+    @property
+    def charge_eff_applied(self) -> bool:
+        """Whether the charge correction currently changes the DP's plan.
+
+        The correction is only handed to the optimizer below 0.995: a value at
+        or above that is within measurement noise of nominal and is stored but
+        never applied. Same gate as charge_curve_override().
+        """
+        return self._charge_calibration.applied
+
+    @property
+    def discharge_eff_applied(self) -> bool:
+        """Whether the discharge correction currently changes the DP's plan."""
+        return self._discharge_calibration.applied
+
+    @property
+    def charge_eff_last_result(self) -> str:
+        """What the last charge-calibration attempt did, and why."""
+        return self._charge_calibration.last_result
+
+    @property
+    def discharge_eff_last_result(self) -> str:
+        """What the last discharge-calibration attempt did, and why."""
+        return self._discharge_calibration.last_result
+
+    @property
+    def _individual_battery_configs(self) -> list[tuple[str, BatteryConfig]]:
+        """Per-battery configs, owned by the dispatcher."""
+        return self._dispatcher.configs
+
+    @_individual_battery_configs.setter
+    def _individual_battery_configs(
+        self, value: list[tuple[str, BatteryConfig]]
+    ) -> None:
+        self._dispatcher.configs = value
+
+    @property
+    def _per_battery_states(self) -> dict[str, BatteryState]:
+        """Per-battery state cache, owned by the dispatcher."""
+        return self._dispatcher.states
+
+    @_per_battery_states.setter
+    def _per_battery_states(self, value: dict[str, BatteryState]) -> None:
+        self._dispatcher.states = value
+
+    @property
     def _charge_eff_samples(self) -> deque[float]:
         """Charge-side sample window, owned by DirectionCalibration."""
         return self._charge_calibration.samples
@@ -439,29 +497,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._discharge_calibration.correction = value
 
     @property
-    def charge_eff_correction(self) -> float:
-        """Learned multiplier on the charge-side SoC transition (1.0 = nominal).
+    def _charge_eff_last_result(self) -> str:
+        return self._charge_calibration.last_result
 
-        Already published in ``data`` and in diagnostics; exposed here so the
-        current value can be read without a completed run, the same way
-        control_mode and optimization_enabled are.
-        """
-        return self._charge_eff_correction
+    @_charge_eff_last_result.setter
+    def _charge_eff_last_result(self, value: str) -> None:
+        self._charge_calibration.last_result = value
 
     @property
-    def charge_eff_sample_count(self) -> int:
-        """Number of observations behind charge_eff_correction."""
-        return len(self._charge_eff_samples)
+    def _discharge_eff_last_result(self) -> str:
+        return self._discharge_calibration.last_result
 
-    @property
-    def discharge_eff_correction(self) -> float:
-        """Learned multiplier on the discharge-side SoC transition."""
-        return self._discharge_eff_correction
-
-    @property
-    def discharge_eff_sample_count(self) -> int:
-        """Number of observations behind discharge_eff_correction."""
-        return len(self._discharge_eff_samples)
+    @_discharge_eff_last_result.setter
+    def _discharge_eff_last_result(self, value: str) -> None:
+        self._discharge_calibration.last_result = value
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
@@ -951,15 +1000,48 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return feed_in_forecast[0]
         return self._fixed_feed_in_price()
 
-    def _hybrid_plus_should_capture_surplus(
-        self, shadow_price_eur_kwh: float, current_feed_in: float
-    ) -> bool:
-        """Return whether hybrid+ should store PV surplus rather than export it.
+    def _charge_efficiency_at(self, power_kw: float) -> float:
+        """Charge efficiency for a specific AC power, from the curve.
 
-        Storing 1 kWh of AC surplus puts sqrt(RTE) kWh in the battery, each
+        The DP values every action at its curve efficiency, so the thresholds
+        that arbitrate between the DP plan and zero-grid must use the same
+        number. The representative scalar (``charge_efficiency``) is a mean over
+        5..95 % of nominal power and sits well below the curve at the powers a
+        real decision is taken at, which biases those comparisons against the
+        DP's own decision. It is only the fallback for a power of zero, where
+        the curve's idle-loss point says nothing useful.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.charge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.charge_efficiency_curve_parsed, power_kw
+        )
+
+    def _discharge_efficiency_at(self, power_kw: float) -> float:
+        """Discharge efficiency for a specific AC power, from the curve.
+
+        Mirrors _charge_efficiency_at for the discharge direction.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.discharge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.discharge_efficiency_curve_parsed, power_kw
+        )
+
+    def _should_capture_surplus(
+        self,
+        shadow_price_eur_kwh: float,
+        current_feed_in: float,
+        surplus_kw: float,
+    ) -> bool:
+        """Return whether PV surplus is worth storing rather than exporting.
+
+        Storing 1 kWh of AC surplus puts ``charge_eff`` kWh in the battery, each
         worth the DP shadow price λ — the marginal value of stored energy given
         the full price and PV forecast. Exporting the same kWh yields the
-        current feed-in price. When λ × sqrt(RTE) is below the feed-in price,
+        current feed-in price. When λ × charge_eff is below the feed-in price,
         the forecast says the battery can be filled more cheaply later (e.g.
         the midday PV peak at low prices), so exporting now is worth more than
         storing.
@@ -967,18 +1049,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Applies a ±5% hysteresis band around the feed-in threshold (same
         pattern as the hybrid discharge decision) so a shadow price hovering
         near the feed-in price doesn't flip the decision every run.
+
+        Args:
+            shadow_price_eur_kwh: DP shadow price λ (value per stored kWh).
+            current_feed_in: Feed-in price for the step being executed.
+            surplus_kw: AC surplus that would be stored, in kW. Prices the
+                charge at its curve efficiency instead of a nominal scalar.
         """
         if current_feed_in <= 0:
             # Exporting earns nothing (or costs money): always capture.
-            self._last_hybrid_plus_capture_decision = "zero_grid"
+            self._last_surplus_capture_decision = "zero_grid"
             return True
-        sqrt_rte = float(self.battery_config.round_trip_efficiency) ** 0.5
-        store_value = shadow_price_eur_kwh * sqrt_rte
-        if self._last_hybrid_plus_capture_decision == "zero_grid":
+        store_value = shadow_price_eur_kwh * self._charge_efficiency_at(surplus_kw)
+        if self._last_surplus_capture_decision == "zero_grid":
             should_capture = bool(store_value >= current_feed_in * 0.95)
         else:
             should_capture = bool(store_value >= current_feed_in * 1.05)
-        self._last_hybrid_plus_capture_decision = (
+        self._last_surplus_capture_decision = (
             "zero_grid" if should_capture else ACTION_IDLE
         )
         return should_capture
@@ -1013,9 +1100,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         deadband does not damp it, because the swing between the zero_grid
         setpoint and idle's 0 W is far larger than the deadband.
 
-        In hybrid+ mode the upgrade is suppressed while surplus capture is
-        blocked (exporting is worth more than storing per the shadow price),
-        so idle genuinely means "export the surplus".
+        The upgrade is suppressed while the last optimizer run found surplus
+        capture uneconomical (exporting is worth more than storing per the
+        shadow price), so idle genuinely means "export the surplus" — otherwise
+        the realtime loop would re-capture the surplus the run just refused.
 
         Args:
             effective_mode: The resolved mode from optimization logic.
@@ -1031,16 +1119,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if effective_mode == "zero_grid":
             return "zero_grid"
         # Upgrade idle → zero_grid only in zero_grid/hybrid/hybrid+ modes (not
-        # follow_schedule or manual, where idle must mean truly stop). Hybrid+
-        # additionally requires that surplus capture is economical per the last
-        # optimizer run.
+        # follow_schedule or manual, where idle must mean truly stop), and only
+        # while the last optimizer run found surplus capture economical.
         if effective_mode == ACTION_IDLE:
             upgrade_allowed = (
                 self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
-                and not (
-                    self._control_mode == MODE_HYBRID_PLUS
-                    and self._hybrid_plus_capture_blocked
-                )
+                and not self._surplus_capture_blocked
                 and has_power_sensors
             )
             if not upgrade_allowed:
@@ -1549,8 +1633,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Score the previous plan against reality and fold it in.
 
-        This method decides *eligibility*; DirectionCalibration.record does the
-        arithmetic and the persistence bookkeeping.
+        This method decides *eligibility* and records why on the calibration;
+        DirectionCalibration.record does the arithmetic and the persistence.
 
         Both directions ask the same question: did the battery move as much
         energy within the step as the DP assumed? A sample is only taken when:
@@ -1570,24 +1654,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         The correction is the mean of the last CALIBRATION_WINDOW ratios
         (actual/planned), clamped for use. It is applied as a multiplier on the
         DP's SoC transition for this direction only; the economic cost model is
-        untouched. Does nothing when no sample is eligible.
+        untouched.
+
+        When no sample is taken, ``calibration.last_result`` names the reason.
+        Several of those reasons are permanent for a given setup (a DC-coupled
+        system never samples at all, and a control mode that does not execute
+        the DP plan never will either), so the reason is published rather than
+        leaving the user with a sample count stuck at zero.
         """
         result = self._last_result
         if result is None:
+            calibration.last_result = CALIBRATION_NO_RESULT
             return
         if len(result.mode_schedule) < 1 or len(result.soc_schedule_kwh) < 2:
+            calibration.last_result = CALIBRATION_NO_RESULT
             return
         if result.mode_schedule[0] != calibration.spec.action:
+            calibration.last_result = CALIBRATION_NO_PLAN
             return
 
         # Only sample when the plan was actually commanded; mode resolution
         # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
         # would otherwise drag the correction towards the 0.5 clip floor.
         if not self._planned_first_step_was_executed(calibration.spec.action):
+            calibration.last_result = CALIBRATION_PLAN_NOT_EXECUTED
             return
         if not self._previous_step_complete():
+            calibration.last_result = CALIBRATION_STEP_INCOMPLETE
             return
         if self.config.get(CONF_PV_DC_COUPLED, False):
+            calibration.last_result = CALIBRATION_DC_COUPLED
             return
 
         prev_soc = result.soc_schedule_kwh[0]
@@ -1616,6 +1712,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             counter_delta is not None, self._soc_quantum_kwh()
         ):
             # Too small to measure reliably at this resolution; skip.
+            calibration.last_result = CALIBRATION_DELTA_TOO_SMALL
             return
 
         bc = self.battery_config
@@ -1636,6 +1733,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     calibration.spec.derate_threshold_pct(bc),
                     threshold_kwh,
                 )
+                calibration.last_result = CALIBRATION_DERATING
                 return
 
         if counter_delta is not None:
@@ -1756,6 +1854,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # Hybrid+ additionally consults the price forecast (via the shadow
             # price) before storing PV surplus, so surplus is exported when the
             # battery can be filled more cheaply later.
+            # Default to allowing capture; the idle and discharge branches
+            # overrule it so a block never outlives the run that decided it.
+            self._surplus_capture_blocked = False
             if result.optimal_mode == ACTION_IDLE:
                 # Optimizer wants to preserve battery capacity.
                 # This means: don't charge (even with PV surplus) and don't discharge.
@@ -1788,10 +1889,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 capture_blocked = False
                 if self._control_mode == MODE_HYBRID_PLUS:
                     current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                    capture_blocked = not self._hybrid_plus_should_capture_surplus(
-                        result.shadow_price_eur_kwh, current_feed_in
+                    capture_blocked = not self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
                     )
-                self._hybrid_plus_capture_blocked = capture_blocked
+                self._surplus_capture_blocked = capture_blocked
                 if has_upcoming_discharge and not has_pv_surplus:
                     # Preserve capacity (discharge planned, no PV surplus)
                     effective_mode = ACTION_IDLE
@@ -1807,17 +1910,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 effective_power = 0.0
             elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
-                # Use shadow price as the threshold: net sell value per kWh stored
-                # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
-                # value of keeping the energy for future use), exporting is better.
+                # Use shadow price as the threshold: net sell value per kWh
+                # stored = feed_in × discharge_eff at the planned power — the
+                # same efficiency the DP priced this action with. If that
+                # exceeds the shadow price (the value of keeping the energy for
+                # future use), exporting is better.
                 #
                 # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
                 # oscillation when shadow_price ≈ net_sell_value.
                 # • Was discharging → continue unless net_sell_value < threshold × 0.95
                 # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                sqrt_rte = self.battery_config.round_trip_efficiency**0.5
-                net_sell_value = current_feed_in * sqrt_rte
+                net_sell_value = current_feed_in * self._discharge_efficiency_at(
+                    result.optimal_power_kw
+                )
                 threshold = result.shadow_price_eur_kwh
                 if self._last_hybrid_decision == ACTION_DISCHARGING:
                     should_discharge = net_sell_value >= threshold * 0.95
@@ -1828,11 +1934,28 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     effective_mode = ACTION_DISCHARGING
                     effective_power = result.optimal_power_kw
                     self._last_hybrid_decision = ACTION_DISCHARGING
+                    self._surplus_capture_blocked = False
                 else:
-                    # Shadow price > sell value: energy is more valuable later
-                    effective_mode = "zero_grid"
+                    # Shadow price > sell value: energy is more valuable later.
+                    # That is a decision to *hold*, so falling back to zero_grid
+                    # unconditionally would be a contradiction: zero_grid buys
+                    # PV surplus that would otherwise be exported, at the cost
+                    # of the feed-in price the veto just refused to sell at.
+                    # Only capture the surplus when storing it actually beats
+                    # exporting it (λ × charge_eff ≥ feed_in); otherwise hold
+                    # and let the surplus go to the grid. Unlike the idle
+                    # branch, this test runs in plain hybrid too — hybrid's
+                    # unconditional surplus capture applies when the DP has no
+                    # opinion, not when it is overruling an explicit plan.
+                    capture = self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
+                    )
+                    effective_mode = "zero_grid" if capture else ACTION_IDLE
                     effective_power = 0.0
-                    self._last_hybrid_decision = "zero_grid"
+                    self._last_hybrid_decision = effective_mode
+                    self._surplus_capture_blocked = not capture
             elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
                 if current_feed_in < 0:
@@ -2350,7 +2473,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # only; economic costs always use the nominal curves so a charging- or
         # discharging-speed problem is not double-counted as extra energy cost
         # or degradation. See efficiency_calibration.py for the two directions'
-        # opposite arithmetic.
+        # opposite arithmetic, and for the threshold below which a correction is
+        # stored but not applied.
         charge_eff_curve_override = charge_curve_override(
             battery_config.charge_efficiency_curve_parsed,
             self._charge_eff_correction,
@@ -2522,8 +2646,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "commitment_reason": commitment_reason,
                 "charge_eff_correction": round(self._charge_eff_correction, 4),
                 "charge_eff_samples": len(self._charge_eff_samples),
+                "charge_eff_last_result": self._charge_eff_last_result,
                 "discharge_eff_correction": round(self._discharge_eff_correction, 4),
                 "discharge_eff_samples": len(self._discharge_eff_samples),
+                "discharge_eff_last_result": self._discharge_eff_last_result,
             }
         )
         self._optimization_trigger_source = "unknown"
@@ -2565,7 +2691,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "price_interval": price_interval,
             "charge_eff_correction": round(self._charge_eff_correction, 4),
             "charge_eff_samples": len(self._charge_eff_samples),
+            "charge_eff_applied": self.charge_eff_applied,
+            "charge_eff_last_result": self._charge_eff_last_result,
             "discharge_eff_correction": round(self._discharge_eff_correction, 4),
             "discharge_eff_samples": len(self._discharge_eff_samples),
+            "discharge_eff_applied": self.discharge_eff_applied,
+            "discharge_eff_last_result": self._discharge_eff_last_result,
             "timestamp": dt_util.utcnow(),
         }

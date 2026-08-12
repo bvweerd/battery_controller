@@ -224,3 +224,83 @@ async def test_diagnostics_entity_state_none(
 
     assert diagnostics["entities"][0]["state"] is None
     assert diagnostics["entities"][0]["attributes"] == {}
+
+
+async def test_diagnostics_carries_the_calibration_report(
+    hass: HomeAssistant, mock_config_entry: MagicMock
+):
+    """The learned calibration is the whole reason this dump gets requested.
+
+    Without it in the diagnostics there is no way — short of reading the
+    .storage files by hand — to see whether the integration has learned
+    anything about this installation, or why it has not.
+    """
+    mock_config_entry.subentries = {
+        "pv1": MagicMock(title="South Array", subentry_type="pv", data={})
+    }
+
+    weather_coord = MagicMock()
+    weather_coord.data = None
+
+    forecast_coord = MagicMock()
+    forecast_coord.data = {
+        "pv_calibration": {
+            "pv1": {
+                "correction": 0.87,
+                "samples": 64,
+                "applied": True,
+                "last_result": "sampled",
+            }
+        },
+        "timestamp": "2024-01-01T00:00:00",
+    }
+    forecast_coord.last_update_success = True
+    del forecast_coord.consumption_model
+
+    optimization_coord = MagicMock()
+    optimization_coord.data = {
+        "charge_eff_correction": 0.94,
+        "charge_eff_samples": 12,
+        "charge_eff_applied": True,
+        "charge_eff_last_result": "sampled",
+        "discharge_eff_correction": 1.0,
+        "discharge_eff_samples": 0,
+        "discharge_eff_applied": False,
+        "discharge_eff_last_result": "dc_coupled_pv",
+        "timestamp": "2024-01-01T00:00:00",
+    }
+    optimization_coord.last_update_success = True
+    optimization_coord.battery_config = MagicMock(charge_efficiency=0.95)
+
+    mock_config_entry.runtime_data = BatteryControllerData(
+        weather_coordinator=weather_coord,
+        forecast_coordinator=forecast_coord,
+        optimization_coordinator=optimization_coord,
+        config={},
+        device=MagicMock(),
+        battery_devices={},
+        pv_devices={},
+    )
+
+    with patch("homeassistant.helpers.entity_registry.async_get") as mock_er_get:
+        mock_er_get.return_value = MagicMock()
+        with patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_config_entry"
+        ) as mock_entries:
+            mock_entries.return_value = []
+            diagnostics = await async_get_config_entry_diagnostics(
+                hass, mock_config_entry
+            )
+
+    opt = diagnostics["optimization"]
+    assert opt["charge_eff_correction"] == 0.94
+    assert opt["charge_eff_applied"] is True
+    # A correction of 1.0 with no samples is not a clean bill of health, and the
+    # reason travels with it so the reader can tell the difference.
+    assert opt["discharge_eff_samples"] == 0
+    assert opt["discharge_eff_last_result"] == "dc_coupled_pv"
+
+    # Keyed by the array's title, not its opaque subentry ID.
+    pv_cal = diagnostics["forecast"]["pv_calibration"]
+    assert pv_cal["South Array"]["correction"] == 0.87
+    assert pv_cal["South Array"]["samples"] == 64

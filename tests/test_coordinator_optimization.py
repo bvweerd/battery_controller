@@ -19,8 +19,10 @@ from custom_components.battery_controller.const import (
     CONF_BATTERY_ENERGY_CHARGED_SENSOR,
     CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
+    CONF_CHARGE_EFFICIENCY_CURVE,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_CYCLE,
+    CONF_DISCHARGE_EFFICIENCY_CURVE,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MAX_CHARGE_POWER_KW,
@@ -46,6 +48,13 @@ from custom_components.battery_controller.coordinator_optimization import (
 )
 from custom_components.battery_controller.helpers import (
     extract_price_forecast_with_timestamps,
+)
+from custom_components.battery_controller.efficiency_calibration import (
+    CALIBRATION_DC_COUPLED,
+    CALIBRATION_NO_PLAN,
+    CALIBRATION_NO_RESULT,
+    CALIBRATION_PLAN_NOT_EXECUTED,
+    CALIBRATION_SAMPLED,
 )
 from custom_components.battery_controller.optimizer import OptimizationResult
 
@@ -3372,6 +3381,7 @@ async def _run_hybrid_mode_sequence(
     grid_sequence: list[float],
     deadband_w: float | None = None,
     control_mode: str = MODE_HYBRID,
+    **coordinator_kwargs,
 ) -> list[str]:
     """Run hybrid optimization repeatedly on one coordinator, varying grid power.
 
@@ -3380,9 +3390,12 @@ async def _run_hybrid_mode_sequence(
     realtime-update ticks), this reuses the same coordinator so the
     `_last_hybrid_idle_decision` / `_last_hybrid_charge_decision` hysteresis
     state persists across the calls in grid_sequence.
+
+    Extra keyword arguments go to the coordinator factory, so a test can vary
+    the battery (efficiency curves) or the fixed feed-in price.
     """
 
-    coord = _make_coordinator(hass)
+    coord = _make_coordinator(hass, **coordinator_kwargs)
     coord.control_mode = control_mode
     fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
     coord.forecast_coordinator.data = {
@@ -3546,6 +3559,52 @@ async def test_hybrid_idle_zero_grid_deadband_is_configurable(hass, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+# A measured home-battery curve, where the representative scalar and the curve
+# disagree sharply. The 5..95 % mean is 0.8704 per direction, but the curve is
+# worth 0.900 at 1 kW: it is dominated by the inverter's idle loss at the low
+# end and flat from ~0.4 kW up. Thresholds derived from the scalar are
+# therefore ~4 % pessimistic at the powers real decisions are taken at.
+_MEASURED_CURVE = (
+    "0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, "
+    "0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878"
+)
+
+_CURVE_BATTERY = {
+    "battery_subentries": [
+        (
+            "bat1",
+            {
+                CONF_MAX_CHARGE_POWER_KW: 1.2,
+                CONF_MAX_DISCHARGE_POWER_KW: 1.2,
+                CONF_MIN_SOC_PERCENT: 10.0,
+                CONF_MAX_SOC_PERCENT: 100.0,
+                CONF_BATTERY_SOC_SENSOR: "sensor.test_soc",
+                CONF_CHARGE_EFFICIENCY_CURVE: _MEASURED_CURVE,
+                CONF_DISCHARGE_EFFICIENCY_CURVE: _MEASURED_CURVE,
+            },
+        )
+    ],
+}
+
+
+def _discharge_plan_result(shadow_price: float) -> OptimizationResult:
+    """Optimizer result planning a discharge now (sell before prices fall)."""
+    return OptimizationResult(
+        power_schedule_kw=[-1.0, 0.0],
+        mode_schedule=["discharging", "idle"],
+        soc_schedule_kwh=[5.0, 4.0, 4.0],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=-1.0,
+        optimal_mode="discharging",
+        shadow_price_eur_kwh=shadow_price,
+        price_forecast=[0.10, 0.12],
+        pv_forecast=[0.5, 0.5],
+        consumption_forecast=[0.3, 0.3],
+    )
+
+
 def _idle_plan_result(shadow_price: float) -> OptimizationResult:
     """Optimizer result planning idle now and charging later (cheap surplus)."""
     return OptimizationResult(
@@ -3632,48 +3691,141 @@ async def test_hybrid_plus_self_consumption_not_gated(hass, monkeypatch):
     assert modes == ["zero_grid"]
 
 
-def test_hybrid_plus_capture_decision_hysteresis(hass):
+def test_capture_decision_hysteresis(hass):
     """The capture decision applies a ±5% band around the feed-in threshold.
 
-    Test coordinator: RTE 0.92 → sqrt(RTE) ≈ 0.9592; feed-in 0.07 EUR/kWh.
-    Capture threshold while capturing: 0.07 × 0.95 = 0.0665; while exporting:
-    0.07 × 1.05 = 0.0735 (both on the stored value λ × sqrt(RTE)).
+    Test coordinator: flat 0.9592 curves; feed-in 0.07 EUR/kWh. Capture
+    threshold while capturing: 0.07 × 0.95 = 0.0665; while exporting:
+    0.07 × 1.05 = 0.0735 (both on the stored value λ × charge_eff).
     """
     coord = _make_coordinator(hass)
     # Initial state is capturing: keeps capturing down to the ×0.95 band edge
-    assert coord._hybrid_plus_should_capture_surplus(0.10, 0.07) is True
+    assert coord._should_capture_surplus(0.10, 0.07, 2.0) is True
     # Stored value 0.0652 < 0.0665 → flips to exporting
-    assert coord._hybrid_plus_should_capture_surplus(0.068, 0.07) is False
+    assert coord._should_capture_surplus(0.068, 0.07, 2.0) is False
     # Stored value 0.0691 is above the raw threshold but below ×1.05 → stays
     # exporting (this is the hysteresis: without it the decision would flip)
-    assert coord._hybrid_plus_should_capture_surplus(0.072, 0.07) is False
+    assert coord._should_capture_surplus(0.072, 0.07, 2.0) is False
     # Stored value 0.0748 ≥ 0.0735 → flips back to capturing
-    assert coord._hybrid_plus_should_capture_surplus(0.078, 0.07) is True
+    assert coord._should_capture_surplus(0.078, 0.07, 2.0) is True
 
 
-def test_hybrid_plus_negative_feed_in_always_captures(hass):
+def test_capture_decision_prices_the_charge_at_curve_efficiency(hass):
+    """Surplus capture is valued at the curve efficiency for the surplus power.
+
+    The curve is worth 0.900 at 1 kW but only 0.651 at 60 W, so the same
+    shadow price stores far less value from a trickle of surplus. λ = 0.08
+    with a 0.07 EUR/kWh feed-in straddles the two: 0.08 × 0.900 = 0.0720
+    clears the ×0.95 band, 0.08 × 0.651 = 0.0521 does not. The representative
+    scalar (0.8704 → 0.0696) would have captured both.
+    """
+    coord = _make_coordinator(hass, **_CURVE_BATTERY)
+    assert coord._should_capture_surplus(0.08, 0.07, 1.0) is True
+    assert coord._should_capture_surplus(0.08, 0.07, 0.06) is False
+
+
+def test_negative_feed_in_always_captures(hass):
     """With zero/negative feed-in, exporting earns nothing: always capture."""
     coord = _make_coordinator(hass)
-    assert coord._hybrid_plus_should_capture_surplus(0.0, -0.05) is True
-    assert coord._hybrid_plus_should_capture_surplus(0.0, 0.0) is True
+    assert coord._should_capture_surplus(0.0, -0.05, 2.0) is True
+    assert coord._should_capture_surplus(0.0, 0.0, 2.0) is True
 
 
-def test_resolve_controller_mode_hybrid_plus_blocks_surplus_upgrade(hass):
-    """The realtime idle→zero_grid upgrade respects the hybrid+ capture block."""
+def test_resolve_controller_mode_blocks_surplus_upgrade(hass):
+    """The realtime idle→zero_grid upgrade respects the capture block.
+
+    The block applies in plain hybrid too: it is only ever set by a run that
+    decided exporting beats storing, and the realtime loop must not re-capture
+    the surplus that run refused.
+    """
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_HYBRID_PLUS
     coord._power_consumption_sensors = ["sensor.power"]
 
-    coord._hybrid_plus_capture_blocked = True
+    coord._surplus_capture_blocked = True
     assert coord._resolve_controller_mode("idle", -500.0) == "idle"
 
-    coord._hybrid_plus_capture_blocked = False
+    coord._surplus_capture_blocked = False
     assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
 
-    # Plain hybrid ignores the flag entirely
     coord._control_mode = MODE_HYBRID
-    coord._hybrid_plus_capture_blocked = True
+    coord._surplus_capture_blocked = True
+    assert coord._resolve_controller_mode("idle", -500.0) == "idle"
+
+    coord._surplus_capture_blocked = False
     assert coord._resolve_controller_mode("idle", -500.0) == "zero_grid"
+
+
+# ---------------------------------------------------------------------------
+# Vetoed discharge: holding energy must never turn into buying energy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vetoed_discharge_exports_surplus_instead_of_charging(hass, monkeypatch):
+    """A vetoed discharge holds and exports; it must not charge the surplus.
+
+    The plan discharges at 1 kW, but the sell value (0.3432 × 0.900 = 0.3089)
+    is below λ × 1.05 = 0.3252, so the discharge is vetoed: this energy is
+    worth more later. Falling back to zero_grid would then buy the 610 W PV
+    surplus at the 0.3432 EUR/kWh export price just refused, to store it at
+    λ × 0.909 = 0.2814. Capture is uneconomical, so the mode must be idle —
+    in plain hybrid too, where surplus capture is otherwise unconditional.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _discharge_plan_result(shadow_price=0.3097),
+        grid_sequence=[-610.0],
+        control_mode=MODE_HYBRID,
+        **_CURVE_BATTERY,
+        **{CONF_FIXED_FEED_IN_PRICE: 0.3432},
+    )
+    assert modes == ["idle"]
+
+
+@pytest.mark.asyncio
+async def test_vetoed_discharge_still_captures_worthwhile_surplus(hass, monkeypatch):
+    """The veto only blocks capture when exporting actually beats storing.
+
+    Same vetoed discharge, but λ = 0.60 makes stored energy worth
+    0.60 × 0.909 = 0.545 against a 0.3432 EUR/kWh export: capturing the
+    surplus is clearly better, so zero_grid remains the right fallback.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _discharge_plan_result(shadow_price=0.60),
+        grid_sequence=[-610.0],
+        control_mode=MODE_HYBRID,
+        **_CURVE_BATTERY,
+        **{CONF_FIXED_FEED_IN_PRICE: 0.3432},
+    )
+    assert modes == ["zero_grid"]
+
+
+@pytest.mark.asyncio
+async def test_discharge_decision_uses_curve_efficiency_at_planned_power(
+    hass, monkeypatch
+):
+    """The discharge test prices the sale at the efficiency the DP used.
+
+    λ = 0.29 sits between the two efficiencies: the representative scalar
+    values the sale at 0.3432 × 0.8704 = 0.2987, below the 0.29 × 1.05 =
+    0.3045 entry threshold, so the scalar would veto the DP's own decision.
+    The curve at the planned 1 kW gives 0.3432 × 0.900 = 0.3089 and the
+    discharge is executed as planned.
+    """
+    modes = await _run_hybrid_mode_sequence(
+        hass,
+        monkeypatch,
+        _discharge_plan_result(shadow_price=0.29),
+        grid_sequence=[-610.0],
+        control_mode=MODE_HYBRID,
+        **_CURVE_BATTERY,
+        **{CONF_FIXED_FEED_IN_PRICE: 0.3432},
+    )
+    assert modes == ["discharging"]
 
 
 # ---------------------------------------------------------------------------
@@ -3989,3 +4141,98 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
 
     assert coord.charge_eff_sample_count == 6
     assert coord.charge_eff_correction == pytest.approx(1.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Why a calibration is not learning
+#
+# A sample count stuck at zero has several causes, and some of them are
+# permanent for a given setup rather than a passing condition. The reason is
+# published so the user is not left guessing at an untouched 100%.
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_reports_a_taken_sample(hass):
+    """The happy path names itself, so 'no reason given' is never ambiguous."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_last_result == CALIBRATION_SAMPLED
+
+
+def test_calibration_reports_dc_coupling_as_the_blocker(hass):
+    """A DC-coupled system never samples; that is by design, not a fault."""
+    coord = _make_coordinator(hass)
+    coord.config[CONF_PV_DC_COUPLED] = True
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_last_result == CALIBRATION_DC_COUPLED
+
+
+def test_calibration_reports_a_plan_that_was_never_executed(hass):
+    """In zero_grid or manual the DP plan is not what runs, so nothing is learnt."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    # The controller was left on a different setpoint than the plan asked for.
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_last_result == CALIBRATION_PLAN_NOT_EXECUTED
+
+
+def test_calibration_reports_that_the_direction_was_not_planned(hass):
+    """Discharge calibration is idle while the DP is charging, and says so."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_discharge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.discharge_eff_last_result == CALIBRATION_NO_PLAN
+
+
+def test_calibration_starts_out_admitting_it_knows_nothing(hass):
+    """Before the first run there is no evidence, and the sensor must not imply any."""
+    coord = _make_coordinator(hass)
+
+    assert coord.charge_eff_last_result == CALIBRATION_NO_RESULT
+    assert coord.discharge_eff_last_result == CALIBRATION_NO_RESULT
+    assert coord.charge_eff_applied is False
+    assert coord.discharge_eff_applied is False
+
+
+def test_a_correction_within_noise_of_nominal_is_reported_as_not_applied(hass):
+    """1.0 is stored but never handed to the optimizer; applied must reflect that."""
+    coord = _make_coordinator(hass)
+
+    coord._charge_eff_correction = 0.999
+    assert coord.charge_eff_applied is False
+
+    coord._charge_eff_correction = 0.94
+    assert coord.charge_eff_applied is True

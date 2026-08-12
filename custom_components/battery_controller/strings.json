@@ -371,6 +371,12 @@
       },
       "pv_array_forecast": {
         "name": "PV Forecast"
+      },
+      "charge_eff_correction": {
+        "name": "Charge Efficiency Correction"
+      },
+      "discharge_eff_correction": {
+        "name": "Discharge Efficiency Correction"
       }
     },
     "number": {

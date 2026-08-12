@@ -151,6 +151,43 @@ During this convergence period you may notice:
 The longer the integration runs, the more accurate the underlying forecasts become and
 the more stable the resulting schedule.
 
+### Checking what has actually been learned
+
+Three corrections are learned from your own installation, and each one is published as a
+diagnostic sensor so you can see where it stands without downloading anything:
+
+| Sensor | What it measures |
+|---|---|
+| *Charge Efficiency Correction* | How much SoC the battery really gains within a step, against what the model assumed |
+| *Discharge Efficiency Correction* | The same for discharging |
+| *PV Forecast Correction &lt;array&gt;* | What each PV array really produces, against its forecast |
+
+All three read **100%** when reality matches the model. That is also the value they start
+at, so the number alone cannot tell you whether anything has been measured — the
+attributes say which:
+
+- `samples` — how many observations are behind the value. At `0`, nothing has been
+  learned yet.
+- `applied` — whether the correction is actually changing the plan. A PV correction needs
+  a full sample window first; a battery correction within measurement noise of nominal is
+  stored but never applied.
+- `last_result` — what the most recent attempt did, and if it took no sample, why not.
+
+Some of those reasons are permanent for a given setup rather than a passing condition,
+and they are the usual explanation for a sample count that never moves:
+
+| `last_result` | What it means |
+|---|---|
+| `dc_coupled_pv` | Battery calibration is skipped entirely on DC-coupled systems: passive PV charging during a step would be indistinguishable from the battery charging faster than modelled. |
+| `plan_not_executed` | The battery is not following the DP schedule verbatim, so the SoC change does not measure efficiency. Normal in [Zero Grid](control-modes.md#zero-grid) and [Manual](control-modes.md#manual) mode, and common in [Hybrid](control-modes.md#hybrid-recommended). |
+| `direction_not_planned` | The optimizer has not planned this direction recently. Simply waiting is the fix. |
+| `no_measured_production_sensor` | The PV array has no production counter configured, so there is nothing to compare its forecast against. |
+| `production_outside_usable_band` | The array is producing below 10% or above 80% of its rating — too little signal, or close enough to clipping that the shortfall is not a forecast error. |
+
+To reset a correction that has gone wrong, call the
+`battery_controller.reset_charge_efficiency_calibration`,
+`reset_discharge_efficiency_calibration` or `reset_pv_calibration` service.
+
 ---
 
 ## Known limitations

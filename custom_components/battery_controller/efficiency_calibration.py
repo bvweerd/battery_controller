@@ -56,9 +56,22 @@ CALIBRATION_APPLY_MAX = 1.05
 CALIBRATION_WINDOW = 20
 # A correction is only persisted (and logged) once it moves by more than this.
 CALIBRATION_SIGNIFICANT_CHANGE = 0.005
-# Below this the correction is close enough to nominal that applying it would
-# be noise; the optimizer is handed the unmodified curve instead.
+# Corrections at or above this are within measurement noise of nominal: they are
+# stored but never handed to the optimizer, which gets the unmodified curve.
 CALIBRATION_APPLY_THRESHOLD = 0.995
+
+# What the last calibration attempt did, published so a user can tell a
+# correction that has genuinely been measured from one that has simply never
+# had the chance to learn anything.
+CALIBRATION_SAMPLED = "sampled"
+CALIBRATION_NO_RESULT = "no_previous_run"
+CALIBRATION_NO_PLAN = "direction_not_planned"
+CALIBRATION_PLAN_NOT_EXECUTED = "plan_not_executed"
+CALIBRATION_STEP_INCOMPLETE = "step_not_finished"
+CALIBRATION_DC_COUPLED = "dc_coupled_pv"
+CALIBRATION_DELTA_TOO_SMALL = "step_too_small_to_measure"
+CALIBRATION_DERATING = "step_crosses_derating_threshold"
+CALIBRATION_IMPLAUSIBLE = "sample_dropped_implausible"
 
 
 @dataclass(frozen=True)
@@ -108,7 +121,9 @@ def min_planned_delta_kwh(from_counters: bool, soc_quantum_kwh: float) -> float:
     )
 
 
-def counter_delta_kwh(key: str, before: float | None, after: float | None) -> float | None:
+def counter_delta_kwh(
+    key: str, before: float | None, after: float | None
+) -> float | None:
     """Throughput measured by the counters since the plan was made.
 
     None when either end of the interval is missing, or when the counter went
@@ -169,8 +184,25 @@ class DirectionCalibration:
 
     spec: CalibrationSpec
     store: storage.Store[dict[str, Any]]
-    samples: deque[float] = field(default_factory=lambda: deque(maxlen=CALIBRATION_WINDOW))
+    samples: deque[float] = field(
+        default_factory=lambda: deque(maxlen=CALIBRATION_WINDOW)
+    )
     correction: float = 1.0
+    # Why the last attempt did or did not move the correction. Published so a
+    # user can tell a correction that has genuinely been measured from one that
+    # has never had the chance to learn anything.
+    last_result: str = CALIBRATION_NO_RESULT
+
+    @property
+    def applied(self) -> bool:
+        """Whether this correction currently changes the DP's plan.
+
+        Same gate as charge_curve_override / discharge_curve_override: a
+        correction at or above CALIBRATION_APPLY_THRESHOLD is within
+        measurement noise of nominal, so it is stored but never handed to the
+        optimizer.
+        """
+        return self.correction < CALIBRATION_APPLY_THRESHOLD
 
     @property
     def sample_count(self) -> int:
@@ -209,10 +241,14 @@ class DirectionCalibration:
             )
         self.samples.clear()
         self.correction = 1.0
+        self.last_result = CALIBRATION_NO_RESULT
         await self.async_save()
 
     def record(self, planned_delta: float, actual_delta: float, source: str) -> bool:
         """Fold one actual/planned observation in; return whether it moved.
+
+        Also sets ``last_result`` to the outcome, so a dropped sample is
+        distinguishable from one that was never eligible.
 
         Samples outside the acceptance window are dropped rather than clipped
         into it. Clipping was not symmetric around 1.0 — the ratio was capped at
@@ -231,12 +267,14 @@ class DirectionCalibration:
                 planned_delta,
                 actual_delta,
             )
+            self.last_result = CALIBRATION_IMPLAUSIBLE
             return False
 
         previous = self.correction
         self.samples.append(ratio)
         mean = sum(self.samples) / len(self.samples)
         self.correction = max(CALIBRATION_APPLY_MIN, min(CALIBRATION_APPLY_MAX, mean))
+        self.last_result = CALIBRATION_SAMPLED
         moved = abs(self.correction - previous) > CALIBRATION_SIGNIFICANT_CHANGE
         if moved:
             _LOGGER.info(

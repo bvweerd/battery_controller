@@ -137,12 +137,8 @@ class BatteryDispatcher:
 
     def _concentrate(self, total_kw: float, winner: str) -> dict[str, float]:
         """Send full setpoint to winner; redistribute overflow above max_power to others."""
-        result: dict[str, float] = {
-            sid: 0.0 for sid, _ in self.configs
-        }
-        winner_cfg = next(
-            cfg for sid, cfg in self.configs if sid == winner
-        )
+        result: dict[str, float] = {sid: 0.0 for sid, _ in self.configs}
+        winner_cfg = next(cfg for sid, cfg in self.configs if sid == winner)
         winner_state = self.states.get(winner)
         winner_soc_kwh = (
             winner_state.soc_kwh
@@ -150,9 +146,7 @@ class BatteryDispatcher:
             else (winner_cfg.min_soc_kwh + winner_cfg.max_soc_kwh) / 2
         )
 
-        others = [
-            (sid, cfg) for sid, cfg in self.configs if sid != winner
-        ]
+        others = [(sid, cfg) for sid, cfg in self.configs if sid != winner]
 
         def _hand_to_others(amount_kw: float) -> dict[str, float]:
             """Spread ``amount_kw`` over the non-winning batteries."""
