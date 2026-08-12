@@ -21,16 +21,22 @@ from homeassistant.util import dt as dt_util
 from .battery_dispatch import BatteryDispatcher
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
 from .efficiency_calibration import (
+    CALIBRATION_APPLY_THRESHOLD,
     CALIBRATION_DC_COUPLED,
     CALIBRATION_DELTA_TOO_SMALL,
     CALIBRATION_DERATING,
     CALIBRATION_NO_PLAN,
     CALIBRATION_NO_RESULT,
+    CALIBRATION_NOT_DISPATCHED,
     CALIBRATION_PLAN_NOT_EXECUTED,
     CALIBRATION_STEP_INCOMPLETE,
     CHARGE_CALIBRATION,
     DISCHARGE_CALIBRATION,
+    BatteryCalibration,
+    CalibrationSpec,
     DirectionCalibration,
+    aggregate_correction,
+    aggregate_last_result,
     charge_curve_override,
     counter_delta_kwh,
     discharge_curve_override,
@@ -53,6 +59,9 @@ from .const import (
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MIN_PRICE_SPREAD,
+    CONF_NAME,
+    CONF_TIME_STEP_MINUTES,
+    DEFAULT_TIME_STEP_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
@@ -298,34 +307,132 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._optimizer_run_log: deque[dict[str, Any]] = deque(maxlen=96)
         self._setpoint_log: deque[dict[str, Any]] = deque(maxlen=576)
 
-        # Efficiency calibration, one per direction: a rolling window of
-        # (actual_delta / planned_delta) samples collected on steps that planned
-        # that direction. The smoothed correction scales the DP's SoC transition
-        # for that direction only — never the economic cost model — so a
-        # charging-speed problem is not double-counted as extra energy cost.
-        # Only non-DC-coupled systems are sampled, to avoid confounding with
-        # passive PV. See efficiency_calibration.py.
-        entry_id = config.get("entry_id", "unknown")
-        self._charge_calibration = DirectionCalibration(
-            spec=CHARGE_CALIBRATION,
-            store=storage.Store(hass, 1, f"battery_controller_{entry_id}_charge_eff"),
-        )
-        self._discharge_calibration = DirectionCalibration(
-            spec=DISCHARGE_CALIBRATION,
-            store=storage.Store(
-                hass, 1, f"battery_controller_{entry_id}_discharge_eff"
-            ),
+        # Efficiency calibration, one per direction per battery: a rolling
+        # window of (actual_delta / planned_delta) samples collected on steps
+        # that planned that direction for that pack. The smoothed correction
+        # scales the DP's SoC transition for that direction only — never the
+        # economic cost model — so a charging-speed problem is not
+        # double-counted as extra energy cost. Only non-DC-coupled systems are
+        # sampled, to avoid confounding with passive PV. The DP plans one fleet
+        # SoC, so it is handed the capacity-weighted aggregate of these.
+        # See efficiency_calibration.py.
+        self._battery_calibrations: dict[str, BatteryCalibration] = {
+            sid: self._build_battery_calibration(sid, data)
+            for sid, data in self._battery_subentries
+        }
+
+        # Cumulative throughput counters per battery as they stood when
+        # _last_result was planned, and the SoC each pack held at that moment.
+        # The difference against the next read is the energy that battery
+        # actually moved over the step — a far finer measurement than the SoC
+        # delta, which on a whole-percent sensor quantises at capacity/100
+        # (0.1 kWh on a 10 kWh pack).
+        self._energy_counter_snapshot: dict[str, dict[str, float | None]] = {}
+        self._soc_snapshot_kwh: dict[str, float] = {}
+        # The setpoint each battery was given for the step being scored. The
+        # dispatcher concentrates on one pack at a time, so this is what says
+        # whose plan the measured throughput belongs to.
+        self._last_battery_setpoints: dict[str, float] = {}
+
+    def _build_battery_calibration(
+        self, subentry_id: str, data: dict[str, Any]
+    ) -> BatteryCalibration:
+        """Create one battery's two calibrations, with their own storage keys.
+
+        ``legacy_store`` points at the fleet-wide key these used to share, so a
+        system that has already learned something keeps it as a starting point
+        instead of restarting from nominal. See DirectionCalibration.async_load.
+        """
+        entry_id = self.config.get("entry_id", "unknown")
+        label = str(data.get(CONF_NAME) or subentry_id)
+
+        def _for(spec: CalibrationSpec) -> DirectionCalibration:
+            return DirectionCalibration(
+                spec=spec,
+                store=storage.Store(
+                    self.hass,
+                    1,
+                    f"battery_controller_{entry_id}_{subentry_id}_{spec.name}_eff",
+                ),
+                label=label,
+                legacy_store=storage.Store(
+                    self.hass, 1, f"battery_controller_{entry_id}_{spec.name}_eff"
+                ),
+            )
+
+        return BatteryCalibration(
+            subentry_id=subentry_id,
+            charge=_for(CHARGE_CALIBRATION),
+            discharge=_for(DISCHARGE_CALIBRATION),
         )
 
-        # Cumulative throughput counters as they stood when _last_result was
-        # planned. The difference against the next read is the energy the
-        # battery actually moved over that step — a far finer measurement than
-        # the SoC delta, which on a whole-percent sensor quantises at
-        # capacity/100 (0.1 kWh on a 10 kWh pack).
-        self._energy_counter_snapshot: dict[str, float | None] = {
-            "charged": None,
-            "discharged": None,
+    @property
+    def battery_calibrations(self) -> dict[str, BatteryCalibration]:
+        """Per-battery efficiency calibration, keyed by subentry id."""
+        return self._battery_calibrations
+
+    def battery_calibration_state(
+        self, subentry_id: str, action: str
+    ) -> tuple[float, int, bool, str]:
+        """One battery's (correction, samples, applied, last_result).
+
+        The entity-facing view. ``applied`` is per battery here — whether this
+        pack's own measurement is far enough from nominal to matter — while the
+        fleet sensors report whether the aggregate changes the DP's plan.
+        """
+        calibration = self._battery_calibrations.get(subentry_id)
+        if calibration is None:
+            return (1.0, 0, False, CALIBRATION_NO_RESULT)
+        direction = calibration.for_action(action)
+        return (
+            direction.correction,
+            direction.sample_count,
+            direction.applied,
+            direction.last_result,
+        )
+
+    def battery_calibration_report(self) -> dict[str, dict[str, Any]]:
+        """Every battery's calibration, for diagnostics."""
+        report: dict[str, dict[str, Any]] = {}
+        for sid, data in self._battery_subentries:
+            calibration = self._battery_calibrations.get(sid)
+            if calibration is None:
+                continue
+            entry: dict[str, Any] = {"name": data.get(CONF_NAME) or sid}
+            for direction in calibration.both():
+                entry[direction.spec.name] = {
+                    "correction": round(direction.correction, 4),
+                    "samples": direction.sample_count,
+                    "applied": direction.applied,
+                    "last_result": direction.last_result,
+                }
+            report[sid] = entry
+        return report
+
+    def _direction_calibrations(self, action: str) -> list[DirectionCalibration]:
+        """One direction's calibration for every battery, in configured order."""
+        return [
+            self._battery_calibrations[sid].for_action(action)
+            for sid, _ in self._battery_subentries
+            if sid in self._battery_calibrations
+        ]
+
+    def _aggregate_correction(self, action: str) -> float:
+        """The fleet correction the DP plans with, for one direction."""
+        capacity = {
+            sid: cfg.capacity_kwh for sid, cfg in self._individual_battery_configs
         }
+        weighted: list[tuple[float, float]] = []
+        for sid, _ in self._battery_subentries:
+            calibration = self._battery_calibrations.get(sid)
+            if calibration is None:
+                continue
+            direction = calibration.for_action(action)
+            # A pack that has never sampled carries no evidence, so it gets no
+            # weight rather than a nominal 1.0 that would dilute its sibling.
+            weight = capacity.get(sid, 0.0) if direction.sample_count else 0.0
+            weighted.append((direction.correction, weight))
+        return aggregate_correction(weighted)
 
     @property
     def control_mode(self) -> str:
@@ -395,51 +502,62 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def charge_eff_correction(self) -> float:
         """Learned multiplier on the charge-side SoC transition (1.0 = nominal).
 
-        Already published in ``data`` and in diagnostics; exposed here so the
-        current value can be read without a completed run, the same way
-        control_mode and optimization_enabled are.
+        The fleet figure the DP plans with: the capacity-weighted aggregate of
+        the per-battery corrections. Already published in ``data`` and in
+        diagnostics; exposed here so the current value can be read without a
+        completed run, the same way control_mode and optimization_enabled are.
         """
-        return self._charge_calibration.correction
+        return self._aggregate_correction(ACTION_CHARGING)
 
     @property
     def charge_eff_sample_count(self) -> int:
-        """Number of observations behind charge_eff_correction."""
-        return self._charge_calibration.sample_count
+        """Observations behind charge_eff_correction, across all batteries."""
+        return sum(
+            cal.sample_count for cal in self._direction_calibrations(ACTION_CHARGING)
+        )
 
     @property
     def discharge_eff_correction(self) -> float:
         """Learned multiplier on the discharge-side SoC transition."""
-        return self._discharge_calibration.correction
+        return self._aggregate_correction(ACTION_DISCHARGING)
 
     @property
     def discharge_eff_sample_count(self) -> int:
-        """Number of observations behind discharge_eff_correction."""
-        return self._discharge_calibration.sample_count
+        """Observations behind discharge_eff_correction, across all batteries."""
+        return sum(
+            cal.sample_count for cal in self._direction_calibrations(ACTION_DISCHARGING)
+        )
 
     @property
     def charge_eff_applied(self) -> bool:
         """Whether the charge correction currently changes the DP's plan.
 
-        The correction is only handed to the optimizer below 0.995: a value at
-        or above that is within measurement noise of nominal and is stored but
-        never applied. Same gate as charge_curve_override().
+        The aggregate is only handed to the optimizer below 0.995: a value at or
+        above that is within measurement noise of nominal and is stored but
+        never applied. Same gate as charge_curve_override(). Judged on the
+        aggregate, because that is what the DP is given — a single derated pack
+        can be applied on its own sensor and still leave the fleet at nominal.
         """
-        return self._charge_calibration.applied
+        return self.charge_eff_correction < CALIBRATION_APPLY_THRESHOLD
 
     @property
     def discharge_eff_applied(self) -> bool:
         """Whether the discharge correction currently changes the DP's plan."""
-        return self._discharge_calibration.applied
+        return self.discharge_eff_correction < CALIBRATION_APPLY_THRESHOLD
 
     @property
     def charge_eff_last_result(self) -> str:
         """What the last charge-calibration attempt did, and why."""
-        return self._charge_calibration.last_result
+        return aggregate_last_result(
+            cal.last_result for cal in self._direction_calibrations(ACTION_CHARGING)
+        )
 
     @property
     def discharge_eff_last_result(self) -> str:
         """What the last discharge-calibration attempt did, and why."""
-        return self._discharge_calibration.last_result
+        return aggregate_last_result(
+            cal.last_result for cal in self._direction_calibrations(ACTION_DISCHARGING)
+        )
 
     @property
     def _individual_battery_configs(self) -> list[tuple[str, BatteryConfig]]:
@@ -460,56 +578,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     @_per_battery_states.setter
     def _per_battery_states(self, value: dict[str, BatteryState]) -> None:
         self._dispatcher.states = value
-
-    @property
-    def _charge_eff_samples(self) -> deque[float]:
-        """Charge-side sample window, owned by DirectionCalibration."""
-        return self._charge_calibration.samples
-
-    @_charge_eff_samples.setter
-    def _charge_eff_samples(self, value: deque[float]) -> None:
-        self._charge_calibration.samples = value
-
-    @property
-    def _charge_eff_correction(self) -> float:
-        return self._charge_calibration.correction
-
-    @_charge_eff_correction.setter
-    def _charge_eff_correction(self, value: float) -> None:
-        self._charge_calibration.correction = value
-
-    @property
-    def _discharge_eff_samples(self) -> deque[float]:
-        """Discharge-side sample window, owned by DirectionCalibration."""
-        return self._discharge_calibration.samples
-
-    @_discharge_eff_samples.setter
-    def _discharge_eff_samples(self, value: deque[float]) -> None:
-        self._discharge_calibration.samples = value
-
-    @property
-    def _discharge_eff_correction(self) -> float:
-        return self._discharge_calibration.correction
-
-    @_discharge_eff_correction.setter
-    def _discharge_eff_correction(self, value: float) -> None:
-        self._discharge_calibration.correction = value
-
-    @property
-    def _charge_eff_last_result(self) -> str:
-        return self._charge_calibration.last_result
-
-    @_charge_eff_last_result.setter
-    def _charge_eff_last_result(self, value: str) -> None:
-        self._charge_calibration.last_result = value
-
-    @property
-    def _discharge_eff_last_result(self) -> str:
-        return self._discharge_calibration.last_result
-
-    @_discharge_eff_last_result.setter
-    def _discharge_eff_last_result(self, value: str) -> None:
-        self._discharge_calibration.last_result = value
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
@@ -1473,28 +1541,70 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_load_charge_eff_calibration(self) -> None:
-        """Load persisted charge efficiency calibration from storage."""
-        await self._charge_calibration.async_load()
+        """Load every battery's persisted charge calibration from storage."""
+        await asyncio.gather(
+            *(cal.async_load() for cal in self._direction_calibrations(ACTION_CHARGING))
+        )
 
     async def _async_save_charge_eff_calibration(self) -> None:
-        """Persist current charge efficiency calibration to storage."""
-        await self._charge_calibration.async_save()
+        """Persist every battery's charge calibration to storage."""
+        await asyncio.gather(
+            *(cal.async_save() for cal in self._direction_calibrations(ACTION_CHARGING))
+        )
 
     async def async_reset_charge_eff_calibration(self) -> None:
-        """Reset charge-efficiency calibration to the nominal uncorrected state."""
-        await self._charge_calibration.async_reset()
+        """Reset every battery's charge calibration to the nominal state."""
+        await asyncio.gather(
+            *(
+                cal.async_reset()
+                for cal in self._direction_calibrations(ACTION_CHARGING)
+            )
+        )
 
     async def _async_load_discharge_eff_calibration(self) -> None:
-        """Load persisted discharge efficiency calibration from storage."""
-        await self._discharge_calibration.async_load()
+        """Load every battery's persisted discharge calibration from storage."""
+        await asyncio.gather(
+            *(
+                cal.async_load()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
 
     async def _async_save_discharge_eff_calibration(self) -> None:
-        """Persist current discharge efficiency calibration to storage."""
-        await self._discharge_calibration.async_save()
+        """Persist every battery's discharge calibration to storage."""
+        await asyncio.gather(
+            *(
+                cal.async_save()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
 
     async def async_reset_discharge_eff_calibration(self) -> None:
-        """Reset discharge-efficiency calibration to the nominal uncorrected state."""
-        await self._discharge_calibration.async_reset()
+        """Reset every battery's discharge calibration to the nominal state."""
+        await asyncio.gather(
+            *(
+                cal.async_reset()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
+
+    def _read_counter_kwh(self, sensor_id: str) -> float | None:
+        """Read one cumulative energy counter, in kWh."""
+        state = usable_state(self.hass, sensor_id)
+        if state is None:
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        unit = str(state.attributes.get("unit_of_measurement") or "kWh")
+        if unit == "Wh":
+            return value / 1000.0
+        if unit == "MWh":
+            return value * 1000.0
+        if unit != "kWh":
+            self._warn_unit_once(sensor_id, unit, "treating value as kWh")
+        return value
 
     def _read_energy_total_kwh(self, conf_key: str) -> float | None:
         """Sum the configured cumulative energy counters, in kWh.
@@ -1508,62 +1618,73 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return None
         total = 0.0
         for sensor_id in sensor_ids:
-            state = usable_state(self.hass, sensor_id)
-            if state is None:
+            value = self._read_counter_kwh(sensor_id)
+            if value is None:
                 return None
-            try:
-                value = float(state.state)
-            except (ValueError, TypeError):
-                return None
-            unit = str(state.attributes.get("unit_of_measurement") or "kWh")
-            if unit == "Wh":
-                value /= 1000.0
-            elif unit == "MWh":
-                value *= 1000.0
-            elif unit != "kWh":
-                self._warn_unit_once(sensor_id, unit, "treating value as kWh")
             total += value
         return total
 
-    def _read_energy_totals(self) -> dict[str, float | None]:
-        """Read both cumulative throughput counters at one instant."""
+    def _read_energy_totals(self) -> dict[str, dict[str, float | None]]:
+        """Read every battery's throughput counters at one instant.
+
+        Keyed by subentry, because a fleet sum cannot say which pack moved the
+        energy — and with the dispatcher concentrating on one battery at a time,
+        that is exactly the question the calibration asks.
+        """
         return {
-            "charged": self._read_energy_total_kwh(CONF_BATTERY_ENERGY_CHARGED_SENSOR),
-            "discharged": self._read_energy_total_kwh(
-                CONF_BATTERY_ENERGY_DISCHARGED_SENSOR
-            ),
+            sid: {
+                "charged": self._read_counter_kwh(
+                    data.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR) or ""
+                )
+                if data.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR)
+                else None,
+                "discharged": self._read_counter_kwh(
+                    data.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR) or ""
+                )
+                if data.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR)
+                else None,
+            }
+            for sid, data in self._battery_subentries
         }
+
+    def _battery_soc_quantum_kwh(
+        self, data: dict[str, Any], cfg: BatteryConfig
+    ) -> float:
+        """Resolution of one battery's SoC measurement, in kWh.
+
+        Derived from the decimals the SoC sensor actually reports: a state of
+        "47" is whole-percent, "47.3" is ten times finer. Returns 0.0 when
+        nothing can be determined, which leaves the caller on its fixed floor.
+        """
+        sensor_id = data.get(CONF_BATTERY_SOC_SENSOR)
+        if not sensor_id:
+            return 0.0
+        state = usable_state(self.hass, sensor_id)
+        if state is None:
+            return 0.0
+        raw = state.state.strip()
+        decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
+        step = 10.0**-decimals
+        unit = str(state.attributes.get("unit_of_measurement") or "%")
+        if unit == "kWh":
+            return step
+        if unit == "Wh":
+            return step / 1000.0
+        # percent (or unitless, which is treated as percent elsewhere)
+        return step / 100.0 * cfg.capacity_kwh
 
     def _soc_quantum_kwh(self) -> float:
         """Estimate the resolution of the aggregated SoC measurement, in kWh.
 
-        Derived from the decimals each SoC sensor actually reports: a state of
-        "47" is whole-percent, "47.3" is ten times finer. Summed across packs
-        because the aggregate SoC is a sum and the individual quantisation
-        errors can align. Returns 0.0 when nothing can be determined, which
-        leaves the caller on its fixed floor.
+        Summed across packs because the aggregate SoC is a sum and the
+        individual quantisation errors can align.
         """
-        total = 0.0
-        for (_sid, cfg), (_sid2, data) in zip(
-            self._individual_battery_configs, self._battery_subentries
-        ):
-            sensor_id = data.get(CONF_BATTERY_SOC_SENSOR)
-            if not sensor_id:
-                continue
-            state = usable_state(self.hass, sensor_id)
-            if state is None:
-                continue
-            raw = state.state.strip()
-            decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
-            step = 10.0**-decimals
-            unit = str(state.attributes.get("unit_of_measurement") or "%")
-            if unit == "kWh":
-                total += step
-            elif unit == "Wh":
-                total += step / 1000.0
-            else:  # percent (or unitless, which is treated as percent elsewhere)
-                total += step / 100.0 * cfg.capacity_kwh
-        return total
+        return sum(
+            self._battery_soc_quantum_kwh(data, cfg)
+            for (_sid, cfg), (_sid2, data) in zip(
+                self._individual_battery_configs, self._battery_subentries
+            )
+        )
 
     def _previous_step_complete(self) -> bool:
         """Return whether the previously planned first step has elapsed.
@@ -1624,112 +1745,208 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         tolerance_kw = max(0.05, 0.1 * abs(planned_kw))
         return abs(executed_kw - planned_kw) <= tolerance_kw
 
+    def _fleet_calibration_block(self, action: str) -> str | None:
+        """Why no battery can be sampled for ``action`` this run, if any.
+
+        These conditions are properties of the plan and of the system as a
+        whole, so they are answered once rather than per battery.
+        """
+        result = self._last_result
+        if result is None:
+            return CALIBRATION_NO_RESULT
+        if len(result.mode_schedule) < 1 or len(result.soc_schedule_kwh) < 2:
+            return CALIBRATION_NO_RESULT
+        if result.mode_schedule[0] != action:
+            return CALIBRATION_NO_PLAN
+        # Only sample when the plan was actually commanded; mode resolution
+        # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
+        # would otherwise drag the correction towards the 0.5 clip floor.
+        if not self._planned_first_step_was_executed(action):
+            return CALIBRATION_PLAN_NOT_EXECUTED
+        if not self._previous_step_complete():
+            return CALIBRATION_STEP_INCOMPLETE
+        if self.config.get(CONF_PV_DC_COUPLED, False):
+            return CALIBRATION_DC_COUPLED
+        return None
+
+    def _previous_step_hours(self) -> float:
+        """Length of the step being scored, in hours.
+
+        Falls back to the coordinator's own interval when the plan carried no
+        timing metadata — the same fallback _previous_step_complete makes.
+        """
+        if isinstance(self.data, dict):
+            durations = self.data.get("step_durations_hours")
+            if durations:
+                try:
+                    return float(durations[0])
+                except (TypeError, ValueError, IndexError):
+                    pass
+        return (
+            float(self.config.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES))
+            / 60.0
+        )
+
+    def _planned_battery_delta_kwh(
+        self, spec: CalibrationSpec, setpoint_kw: float, cfg: BatteryConfig
+    ) -> float:
+        """SoC change this battery was expected to make over the step, in kWh.
+
+        Derived from the setpoint the dispatcher actually gave this pack and
+        this pack's own efficiency curve at that power — not from the fleet SoC
+        schedule. The dispatcher concentrates a setpoint on one battery at a
+        time, so the fleet plan says nothing about what any single pack was
+        asked to do, and the curves are power-dependent, so a battery running at
+        1.2 kW is not modelled by the fleet's 2.4 kW point.
+        """
+        energy_kwh = abs(setpoint_kw) * self._previous_step_hours()
+        curve = (
+            cfg.charge_efficiency_curve_parsed
+            if spec.action == ACTION_CHARGING
+            else cfg.discharge_efficiency_curve_parsed
+        )
+        scalar = (
+            cfg.charge_efficiency
+            if spec.action == ACTION_CHARGING
+            else cfg.discharge_efficiency
+        )
+        efficiency = (
+            interpolate_efficiency(curve, abs(setpoint_kw)) if curve else float(scalar)
+        )
+        if efficiency <= 0:
+            return 0.0
+        # Charging puts less into the pack than it draws; discharging takes more
+        # out of the pack than it delivers.
+        return (
+            energy_kwh * efficiency
+            if spec.action == ACTION_CHARGING
+            else energy_kwh / efficiency
+        )
+
     def _update_eff_calibration(
         self,
-        calibration: DirectionCalibration,
-        battery_state: BatteryState,
-        energy_totals_now: dict[str, float | None] | None,
+        spec: CalibrationSpec,
+        energy_totals_now: dict[str, dict[str, float | None]] | None,
     ) -> None:
-        """Score the previous plan against reality and fold it in.
+        """Score the previous plan against reality, per battery, and fold it in.
 
-        This method decides *eligibility* and records why on the calibration;
-        DirectionCalibration.record does the arithmetic and the persistence.
+        This method decides *eligibility* and records why on each battery's
+        calibration; DirectionCalibration.record does the arithmetic and the
+        persistence.
 
-        Both directions ask the same question: did the battery move as much
-        energy within the step as the DP assumed? A sample is only taken when:
+        Both directions ask the same question: did this battery move as much
+        energy within the step as the plan assumed? A sample is only taken when:
         - The previous optimizer step planned this direction actively
         - The planned step was actually commanded unchanged (no hybrid/zero_grid
           override, no commitment-filter power lock)
         - The full planned step has elapsed
-        - The planned delta is large enough to be measurable at the resolution
-          of whatever measured it (energy counter or SoC sensor)
         - DC-coupled PV is not active: passive PV charging inflates the measured
           charge delta and offsets the measured discharge delta
-        - The step does not cross the inverter's derating threshold. The DP
-          plans full power for the whole step while the inverter throttles once
+        - The dispatcher gave *this* battery a setpoint in this direction. A
+          pack that sat idle while its sibling did the work has nothing to say
+          about its own efficiency, and attributing the sibling's throughput to
+          it is what a single fleet-wide ratio used to do.
+        - The planned delta is large enough to be measurable at the resolution
+          of whatever measured it (energy counter or SoC sensor)
+        - The step does not cross that battery's derating threshold. The plan
+          holds full power for the whole step while the inverter throttles once
           the threshold is passed mid-step, so the ratio would reflect the
           derating rather than an efficiency loss.
 
-        The correction is the mean of the last CALIBRATION_WINDOW ratios
-        (actual/planned), clamped for use. It is applied as a multiplier on the
-        DP's SoC transition for this direction only; the economic cost model is
-        untouched.
+        Each battery's correction is the mean of its last CALIBRATION_WINDOW
+        ratios, clamped for use; the DP is handed their capacity-weighted
+        aggregate. It scales the SoC transition for this direction only; the
+        economic cost model is untouched.
 
-        When no sample is taken, ``calibration.last_result`` names the reason.
-        Several of those reasons are permanent for a given setup (a DC-coupled
-        system never samples at all, and a control mode that does not execute
-        the DP plan never will either), so the reason is published rather than
-        leaving the user with a sample count stuck at zero.
+        When no sample is taken, ``last_result`` names the reason. Several of
+        those reasons are permanent for a given setup (a DC-coupled system never
+        samples at all, and a control mode that does not execute the DP plan
+        never will either), so the reason is published rather than leaving the
+        user with a sample count stuck at zero.
         """
-        result = self._last_result
-        if result is None:
-            calibration.last_result = CALIBRATION_NO_RESULT
-            return
-        if len(result.mode_schedule) < 1 or len(result.soc_schedule_kwh) < 2:
-            calibration.last_result = CALIBRATION_NO_RESULT
-            return
-        if result.mode_schedule[0] != calibration.spec.action:
-            calibration.last_result = CALIBRATION_NO_PLAN
+        blocked = self._fleet_calibration_block(spec.action)
+        if blocked is not None:
+            for calibration in self._direction_calibrations(spec.action):
+                calibration.last_result = blocked
             return
 
-        # Only sample when the plan was actually commanded; mode resolution
-        # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
-        # would otherwise drag the correction towards the 0.5 clip floor.
-        if not self._planned_first_step_was_executed(calibration.spec.action):
-            calibration.last_result = CALIBRATION_PLAN_NOT_EXECUTED
-            return
-        if not self._previous_step_complete():
-            calibration.last_result = CALIBRATION_STEP_INCOMPLETE
-            return
-        if self.config.get(CONF_PV_DC_COUPLED, False):
-            calibration.last_result = CALIBRATION_DC_COUPLED
-            return
+        for (sid, cfg), (_sid, data) in zip(
+            self._individual_battery_configs, self._battery_subentries
+        ):
+            battery = self._battery_calibrations.get(sid)
+            if battery is None:
+                continue
+            self._update_battery_eff_calibration(
+                battery.for_action(spec.action),
+                sid,
+                cfg,
+                data,
+                (energy_totals_now or {}).get(sid),
+            )
 
-        prev_soc = result.soc_schedule_kwh[0]
-        planned_next_soc = result.soc_schedule_kwh[1]
-        # Positive in both directions: the magnitude of the planned SoC change.
-        planned_delta = (
-            planned_next_soc - prev_soc
-            if calibration.spec.action == ACTION_CHARGING
-            else prev_soc - planned_next_soc
+    def _update_battery_eff_calibration(
+        self,
+        calibration: DirectionCalibration,
+        subentry_id: str,
+        cfg: BatteryConfig,
+        data: dict[str, Any],
+        counters_now: dict[str, float | None] | None,
+    ) -> None:
+        """Fold one battery's outcome for one direction into its correction."""
+        spec = calibration.spec
+        setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
+        # Setpoints are positive for charge, negative for discharge.
+        dispatched = (
+            setpoint_kw > 0 if spec.action == ACTION_CHARGING else setpoint_kw < 0
         )
+        if not dispatched:
+            calibration.last_result = CALIBRATION_NOT_DISPATCHED
+            return
+
+        planned_delta = self._planned_battery_delta_kwh(spec, setpoint_kw, cfg)
+        prev_soc = self._soc_snapshot_kwh.get(subentry_id)
+        planned_next_soc: float | None = None
+        if prev_soc is not None:
+            planned_next_soc = (
+                prev_soc + planned_delta
+                if spec.action == ACTION_CHARGING
+                else prev_soc - planned_delta
+            )
 
         # Prefer the cumulative throughput counter over the SoC delta. Both
-        # measure the same quantity — energy moved through the battery, which
+        # measure the same quantity — energy moved through this battery, which
         # is what the planned SoC change represents — but the counter is not
         # limited by the SoC sensor's step size.
+        snapshot = self._energy_counter_snapshot.get(subentry_id) or {}
         counter_delta = (
             counter_delta_kwh(
-                calibration.spec.counter_key,
-                self._energy_counter_snapshot.get(calibration.spec.counter_key),
-                energy_totals_now.get(calibration.spec.counter_key),
+                spec.counter_key,
+                snapshot.get(spec.counter_key),
+                counters_now.get(spec.counter_key),
             )
-            if energy_totals_now is not None
+            if counters_now is not None
             else None
         )
         if planned_delta < min_planned_delta_kwh(
-            counter_delta is not None, self._soc_quantum_kwh()
+            counter_delta is not None, self._battery_soc_quantum_kwh(data, cfg)
         ):
             # Too small to measure reliably at this resolution; skip.
             calibration.last_result = CALIBRATION_DELTA_TOO_SMALL
             return
 
-        bc = self.battery_config
-        if calibration.spec.derate_limit_kw(bc) > 0:
-            threshold_kwh = (
-                calibration.spec.derate_threshold_pct(bc) / 100 * bc.capacity_kwh
-            )
+        if spec.derate_limit_kw(cfg) > 0 and planned_next_soc is not None:
+            threshold_kwh = spec.derate_threshold_pct(cfg) / 100 * cfg.capacity_kwh
             if (
-                min(prev_soc, planned_next_soc)
+                min(prev_soc or 0.0, planned_next_soc)
                 < threshold_kwh
-                <= max(prev_soc, planned_next_soc)
+                <= max(prev_soc or 0.0, planned_next_soc)
             ):
                 _LOGGER.debug(
                     "%s efficiency calibration: skipping sample — step crosses "
                     "%s derating threshold (%.1f%% / %.2f kWh)",
-                    calibration.spec.name.capitalize(),
-                    calibration.spec.derate_label,
-                    calibration.spec.derate_threshold_pct(bc),
+                    calibration.who,
+                    spec.derate_label,
+                    spec.derate_threshold_pct(cfg),
                     threshold_kwh,
                 )
                 calibration.last_result = CALIBRATION_DERATING
@@ -1738,37 +1955,38 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if counter_delta is not None:
             actual_delta = counter_delta
             source = "energy counter"
-        else:
+        elif prev_soc is not None:
+            state = self._per_battery_states.get(subentry_id)
+            if state is None:
+                calibration.last_result = CALIBRATION_NO_RESULT
+                return
             measured = (
-                battery_state.soc_kwh - prev_soc
-                if calibration.spec.action == ACTION_CHARGING
-                else prev_soc - battery_state.soc_kwh
+                state.soc_kwh - prev_soc
+                if spec.action == ACTION_CHARGING
+                else prev_soc - state.soc_kwh
             )
             actual_delta = max(0.0, measured)
             source = "SoC delta"
+        else:
+            calibration.last_result = CALIBRATION_NO_RESULT
+            return
 
         if calibration.record(planned_delta, actual_delta, source):
             self.hass.async_create_task(calibration.async_save())
 
     def _update_charge_eff_calibration(
         self,
-        battery_state: BatteryState,
-        energy_totals_now: dict[str, float | None] | None = None,
+        energy_totals_now: dict[str, dict[str, float | None]] | None = None,
     ) -> None:
-        """Fold the previous charging step's outcome into the charge correction."""
-        self._update_eff_calibration(
-            self._charge_calibration, battery_state, energy_totals_now
-        )
+        """Fold the previous charging step's outcome into the charge corrections."""
+        self._update_eff_calibration(CHARGE_CALIBRATION, energy_totals_now)
 
     def _update_discharge_eff_calibration(
         self,
-        battery_state: BatteryState,
-        energy_totals_now: dict[str, float | None] | None = None,
+        energy_totals_now: dict[str, dict[str, float | None]] | None = None,
     ) -> None:
-        """Fold the previous discharging step's outcome into the discharge correction."""
-        self._update_eff_calibration(
-            self._discharge_calibration, battery_state, energy_totals_now
-        )
+        """Fold the previous discharging step's outcome into the discharge corrections."""
+        self._update_eff_calibration(DISCHARGE_CALIBRATION, energy_totals_now)
 
     def _weather_hour_offset(self, weather: dict[str, Any], target: datetime) -> int:
         """Index into the weather series for the hour containing ``target``.
@@ -2507,11 +2725,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         energy_totals_now = self._read_energy_totals()
 
         # Charge efficiency calibration: compare the previous plan against what
-        # the battery actually moved, to detect systematic over-estimation of
+        # each battery actually moved, to detect systematic over-estimation of
         # charge efficiency (e.g. CV-phase).
-        self._update_charge_eff_calibration(battery_state, energy_totals_now)
+        self._update_charge_eff_calibration(energy_totals_now)
         # Discharge efficiency calibration: same principle for discharging steps.
-        self._update_discharge_eff_calibration(battery_state, energy_totals_now)
+        self._update_discharge_eff_calibration(energy_totals_now)
 
         battery_config = self.battery_config
 
@@ -2521,23 +2739,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # or degradation. See efficiency_calibration.py for the two directions'
         # opposite arithmetic, and for the threshold below which a correction is
         # stored but not applied.
+        charge_eff_correction = self.charge_eff_correction
+        discharge_eff_correction = self.discharge_eff_correction
         charge_eff_curve_override = charge_curve_override(
             battery_config.charge_efficiency_curve_parsed,
-            self._charge_eff_correction,
+            charge_eff_correction,
         )
         discharge_eff_curve_override = discharge_curve_override(
             battery_config.discharge_efficiency_curve_parsed,
-            self._discharge_eff_correction,
+            discharge_eff_correction,
         )
         if charge_eff_curve_override is not None:
             _LOGGER.debug(
                 "Charge efficiency correction %.3f applied to curve",
-                self._charge_eff_correction,
+                charge_eff_correction,
             )
         if discharge_eff_curve_override is not None:
             _LOGGER.debug(
                 "Discharge efficiency correction %.3f applied to curve",
-                self._discharge_eff_correction,
+                discharge_eff_correction,
             )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
@@ -2577,9 +2797,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         self._last_result = result
-        # Snapshot the counters alongside the plan they belong to, so the next
-        # run can measure the throughput of exactly this step.
+        # Snapshot the counters and each pack's SoC alongside the plan they
+        # belong to, so the next run can measure the throughput of exactly this
+        # step, per battery. The setpoints themselves are snapshotted further
+        # down, once the split is known.
         self._energy_counter_snapshot = energy_totals_now
+        self._soc_snapshot_kwh = {
+            sid: state.soc_kwh for sid, state in self._per_battery_states.items()
+        }
 
         # Get current grid power: prefer real sensor, fall back to estimate
         realtime_grid_w = self._get_realtime_grid_w()
@@ -2690,12 +2915,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "grid_kw": round(current_grid / 1000, 3),
                 "commitment_locked": commitment_locked,
                 "commitment_reason": commitment_reason,
-                "charge_eff_correction": round(self._charge_eff_correction, 4),
-                "charge_eff_samples": len(self._charge_eff_samples),
-                "charge_eff_last_result": self._charge_eff_last_result,
-                "discharge_eff_correction": round(self._discharge_eff_correction, 4),
-                "discharge_eff_samples": len(self._discharge_eff_samples),
-                "discharge_eff_last_result": self._discharge_eff_last_result,
+                "charge_eff_correction": round(self.charge_eff_correction, 4),
+                "charge_eff_samples": self.charge_eff_sample_count,
+                "charge_eff_last_result": self.charge_eff_last_result,
+                "discharge_eff_correction": round(self.discharge_eff_correction, 4),
+                "discharge_eff_samples": self.discharge_eff_sample_count,
+                "discharge_eff_last_result": self.discharge_eff_last_result,
             }
         )
         self._optimization_trigger_source = "unknown"
@@ -2705,6 +2930,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         battery_setpoints = self._split_setpoint(
             combined_setpoint_kw, self._control_mode
         )
+        # Which pack was asked to do what, for the calibration that scores this
+        # step on the next run. The dispatcher concentrates on one battery at a
+        # time, so without this the fleet plan would be credited to every pack.
+        self._last_battery_setpoints = dict(battery_setpoints)
 
         return {
             "optimization_result": result,
@@ -2735,13 +2964,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
             "price_interval": price_interval,
-            "charge_eff_correction": round(self._charge_eff_correction, 4),
-            "charge_eff_samples": len(self._charge_eff_samples),
+            "charge_eff_correction": round(self.charge_eff_correction, 4),
+            "charge_eff_samples": self.charge_eff_sample_count,
             "charge_eff_applied": self.charge_eff_applied,
-            "charge_eff_last_result": self._charge_eff_last_result,
-            "discharge_eff_correction": round(self._discharge_eff_correction, 4),
-            "discharge_eff_samples": len(self._discharge_eff_samples),
+            "charge_eff_last_result": self.charge_eff_last_result,
+            "discharge_eff_correction": round(self.discharge_eff_correction, 4),
+            "discharge_eff_samples": self.discharge_eff_sample_count,
             "discharge_eff_applied": self.discharge_eff_applied,
-            "discharge_eff_last_result": self._discharge_eff_last_result,
+            "discharge_eff_last_result": self.discharge_eff_last_result,
+            "battery_calibration": self.battery_calibration_report(),
             "timestamp": dt_util.utcnow(),
         }

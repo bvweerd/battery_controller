@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,6 +66,7 @@ CALIBRATION_APPLY_THRESHOLD = 0.995
 CALIBRATION_SAMPLED = "sampled"
 CALIBRATION_NO_RESULT = "no_previous_run"
 CALIBRATION_NO_PLAN = "direction_not_planned"
+CALIBRATION_NOT_DISPATCHED = "battery_not_dispatched"
 CALIBRATION_PLAN_NOT_EXECUTED = "plan_not_executed"
 CALIBRATION_STEP_INCOMPLETE = "step_not_finished"
 CALIBRATION_DC_COUPLED = "dc_coupled_pv"
@@ -184,6 +185,12 @@ class DirectionCalibration:
 
     spec: CalibrationSpec
     store: storage.Store[dict[str, Any]]
+    # Human-readable owner of this calibration ("Marstek"), used in log
+    # messages so a multi-battery system says which pack it is talking about.
+    label: str = ""
+    # Where to look when this calibration has never been persisted; see
+    # async_load. None for a calibration that has no predecessor.
+    legacy_store: storage.Store[dict[str, Any]] | None = None
     samples: deque[float] = field(
         default_factory=lambda: deque(maxlen=CALIBRATION_WINDOW)
     )
@@ -209,9 +216,33 @@ class DirectionCalibration:
         """Number of observations behind the current correction."""
         return len(self.samples)
 
+    @property
+    def who(self) -> str:
+        """ "Charge" / "Charge (Marstek 2)" — the subject of a log line."""
+        return f"{self.spec.name.capitalize()}" + (
+            f" ({self.label})" if self.label else ""
+        )
+
     async def async_load(self) -> None:
-        """Restore the persisted samples and correction, if any."""
+        """Restore the persisted samples and correction, if any.
+
+        A battery with nothing of its own falls back to ``legacy_store``, the
+        fleet-wide store this calibration used to share with every other pack.
+        That value was measured on whichever battery the dispatcher happened to
+        pick, so it is no longer the answer — but it is a far better prior than
+        nominal, and it is replaced sample by sample as the pack measures
+        itself.
+        """
         stored = await self.store.async_load()
+        if stored is None and self.legacy_store is not None:
+            stored = await self.legacy_store.async_load()
+            if stored is not None:
+                _LOGGER.info(
+                    "Seeding %s efficiency calibration for %s from the previous "
+                    "fleet-wide correction",
+                    self.spec.name,
+                    self.label or "battery",
+                )
         if stored is None:
             return
         self.samples = deque(stored.get("samples", []), maxlen=CALIBRATION_WINDOW)
@@ -261,7 +292,7 @@ class DirectionCalibration:
             _LOGGER.debug(
                 "%s efficiency calibration: dropping implausible sample "
                 "(ratio=%.3f from %s, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self.spec.name.capitalize(),
+                self.who,
                 ratio,
                 source,
                 planned_delta,
@@ -272,6 +303,9 @@ class DirectionCalibration:
 
         previous = self.correction
         self.samples.append(ratio)
+        # A ratio is only meaningful next to the ratios of the same battery, so
+        # the mean below is per battery; the fleet number the DP uses is
+        # assembled from these by aggregate_correction().
         mean = sum(self.samples) / len(self.samples)
         self.correction = max(CALIBRATION_APPLY_MIN, min(CALIBRATION_APPLY_MAX, mean))
         self.last_result = CALIBRATION_SAMPLED
@@ -281,7 +315,7 @@ class DirectionCalibration:
                 "%s efficiency correction updated: %.3f → %.3f "
                 "(latest ratio=%.3f from %s, n=%d samples, "
                 "planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self.spec.name.capitalize(),
+                self.who,
                 previous,
                 self.correction,
                 ratio,
@@ -291,3 +325,64 @@ class DirectionCalibration:
                 actual_delta,
             )
         return moved
+
+
+@dataclass
+class BatteryCalibration:
+    """Both directions' calibration for one battery.
+
+    Every pack gets its own, because the dispatcher does not spread a setpoint
+    evenly: it concentrates on one battery at a time, so a single fleet-wide
+    ratio describes whichever pack happened to be dispatched and then attributes
+    it to all of them. A pack that is losing capacity is invisible that way — it
+    only drags the shared number down and has its healthy sibling planned
+    pessimistically.
+    """
+
+    subentry_id: str
+    charge: DirectionCalibration
+    discharge: DirectionCalibration
+
+    def for_action(self, action: str) -> DirectionCalibration:
+        """The direction whose plan is ``action``."""
+        return self.charge if action == ACTION_CHARGING else self.discharge
+
+    def both(self) -> tuple[DirectionCalibration, DirectionCalibration]:
+        """Both directions, for the operations that treat them alike."""
+        return (self.charge, self.discharge)
+
+
+def aggregate_correction(weighted: Iterable[tuple[float, float]]) -> float:
+    """Combine per-battery corrections into the one the DP plans with.
+
+    The DP has a single SoC state for the whole fleet, so it needs a single
+    factor. Weighting is by usable capacity over the batteries that have
+    actually measured something: a pack the dispatcher has never used carries no
+    evidence, and letting its nominal 1.0 dilute a measured sibling would report
+    half the derating that was observed. An unmeasured pack is therefore assumed
+    to behave like the measured ones rather than like the datasheet.
+
+    Returns 1.0 when nothing has been measured at all.
+    """
+    total = 0.0
+    total_weight = 0.0
+    for correction, weight in weighted:
+        if weight <= 0:
+            continue
+        total += correction * weight
+        total_weight += weight
+    return total / total_weight if total_weight > 0 else 1.0
+
+
+def aggregate_last_result(results: Iterable[str]) -> str:
+    """The fleet's headline calibration outcome.
+
+    A sample taken on any battery is the informative answer for the fleet —
+    the reasons the others skipped are visible on their own sensors.
+    """
+    reasons = list(results)
+    if not reasons:
+        return CALIBRATION_NO_RESULT
+    if CALIBRATION_SAMPLED in reasons:
+        return CALIBRATION_SAMPLED
+    return reasons[0]

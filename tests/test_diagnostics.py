@@ -236,7 +236,8 @@ async def test_diagnostics_carries_the_calibration_report(
     anything about this installation, or why it has not.
     """
     mock_config_entry.subentries = {
-        "pv1": MagicMock(title="South Array", subentry_type="pv", data={})
+        "pv1": MagicMock(title="South Array", subentry_type="pv", data={}),
+        "bat1": MagicMock(title="Marstek", subentry_type="battery", data={}),
     }
 
     weather_coord = MagicMock()
@@ -267,6 +268,23 @@ async def test_diagnostics_carries_the_calibration_report(
         "discharge_eff_samples": 0,
         "discharge_eff_applied": False,
         "discharge_eff_last_result": "dc_coupled_pv",
+        "battery_calibration": {
+            "bat1": {
+                "name": "Marstek",
+                "charge": {
+                    "correction": 0.88,
+                    "samples": 12,
+                    "applied": True,
+                    "last_result": "sampled",
+                },
+                "discharge": {
+                    "correction": 1.0,
+                    "samples": 0,
+                    "applied": False,
+                    "last_result": "battery_not_dispatched",
+                },
+            }
+        },
         "timestamp": "2024-01-01T00:00:00",
     }
     optimization_coord.last_update_success = True
@@ -304,3 +322,11 @@ async def test_diagnostics_carries_the_calibration_report(
     pv_cal = diagnostics["forecast"]["pv_calibration"]
     assert pv_cal["South Array"]["correction"] == 0.87
     assert pv_cal["South Array"]["samples"] == 64
+
+    # The fleet figures above are an average; only the per-battery report can
+    # show that this pack is the one that has derated.
+    battery_cal = opt["battery_calibration"]
+    assert battery_cal["Marstek"]["charge"]["correction"] == 0.88
+    assert (
+        battery_cal["Marstek"]["discharge"]["last_result"] == "battery_not_dispatched"
+    )

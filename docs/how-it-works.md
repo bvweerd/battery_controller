@@ -157,16 +157,26 @@ the more stable the resulting schedule.
 
 ### Checking what has actually been learned
 
-Three corrections are learned from your own installation, and each one is published as a
+The corrections are learned from your own installation, and each one is published as a
 diagnostic sensor so you can see where it stands without downloading anything:
 
-| Sensor | What it measures |
-|---|---|
-| *Charge Efficiency Correction* | How much SoC the battery really gains within a step, against what the model assumed |
-| *Discharge Efficiency Correction* | The same for discharging |
-| *PV Forecast Correction &lt;array&gt;* | What each PV array really produces, against its forecast |
+| Sensor | Where | What it measures |
+|---|---|---|
+| *Charge Efficiency Correction* | main device | How much SoC the fleet really gains within a step, against what the model assumed |
+| *Discharge Efficiency Correction* | main device | The same for discharging |
+| *Charge / Discharge Efficiency Correction &lt;battery&gt;* | each battery | The same, measured on that pack alone |
+| *PV Forecast Correction &lt;array&gt;* | each PV array | What each array really produces, against its forecast |
 
-All three read **100%** when reality matches the model. That is also the value they start
+The two sensors on the main device are the **fleet** figures — the capacity-weighted
+average of the individual batteries, and what the optimizer actually plans with, since it
+plans one state of charge for all of them together. With more than one battery that
+average describes neither pack when they differ: the controller runs one battery at a
+time rather than splitting every setpoint, so the per-battery sensors are where a single
+ageing pack becomes visible. A battery that was not asked to do anything reports
+`battery_not_dispatched` — that is not a fault, it means the other battery has been
+doing the work.
+
+They all read **100%** when reality matches the model. That is also the value they start
 at, so the number alone cannot tell you whether anything has been measured — the
 attributes say which:
 
@@ -186,7 +196,8 @@ and they are the usual explanation for a sample count that never moves:
 | `plan_not_executed` | The battery is not following the DP schedule verbatim, so the SoC change does not measure efficiency. Normal in [Zero Grid](control-modes.md#zero-grid) and [Manual](control-modes.md#manual) mode, and common in [Hybrid](control-modes.md#hybrid-recommended). |
 | `direction_not_planned` | The optimizer has not planned this direction recently. Simply waiting is the fix. |
 | `no_measured_production_sensor` | The PV array has no production counter configured, so there is nothing to compare its forecast against. |
-| `production_outside_usable_band` | The array is producing below 10% or above 80% of its rating — too little signal, or close enough to clipping that the shortfall is not a forecast error. |
+| `production_outside_usable_band` | The array is producing below 10% or above 90% of its rating — too little signal, or close enough to clipping that the shortfall is not a forecast error. |
+| `battery_not_dispatched` | This battery was not given a setpoint in this direction, so it has nothing to report. The controller concentrates on one pack at a time, so this alternates between batteries. |
 
 To reset a correction that has gone wrong, call the
 `battery_controller.reset_charge_efficiency_calibration`,

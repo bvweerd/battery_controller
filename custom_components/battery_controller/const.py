@@ -322,9 +322,18 @@ MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
 # see docs/algorithm.md.
 # Samples are only taken in a middle band of the array's rating: below the
 # floor the signal is smaller than the noise, above the ceiling inverter
-# clipping and thermal derating dominate and are not forecast errors.
+# clipping dominates and is not a forecast error.
+#
+# The ceiling is a proxy for where an inverter starts clipping, so it has to sit
+# above what an array genuinely reaches. A well-oriented array peaks near 0.85
+# of its rating on a clear summer day, so the old 0.80 ceiling excluded exactly
+# the steps with the best signal-to-noise ratio: a south array learned nothing
+# at midday and everything from its oblique, diffuse-dominated hours — where the
+# transposition model is weakest — and that error then became the gain applied
+# all day. Typical DC/AC ratios of 1.1-1.2 put real clipping at 0.83-0.91, so
+# 0.90 keeps clipped steps out while letting the informative ones in.
 PV_CALIBRATION_MIN_LOAD_FRACTION = 0.10
-PV_CALIBRATION_MAX_LOAD_FRACTION = 0.80
+PV_CALIBRATION_MAX_LOAD_FRACTION = 0.90
 # Energy-weighted over this many samples (a few days of daylight at 15 min),
 # so cloudy low-signal steps cannot dominate the estimate.
 PV_CALIBRATION_WINDOW = 200
@@ -334,8 +343,18 @@ PV_CALIBRATION_MAX_SAMPLE_RATIO = 5.0
 # Bounds on the factor actually applied to a forecast.
 PV_CALIBRATION_APPLY_MIN = 0.5
 PV_CALIBRATION_APPLY_MAX = 1.5
+# A correction this close to nominal is within measurement noise: the forecast
+# is left alone and the array is reported as uncorrected. One constant for both
+# so what the sensor claims and what the forecast does cannot drift apart.
+PV_CALIBRATION_APPLY_EPSILON = 0.005
 # Minimum samples before the correction is used at all.
-PV_CALIBRATION_MIN_SAMPLES = 20
+#
+# What separates a gain error from the weather is sample count: an array that
+# only ever samples in one part of the day picks up the radiation forecast's
+# bias for those hours, and at 20 samples (5 hours of production, one afternoon)
+# that bias *is* the correction. 60 in-band quarter-hours span several days, so
+# cloud timing averages out and what is left is the systematic part.
+PV_CALIBRATION_MIN_SAMPLES = 60
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode

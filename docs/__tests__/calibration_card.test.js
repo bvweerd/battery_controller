@@ -52,6 +52,20 @@ const DIAGNOSTICS = {
     // Can never learn: DC-coupled PV makes the SoC delta unusable.
     discharge_eff_correction: 1.0, discharge_eff_samples: 0,
     discharge_eff_applied: false, discharge_eff_last_result: 'dc_coupled_pv',
+    // The fleet figures above average the packs together. Only these rows can
+    // show that one battery has derated while the other is fine.
+    battery_calibration: {
+      Marstek: {
+        name: 'Marstek',
+        charge: { correction: 0.88, samples: 12, applied: true, last_result: 'sampled' },
+        discharge: { correction: 1.0, samples: 0, applied: false, last_result: 'battery_not_dispatched' },
+      },
+      'Marstek 2': {
+        name: 'Marstek 2',
+        charge: { correction: 1.0, samples: 0, applied: false, last_result: 'battery_not_dispatched' },
+        discharge: { correction: 1.0, samples: 0, applied: false, last_result: 'battery_not_dispatched' },
+      },
+    },
     battery_state: { soc_kwh: 5, soc_percent: 50, power_kw: 0, mode: 'idle' },
     schedule: {
       price_forecast: [0.2, 0.3], power_schedule_kw: [0, 0],
@@ -103,6 +117,20 @@ describe('analyzer learned-calibration card', () => {
     expect(card).toContain('87.0%');
     // An array left out of the report is exactly what hides the problem.
     expect(card).toContain('East Array');
+  });
+
+  test('breaks the fleet number down per battery', () => {
+    // The fleet charge correction is 94%; the pack that did the work measured
+    // 88%. Only the per-battery row can tell you which machine to look at.
+    expect(card).toContain('Marstek · charge');
+    expect(card).toContain('88.0%');
+    expect(card).toContain('Marstek 2 · discharge');
+  });
+
+  test('says why a battery is not learning instead of showing a bare 100%', () => {
+    // A pack the dispatcher never picked has nothing to report — that is not
+    // the same as a pack that measured itself and came out at nominal.
+    expect(card).toContain('battery not dispatched');
   });
 
   test('the efficiency card no longer claims 100% for an unmeasured correction', () => {

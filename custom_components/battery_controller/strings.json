@@ -377,6 +377,12 @@
       },
       "discharge_eff_correction": {
         "name": "Discharge Efficiency Correction"
+      },
+      "battery_charge_eff_correction": {
+        "name": "Charge Efficiency Correction"
+      },
+      "battery_discharge_eff_correction": {
+        "name": "Discharge Efficiency Correction"
       }
     },
     "number": {

@@ -30,6 +30,8 @@ from custom_components.battery_controller.sensor import (
     BatteryScheduleSensor,
     BatteryShadowPriceSensor,
     BatterySoCSensor,
+    BatterySubentryChargeCalibrationSensor,
+    BatterySubentryDischargeCalibrationSensor,
     BatterySubentrySetpointSensor,
     BatterySubentrySoCSensor,
     ChargeEfficiencyCalibrationSensor,
@@ -1152,12 +1154,12 @@ async def test_sensor_async_setup_entry_with_battery_subentry():
 
     # Main entities + battery subentry entities
     assert len(added_calls) >= 2
-    # Battery subentry adds 2 entities (setpoint + SoC)
+    # Battery subentry adds setpoint, SoC and both calibration sensors
     battery_call = next(
         (c for c in added_calls if c[1].get("config_subentry_id") == "sub1"), None
     )
     assert battery_call is not None
-    assert len(battery_call[0]) == 2
+    assert len(battery_call[0]) == 4
 
 
 @pytest.mark.asyncio
@@ -1365,6 +1367,53 @@ def test_efficiency_calibration_sensors_have_distinct_unique_ids():
     discharge = DischargeEfficiencyCalibrationSensor(coord, _make_device(), entry)
 
     assert charge.unique_id != discharge.unique_id
+
+
+def test_per_battery_calibration_reads_its_own_battery(hass):
+    """Each pack's sensor must report that pack, not the fleet average.
+
+    The fleet correction averages the batteries together; when they differ it
+    describes neither, and a single derated pack is invisible in it.
+    """
+    coord = _make_opt_coord()
+    coord.battery_calibration_state = MagicMock(
+        side_effect=lambda sid, action: {
+            ("bat1", ACTION_CHARGING): (0.82, 12, True, "sampled"),
+            ("bat2", ACTION_CHARGING): (1.0, 0, False, "battery_not_dispatched"),
+        }[(sid, action)]
+    )
+    entry = _make_entry()
+
+    worked = BatterySubentryChargeCalibrationSensor(
+        coord, _make_device(), entry, "bat1", "Marstek"
+    )
+    idle = BatterySubentryChargeCalibrationSensor(
+        coord, _make_device(), entry, "bat2", "Marstek 2"
+    )
+
+    assert worked.native_value == pytest.approx(82.0)
+    assert worked.extra_state_attributes["samples"] == 12
+    assert idle.native_value == pytest.approx(100.0)
+    assert idle.extra_state_attributes["last_result"] == "battery_not_dispatched"
+    assert worked.unique_id != idle.unique_id
+
+
+def test_per_battery_calibration_names_the_battery_and_direction():
+    """Two directions on two packs is four entities; each needs its own identity."""
+    coord = _make_opt_coord()
+    coord.battery_calibration_state = MagicMock(return_value=(1.0, 0, False, "sampled"))
+    entry = _make_entry()
+
+    charge = BatterySubentryChargeCalibrationSensor(
+        coord, _make_device(), entry, "bat1", "Marstek"
+    )
+    discharge = BatterySubentryDischargeCalibrationSensor(
+        coord, _make_device(), entry, "bat1", "Marstek"
+    )
+
+    assert charge.unique_id != discharge.unique_id
+    assert "Marstek" in charge.name
+    assert charge.name != discharge.name
 
 
 def _make_pv_calibration_coord(
