@@ -497,13 +497,23 @@ class WindSpeedSensor(BatteryForecastSensor):
 
 
 class BatteryDailySavingsSensor(BatteryControllerSensor):
-    """Sensor for daily savings from battery optimization."""
+    """Estimated savings of the CURRENT plan over the optimization horizon.
+
+    Not a running total. The value is a forward-looking estimate for the horizon
+    the optimizer just solved (up to 36 h), recomputed from scratch on every run,
+    so it moves both up and down as prices and forecasts change.
+
+    That is why the state class is MEASUREMENT rather than TOTAL: TOTAL makes the
+    recorder accumulate the difference between consecutive states into a
+    long-term sum, which for a fluctuating forecast produces a meaningless
+    running figure and an incorrect cost in the energy dashboard.
+    """
 
     _attr_translation_key = "daily_savings"
     _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "daily_savings"
 
     @property

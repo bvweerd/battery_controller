@@ -17,6 +17,8 @@ from custom_components.battery_controller.efficiency_curve import (
 )
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
+    charge_budget_wh,
+    passive_dc_charge_wh,
     _filter_micro_cycles,
     _filter_oscillations,
     _find_nearest_soc_idx,
@@ -3172,3 +3174,216 @@ class TestMicroCycleFirstStep:
         # 0.2 kW over 0.25 h = 0.05 kWh < 0.2 kWh
         assert mode[0] == ACTION_IDLE
         assert power[0] == pytest.approx(0.0)
+
+
+class TestGridCapacityCap:
+    """The grid connection cap must bound the ACTION, not the price of the flow.
+
+    Clipping ``net_grid_w`` on the import side made every watt above the cap
+    free — the SoC kept rising while the cost stopped growing — so the DP
+    charged at full power whenever the cap was binding and planned imports of
+    nearly twice the configured limit.
+    """
+
+    @staticmethod
+    def _config(cap_kw: float) -> BatteryConfig:
+        return BatteryConfig(
+            capacity_kwh=20.0,
+            max_charge_power_kw=4.0,
+            max_discharge_power_kw=2.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=cap_kw,
+        )
+
+    def test_over_cap_import_is_still_priced(self):
+        """Charging past the cap must never be free."""
+        config = self._config(3.0)
+        common = {
+            "time_step_hours": 1.0,
+            "soc_wh": 5000.0,
+            "grid_price": 0.30,
+            "feed_in_price": 0.05,
+            "pv_production_w": 0.0,
+            "consumption_w": 2000.0,
+            "charge_curve": config.charge_efficiency_curve_parsed,
+            "discharge_curve": config.discharge_efficiency_curve_parsed,
+            "degradation_cost_per_kwh": 0.0,
+            "battery_config": config,
+        }
+        costs = [calculate_step_cost(action_w=a, **common) for a in (1000, 2000, 3000)]
+        # Each extra kW costs a full kWh at the grid price, cap or no cap.
+        assert costs[1] - costs[0] == pytest.approx(0.30)
+        assert costs[2] - costs[1] == pytest.approx(0.30)
+
+    def test_export_beyond_cap_earns_nothing(self):
+        """Curtailment is still modelled: unexportable PV has no revenue."""
+        config = self._config(3.0)
+        common = {
+            "time_step_hours": 1.0,
+            "soc_wh": 5000.0,
+            "action_w": 0.0,
+            "grid_price": 0.30,
+            "feed_in_price": 0.10,
+            "consumption_w": 0.0,
+            "charge_curve": config.charge_efficiency_curve_parsed,
+            "discharge_curve": config.discharge_efficiency_curve_parsed,
+            "degradation_cost_per_kwh": 0.0,
+            "battery_config": config,
+        }
+        at_cap = calculate_step_cost(pv_production_w=3000.0, **common)
+        past_cap = calculate_step_cost(pv_production_w=6000.0, **common)
+        assert at_cap == pytest.approx(-0.30)
+        assert past_cap == pytest.approx(at_cap)
+
+    def test_schedule_respects_the_connection_limit(self):
+        """The planned grid flow may not exceed the configured cap."""
+        prices = [0.10, 0.10, 0.10, 0.40, 0.40, 0.40]
+        consumption = [1.0] * 6
+        result = optimize_battery_schedule(
+            battery_config=self._config(3.0),
+            current_soc_kwh=8.0,
+            price_forecast=prices,
+            feed_in_forecast=[0.08] * 3 + [0.35] * 3,
+            pv_forecast=[0.0] * 6,
+            consumption_forecast=consumption,
+            step_durations_hours=[1.0] * 6,
+            degradation_cost_per_kwh=0.01,
+            min_price_spread=0.05,
+        )
+        grid_kw = [
+            consumption[t] + result.power_schedule_kw[t]
+            for t in range(len(result.power_schedule_kw))
+        ]
+        assert max(grid_kw) <= 3.0 + 1e-6, f"grid flow exceeds the cap: {grid_kw}"
+        # ... and the battery is still used: the cap limits it, not disables it.
+        assert max(result.power_schedule_kw) > 0.0
+
+    def test_uncapped_schedule_is_unaffected(self):
+        """0 = unlimited must leave the plan exactly as it was."""
+        kwargs = {
+            "current_soc_kwh": 8.0,
+            "price_forecast": [0.10, 0.10, 0.10, 0.40, 0.40, 0.40],
+            "feed_in_forecast": [0.08] * 3 + [0.35] * 3,
+            "pv_forecast": [0.0] * 6,
+            "consumption_forecast": [1.0] * 6,
+            "step_durations_hours": [1.0] * 6,
+            "degradation_cost_per_kwh": 0.01,
+            "min_price_spread": 0.05,
+        }
+        uncapped = optimize_battery_schedule(battery_config=self._config(0.0), **kwargs)
+        generous = optimize_battery_schedule(
+            battery_config=self._config(50.0), **kwargs
+        )
+        assert uncapped.power_schedule_kw == pytest.approx(generous.power_schedule_kw)
+
+
+class TestPassiveDcChargeRating:
+    """Passive DC MPPT charging shares the battery's charge-power budget."""
+
+    @staticmethod
+    def _config(max_charge_kw: float) -> BatteryConfig:
+        return BatteryConfig(
+            capacity_kwh=20.0,
+            max_charge_power_kw=max_charge_kw,
+            max_discharge_power_kw=2.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=True,
+            pv_dc_efficiency=0.97,
+        )
+
+    def test_array_larger_than_the_inverter_is_clipped(self):
+        """A 4 kW array on a 2 kW battery may only charge it at 2 kW."""
+        result = optimize_battery_schedule(
+            battery_config=self._config(2.0),
+            current_soc_kwh=2.5,
+            price_forecast=[0.20, 0.20, 0.50, 0.50],
+            feed_in_forecast=[0.0] * 4,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5, 0.5, 1.5, 1.5],
+            step_durations_hours=[1.0] * 4,
+            degradation_cost_per_kwh=0.02,
+            min_price_spread=0.05,
+            pv_dc_forecast=[4.0, 4.0, 0.0, 0.0],
+        )
+        soc = result.soc_schedule_kwh
+        absorbed = [soc[t + 1] - soc[t] for t in range(2)]
+        assert max(absorbed) <= 2.0 + 1e-6, f"charged past the rating: {absorbed}"
+        # The array can supply 4 x 0.97 = 3.88 kW, so the rating is what binds.
+        assert max(absorbed) == pytest.approx(2.0, abs=0.01)
+
+    def test_ac_setpoint_and_passive_path_share_the_budget(self):
+        """An AC charge command may not buy extra headroom for the DC path."""
+        rating_kw, step_h = 2.0, 1.0
+        array_wh = 4000.0 * 0.97 * step_h  # 3880 Wh available from the panels
+        roomy = 10_000.0  # SoC headroom well above anything the budget allows
+
+        idle = passive_dc_charge_wh(
+            4000.0, 0.97, step_h, roomy, charge_budget_wh(rating_kw, step_h, 0.0)
+        )
+        # Idle: the rating binds, not the array.
+        assert idle == pytest.approx(2000.0)
+        assert idle < array_wh
+
+        # Charging 1 kW AC stores ~950 Wh, so only ~1050 Wh of budget is left.
+        ac_stored_wh = 1000.0 * step_h * 0.9487
+        with_ac = passive_dc_charge_wh(
+            4000.0,
+            0.97,
+            step_h,
+            roomy,
+            charge_budget_wh(rating_kw, step_h, ac_stored_wh),
+        )
+        assert with_ac == pytest.approx(2000.0 - ac_stored_wh)
+        # Total into the battery is still the rating — not the rating plus the
+        # AC setpoint, which is what the unbounded passive path used to give.
+        assert ac_stored_wh + with_ac == pytest.approx(2000.0)
+
+    def test_headroom_still_binds_when_it_is_the_tighter_limit(self):
+        """The budget is an extra bound, not a replacement for SoC headroom."""
+        absorbed = passive_dc_charge_wh(
+            4000.0, 0.97, 1.0, headroom_wh=300.0, budget_wh=2000.0
+        )
+        assert absorbed == pytest.approx(300.0)
+
+
+class TestOscillationFilterCostGuard:
+    """The oscillation filter must never make the schedule more expensive."""
+
+    def test_filtered_schedule_is_never_worse_than_the_dp_plan(self):
+        """Priced in real money, the returned plan beats or matches the raw one."""
+        import random
+
+        random.seed(3)
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        shape = [0.08, 0.07, 0.16, 0.24, 0.14, 0.10, 0.22, 0.34, 0.24, 0.12]
+        for trial in range(5):
+            prices = [
+                max(0.0, shape[i % len(shape)] * (0.7 + 0.6 * random.random()))
+                for i in range(48)
+            ]
+            result = optimize_battery_schedule(
+                battery_config=config,
+                current_soc_kwh=4.0,
+                price_forecast=prices,
+                feed_in_forecast=[p * 0.85 for p in prices],
+                pv_forecast=[0.0] * 48,
+                consumption_forecast=[0.4] * 48,
+                step_durations_hours=[0.25] * 48,
+                degradation_cost_per_kwh=0.026,
+                min_price_spread=0.05,
+            )
+            # raw_savings is the pre-filter plan priced identically to savings,
+            # so the filters may only ever be neutral or better on this axis
+            # once the micro-cycle allowance is granted.
+            assert result.raw_savings is not None
+            assert result.savings <= result.raw_savings + 1e-9, (
+                f"trial {trial}: filtering somehow gained value, check the pricing"
+            )

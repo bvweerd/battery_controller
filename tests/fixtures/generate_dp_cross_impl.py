@@ -142,6 +142,105 @@ CASES = [
             "min_price_spread": 0.05,
         },
     },
+    {
+        "name": "grid_cap_binds_on_charge",
+        "description": (
+            "Grid cap below the charge rating: with 1 kW of load under a 3 kW "
+            "cap the charge setpoint may not exceed 2 kW, even though the "
+            "battery could take 4 kW and the price spread easily justifies it. "
+            "Pins that the cap bounds the ACTION — clipping the cost of "
+            "over-cap import instead made every watt above the cap free."
+        ),
+        "config": {
+            "capacity_kwh": 20.0,
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 90.0,
+            "max_charge_power_kw": 4.0,
+            "max_discharge_power_kw": 2.0,
+            "charge_curve": [[0.0, 0.9487], [4.0, 0.9487]],
+            "discharge_curve": [[0.0, 0.9487], [2.0, 0.9487]],
+            "pv_dc_coupled": False,
+            "pv_dc_efficiency": 0.97,
+            "max_grid_power_kw": 3.0,
+        },
+        "inputs": {
+            "soc_kwh": 8.0,
+            "prices": [0.10, 0.10, 0.10, 0.40, 0.40, 0.40],
+            "feed_in": [0.08, 0.08, 0.08, 0.35, 0.35, 0.35],
+            "pv": [0.0] * 6,
+            "consumption": [1.0] * 6,
+            "pv_dc": None,
+            "step_hours": [1.0] * 6,
+            "degradation_cost_per_kwh": 0.01,
+            "min_price_spread": 0.05,
+        },
+    },
+    {
+        "name": "load_above_grid_cap",
+        "description": (
+            "Household load alone exceeds the grid cap, so charging headroom is "
+            "zero and the import genuinely runs over the connection. Pins that "
+            "over-cap import is still PRICED: clipping it (as the cost model "
+            "used to) handed the house free energy and understated the "
+            "baseline, which is what made over-cap charging look profitable."
+        ),
+        "config": {
+            "capacity_kwh": 20.0,
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 90.0,
+            "max_charge_power_kw": 2.0,
+            "max_discharge_power_kw": 2.0,
+            "charge_curve": [[0.0, 0.9487], [2.0, 0.9487]],
+            "discharge_curve": [[0.0, 0.9487], [2.0, 0.9487]],
+            "pv_dc_coupled": False,
+            "pv_dc_efficiency": 0.97,
+            "max_grid_power_kw": 2.0,
+        },
+        "inputs": {
+            "soc_kwh": 10.0,
+            "prices": [0.50, 0.50, 0.50],
+            "feed_in": [0.02, 0.02, 0.02],
+            "pv": [0.0] * 3,
+            "consumption": [3.0] * 3,
+            "pv_dc": None,
+            "step_hours": [1.0] * 3,
+            "degradation_cost_per_kwh": 0.01,
+            "min_price_spread": 0.05,
+        },
+    },
+    {
+        "name": "dc_pv_over_charge_rating",
+        "description": (
+            "A 4 kW DC array on a 2 kW battery, with worthless export and an "
+            "expensive evening so the DP wants every kWh it can store. The AC "
+            "setpoint and the passive MPPT path must SHARE the 2 kW charge "
+            "budget: without that bound the battery absorbed the AC setpoint "
+            "and the full DC array on top, charging far past its rating."
+        ),
+        "config": {
+            "capacity_kwh": 20.0,
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 90.0,
+            "max_charge_power_kw": 2.0,
+            "max_discharge_power_kw": 2.0,
+            "charge_curve": [[0.0, 0.95], [2.0, 0.92]],
+            "discharge_curve": [[0.0, 0.95], [2.0, 0.92]],
+            "pv_dc_coupled": True,
+            "pv_dc_efficiency": 0.97,
+            "max_grid_power_kw": 0.0,
+        },
+        "inputs": {
+            "soc_kwh": 2.5,
+            "prices": [0.20, 0.20, 0.20, 0.50, 0.50, 0.50],
+            "feed_in": [0.0] * 6,
+            "pv": [0.0] * 6,
+            "consumption": [0.5, 0.5, 0.5, 1.5, 1.5, 1.5],
+            "pv_dc": [4.0, 4.0, 4.0, 0.0, 0.0, 0.0],
+            "step_hours": [1.0] * 6,
+            "degradation_cost_per_kwh": 0.02,
+            "min_price_spread": 0.05,
+        },
+    },
 ]
 
 

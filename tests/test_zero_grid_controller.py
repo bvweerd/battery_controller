@@ -44,9 +44,10 @@ class TestZeroGridMode:
             dp_schedule_w=0,
             mode="zero_grid",
         )
-        # Should discharge (negative) to compensate
+        # Should discharge (negative) to compensate. One tick covers `loop_gain`
+        # of the error; see test_converges_on_full_compensation for the rest.
         assert target < 0
-        assert target == pytest.approx(-1000, abs=10)
+        assert target == pytest.approx(-1000 * controller.config.loop_gain, abs=10)
 
     def test_exporting_triggers_charge(self, controller):
         """When exporting to grid, charge battery."""
@@ -57,7 +58,7 @@ class TestZeroGridMode:
             mode="zero_grid",
         )
         assert target > 0
-        assert target == pytest.approx(2000, abs=10)
+        assert target == pytest.approx(2000 * controller.config.loop_gain, abs=10)
 
     def test_zero_grid_at_zero(self, controller):
         """No grid exchange -> no battery action."""
@@ -70,13 +71,15 @@ class TestZeroGridMode:
         assert target == 0.0
 
     def test_clamp_to_max_discharge(self, controller):
-        """Large import should be clamped to max discharge."""
-        target = controller.calculate_battery_setpoint(
-            current_grid_w=8000,  # 8 kW import
-            current_soc_kwh=5.0,
-            dp_schedule_w=0,
-            mode="zero_grid",
-        )
+        """A sustained large import should settle at max discharge, not past it."""
+        for _ in range(30):
+            target = controller.calculate_battery_setpoint(
+                current_grid_w=8000,  # 8 kW import, never satisfied
+                current_soc_kwh=5.0,
+                dp_schedule_w=0,
+                mode="zero_grid",
+            )
+            controller.reset_setpoint(target)
         assert target == pytest.approx(-5000)  # Max discharge
 
     def test_soc_limit_prevents_discharge(self, controller):
@@ -88,6 +91,60 @@ class TestZeroGridMode:
             mode="zero_grid",
         )
         assert target == 0.0  # Can't discharge
+
+    @staticmethod
+    def _run_loop(controller, load_w, lag_ticks, ticks=60):
+        """Drive the loop against a steady load, with `lag_ticks` meter delay.
+
+        Returns the setpoint after each tick. The grid meter sees the load plus
+        whatever the battery was told to do `lag_ticks` cycles ago, which is how
+        a still-ramping inverter or an independently polled meter behaves.
+        """
+        applied = [0.0] * (lag_ticks + 1)
+        history = []
+        for _ in range(ticks):
+            grid_w = load_w + applied[-1 - lag_ticks]
+            target = controller.calculate_battery_setpoint(
+                current_grid_w=grid_w,
+                current_soc_kwh=5.0,
+                dp_schedule_w=0,
+                mode="zero_grid",
+            )
+            controller.reset_setpoint(target)
+            applied.append(target)
+            history.append(target)
+        return history
+
+    def test_converges_on_full_compensation(self, controller):
+        """A steady load is fully compensated once the loop has settled."""
+        history = self._run_loop(controller, load_w=2000.0, lag_ticks=0)
+        assert history[-1] == pytest.approx(-2000.0, abs=1.0)
+
+    @pytest.mark.parametrize("lag_ticks", [1, 2])
+    def test_converges_despite_meter_lag(self, controller, lag_ticks):
+        """The loop settles even when the meter trails the setpoint.
+
+        With unity gain this recurrence sits exactly on the stability boundary:
+        one tick of lag produced a permanent six-tick oscillation between 0 and
+        twice the load, and two ticks swung the battery between full charge and
+        full discharge against a completely steady load.
+        """
+        history = self._run_loop(
+            controller, load_w=2000.0, lag_ticks=lag_ticks, ticks=200
+        )
+        early = history[10:30]
+        tail = history[-20:]
+
+        def spread(values):
+            return max(values) - min(values)
+
+        # Decaying, not sustained: unity gain holds the early amplitude forever.
+        assert spread(tail) < 0.1 * spread(early), "loop is still oscillating"
+        assert tail[-1] == pytest.approx(-2000.0, abs=20.0)
+
+    def test_loop_gain_below_unity(self, controller):
+        """Guard the stability condition itself, not just its symptoms."""
+        assert 0.0 < controller.config.loop_gain < 1.0
 
     def test_soc_limit_prevents_charge(self, controller):
         """At max SoC, don't charge further."""
@@ -325,8 +382,11 @@ class TestSetpointMemory:
             dp_schedule_w=0,
             mode="zero_grid",
         )
-        # Importing 1 kW -> discharge ~1 kW; memory tracks the applied target.
-        assert controller.last_target_w == pytest.approx(-1000, abs=10)
+        # Importing 1 kW -> discharge one gain-step of it; memory tracks the
+        # applied target.
+        assert controller.last_target_w == pytest.approx(
+            -1000 * controller.config.loop_gain, abs=10
+        )
 
     def test_reset_setpoint_forces_memory(self, controller):
         controller._last_target_w = -1500.0

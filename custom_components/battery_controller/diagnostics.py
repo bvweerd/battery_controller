@@ -12,26 +12,49 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
+    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+    CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_GRID_EXPORT_SENSORS,
     CONF_GRID_IMPORT_SENSORS,
     CONF_GROSS_LOAD_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
+    CONF_POWER_CONSUMPTION_SENSORS,
+    CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
+    CONF_PV_FORECAST_SENSORS,
+    CONF_PV_MEASURED_PRODUCTION_SENSOR,
+    CONF_PV_PRODUCTION_SENSORS,
     WEATHER_STALE_AFTER_MINUTES,
 )
 
-# Sensor entity IDs may be considered private; redact them
+# Sensor entity IDs may be considered private; redact them.
+#
+# Every config key that holds an entity ID belongs here — diagnostics get pasted
+# into public issue trackers. Built from the constants rather than from literal
+# strings: the previous list carried "pv_forecast_sensor", which matched no key
+# at all (the real one is plural) and so redacted nothing, while eight other
+# sensor keys were never listed in the first place.
 TO_REDACT: set[str] = {
-    CONF_PRICE_SENSOR,
-    CONF_FEED_IN_PRICE_SENSOR,
-    CONF_BATTERY_SOC_SENSOR,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
-    "pv_forecast_sensor",
+    CONF_BATTERY_SOC_SENSOR,
+    CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+    CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_FEED_IN_PRICE_SENSOR,
     CONF_GRID_EXPORT_SENSORS,
     CONF_GRID_IMPORT_SENSORS,
     CONF_GROSS_LOAD_SENSORS,
+    CONF_POWER_CONSUMPTION_SENSORS,
+    CONF_POWER_PRODUCTION_SENSORS,
+    CONF_PRICE_SENSOR,
+    CONF_PV_FORECAST_SENSORS,
+    CONF_PV_MEASURED_PRODUCTION_SENSOR,
+    CONF_PV_PRODUCTION_SENSORS,
 }
 
 

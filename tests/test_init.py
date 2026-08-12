@@ -35,9 +35,12 @@ def _make_entry(entry_id="test", data=None, options=None):
     return entry
 
 
-def _make_runtime_data(config=None):
+def _make_runtime_data(config=None, options=None):
     runtime_data = MagicMock(spec=BatteryControllerData)
     runtime_data.config = config or {}
+    # Options snapshot; defaults to the config so the existing cases, where the
+    # two are the same thing, keep reading naturally.
+    runtime_data.options = options if options is not None else (config or {})
     runtime_data.forecast_coordinator = MagicMock()
     runtime_data.forecast_coordinator.async_shutdown = AsyncMock()
     runtime_data.optimization_coordinator = MagicMock()
@@ -119,6 +122,52 @@ async def test_update_listener_reloads_on_structural_change():
 
     await _update_listener(mock_hass, entry)
     mock_hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_update_listener_reloads_when_structural_key_removed():
+    """Clearing a structural option must reload, not just changing one.
+
+    The listener used to iterate the new options only, so a key that vanished
+    was never compared: the coordinator kept running on the sensor it was set
+    up with while the UI showed the selection cleared.
+    """
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data(options={"price_sensor": "sensor.old"})
+    entry.options = {}
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_update_listener_ignores_derived_config_keys():
+    """Derived keys in `config` are not options and must not force a reload.
+
+    `config` is entry.data | entry.options plus derived entries (pv_arrays,
+    battery_subentries, entry_id, ...). Comparing options against it would read
+    every one of those as a removed key and reload on every runtime-only change.
+    """
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data(
+        config={
+            "entry_id": "abc",
+            "pv_arrays": [{"peak_power_kwp": 4.0}],
+            "battery_subentries": [("sub1", {})],
+            CONF_CONTROL_MODE: "hybrid",
+        },
+        options={CONF_CONTROL_MODE: "hybrid"},
+    )
+    entry.options = {CONF_CONTROL_MODE: "zero_grid"}  # runtime-only key
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_not_called()
 
 
 @pytest.mark.asyncio

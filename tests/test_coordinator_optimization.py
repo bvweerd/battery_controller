@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from custom_components.battery_controller.efficiency_calibration import (
+    min_planned_delta_kwh,
+)
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
     BatteryState,
@@ -2847,10 +2850,10 @@ def test_split_setpoint_zero_grid_discharge_same_battery(hass):
     coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
     # First call: charge → bat1 selected (closest to 50%)
     coord._split_setpoint(0.1, "zero_grid")
-    active_after_charge = coord._zero_grid_active_battery
+    active_after_charge = coord._dispatcher.zero_grid_active
     # Second call: discharge → should stay on same battery (hysteresis, gap still < 0.10)
     coord._split_setpoint(-0.1, "zero_grid")
-    assert coord._zero_grid_active_battery == active_after_charge
+    assert coord._dispatcher.zero_grid_active == active_after_charge
 
 
 def test_split_setpoint_hysteresis_prevents_switch(hass):
@@ -2858,7 +2861,7 @@ def test_split_setpoint_hysteresis_prevents_switch(hass):
     coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
     # Initial selection for scheduled charge: bat1 (rel_soc=0.5 < 0.525)
     coord._split_setpoint(0.1, "follow_schedule")
-    assert coord._scheduled_active_battery == "bat1"
+    assert coord._dispatcher.scheduled_active == "bat1"
     # Nudge bat2 slightly lower but advantage still within hysteresis (< 0.05)
 
     coord._per_battery_states["bat2"] = BatteryState(
@@ -2867,14 +2870,14 @@ def test_split_setpoint_hysteresis_prevents_switch(hass):
     # bat2 rel_soc=(4.7-1)/8=0.4625, bat1=0.5 → advantage=0.0375 < 0.05 hysteresis
     # gap=0.0375 < 0.10 → still in concentration mode
     coord._split_setpoint(0.1, "follow_schedule")
-    assert coord._scheduled_active_battery == "bat1"  # no switch
+    assert coord._dispatcher.scheduled_active == "bat1"  # no switch
 
 
 def test_split_setpoint_hysteresis_allows_switch(hass):
     """Active battery switches when challenger advantage exceeds hysteresis (gap still < split threshold)."""
     coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
     coord._split_setpoint(0.1, "follow_schedule")
-    assert coord._scheduled_active_battery == "bat1"
+    assert coord._dispatcher.scheduled_active == "bat1"
     # Drop bat2 so advantage = 0.5 - 0.3875 = 0.1125 > 0.05 hysteresis, gap=0.1125 > 0.10 split
     # → need gap in (0.05, 0.10): bat2 at rel_soc such that advantage > 0.05 but gap < 0.10
     # bat2 rel_soc = 0.5 - 0.07 = 0.43 → advantage=0.07 > 0.05, gap=0.07 < 0.10
@@ -2884,14 +2887,14 @@ def test_split_setpoint_hysteresis_allows_switch(hass):
         soc_kwh=4.44, soc_percent=44.4, power_kw=0.0, mode="idle"
     )
     coord._split_setpoint(0.1, "follow_schedule")
-    assert coord._scheduled_active_battery == "bat2"  # switched
+    assert coord._dispatcher.scheduled_active == "bat2"  # switched
 
 
 def test_split_setpoint_gap_resets_active_battery(hass):
     """When gap crosses split threshold, active battery state is cleared for fresh selection."""
     coord = _make_two_battery_coord(hass, soc1_kwh=5.0, soc2_kwh=5.2)
     coord._split_setpoint(0.1, "follow_schedule")
-    assert coord._scheduled_active_battery == "bat1"
+    assert coord._dispatcher.scheduled_active == "bat1"
     # Force SoC gap >= 0.10
 
     coord._per_battery_states["bat2"] = BatteryState(
@@ -2900,7 +2903,7 @@ def test_split_setpoint_gap_resets_active_battery(hass):
     # bat1 rel_soc=0.5, bat2 rel_soc=(7.5-1)/8=0.8125 → gap=0.3125 >= 0.10
     coord._split_setpoint(0.1, "follow_schedule")
     # Gap crossed threshold → proportional split → active battery reset to None
-    assert coord._scheduled_active_battery is None
+    assert coord._dispatcher.scheduled_active is None
 
 
 # ---------------------------------------------------------------------------
@@ -2972,7 +2975,7 @@ def test_concentrate_redistributes_when_winner_full(hass):
     # bat1 full (9.0 = max SoC), bat2 nearly full; gap below split threshold.
     coord = _make_two_battery_coord(hass, soc1_kwh=9.0, soc2_kwh=8.7)
     # Selection hysteresis keeps the previously active (now full) battery.
-    coord._zero_grid_active_battery = "bat1"
+    coord._dispatcher.zero_grid_active = "bat1"
     result = coord._split_setpoint(1.0, MODE_ZERO_GRID)
     # bat1 has no headroom; the setpoint must go to bat2 instead of vanishing.
     assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
@@ -2983,7 +2986,7 @@ def test_concentrate_redistributes_when_winner_empty(hass):
     """An empty concentration winner must not drop the discharge setpoint."""
     # bat1 empty (1.0 = min SoC), bat2 slightly above; gap below split threshold.
     coord = _make_two_battery_coord(hass, soc1_kwh=1.0, soc2_kwh=1.3)
-    coord._zero_grid_active_battery = "bat1"
+    coord._dispatcher.zero_grid_active = "bat1"
     result = coord._split_setpoint(-1.0, MODE_ZERO_GRID)
     assert result["bat1"] == pytest.approx(0.0, abs=1e-6)
     assert result["bat2"] == pytest.approx(-1.0, abs=1e-6)
@@ -3924,15 +3927,15 @@ def test_soc_quantum_raises_the_sampling_threshold(hass):
     hass.states.async_set("sensor.test_soc", "50", {"unit_of_measurement": "%"})
     assert coord._soc_quantum_kwh() == pytest.approx(0.1)
     # 4 x the quantum, well above the old fixed 0.1 kWh floor
-    assert coord._min_planned_delta_kwh(from_counters=False) == pytest.approx(0.4)
+    assert min_planned_delta_kwh(False, coord._soc_quantum_kwh()) == pytest.approx(0.4)
 
     # A sensor with one decimal resolves ten times finer.
     hass.states.async_set("sensor.test_soc", "50.5", {"unit_of_measurement": "%"})
     assert coord._soc_quantum_kwh() == pytest.approx(0.01)
-    assert coord._min_planned_delta_kwh(from_counters=False) == pytest.approx(0.1)
+    assert min_planned_delta_kwh(False, coord._soc_quantum_kwh()) == pytest.approx(0.1)
 
     # The counters are not limited by the SoC sensor at all.
-    assert coord._min_planned_delta_kwh(from_counters=True) == pytest.approx(0.1)
+    assert min_planned_delta_kwh(True, coord._soc_quantum_kwh()) == pytest.approx(0.1)
 
 
 def test_small_step_is_skipped_on_a_coarse_soc_sensor(hass):

@@ -38,9 +38,27 @@ drives the battery and you only want the optimizer's numbers for reference.
 
 Minimize grid exchange in real time using the battery. The optimizer still runs and still
 publishes its schedule, but the controller ignores it: the setpoint follows the measured
-grid power, updated roughly every 5 seconds.
+grid power, updated every **Zero Grid Response Time** seconds.
 
 No arbitrage happens in this mode. It is self-consumption only.
+
+**How the setpoint converges.** Each tick moves the setpoint by half of the remaining
+grid error rather than all of it:
+
+```
+target = last_target − 0.5 × grid_power
+```
+
+The half-step matters. At full step the loop only settles if the meter already reflects
+the setpoint issued on the previous tick. One tick of delay — an inverter still ramping,
+or a meter polled on its own cycle — puts the loop exactly on the stability boundary, and
+it oscillates forever: against a steady 2 kW load it swung between 0 and −4 kW with a
+period of six ticks, and with two ticks of delay between −5 kW and +4 kW. The deadband
+cannot damp that, because the swings are far larger than it.
+
+The cost is a slightly slower response: a step change in load is compensated to within
+5 % after about 4 ticks (40 s at the default 10 s interval) instead of 1. If your setup
+responds quickly, lower **Zero Grid Response Time** rather than looking for a gain knob.
 
 ## Follow Schedule
 
