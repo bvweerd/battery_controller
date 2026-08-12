@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
+from collections.abc import Iterable
 from typing import Any
 
 from collections import deque
@@ -49,6 +50,19 @@ from .helpers import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# What the last PV calibration attempt did per array. Published so a user can
+# tell an array that is genuinely on target from one that has never had the
+# chance to learn anything — most commonly because it has no measured
+# production sensor, or because its output never lands in the usable band.
+PV_CAL_SAMPLED = "sampled"
+PV_CAL_NO_MEASURED_SENSOR = "no_measured_production_sensor"
+PV_CAL_OUTSIDE_LOAD_BAND = "production_outside_usable_band"
+PV_CAL_METER_UNREADABLE = "production_counter_unavailable"
+PV_CAL_WINDOW_MISMATCH = "forecast_window_did_not_elapse"
+PV_CAL_CURTAILED = "pv_curtailed"
+PV_CAL_METER_RESET = "production_counter_reset"
+PV_CAL_IMPLAUSIBLE = "sample_dropped_implausible"
 
 
 class ForecastCoordinator(DataUpdateCoordinator):
@@ -140,6 +154,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
         self._pv_cal_samples: dict[str, deque[tuple[float, float]]] = {}
         self._pv_cal_correction: dict[str, float] = {}
         self._pv_cal_snapshot: dict[str, Any] = {}
+        # Per array: why the most recent run did or did not take a sample.
+        self._pv_cal_last_result: dict[str, str] = {}
         self._pv_cal_store: storage.Store[dict[str, Any]] = storage.Store(
             hass, 1, f"battery_controller_{config.get('entry_id', 'unknown')}_pv_cal"
         )
@@ -221,6 +237,19 @@ class ForecastCoordinator(DataUpdateCoordinator):
             self._unsub_weather = None
         await super().async_shutdown()
 
+    @property
+    def pv_calibrated_array_ids(self) -> list[str]:
+        """The arrays the calibration reports on: every configured PV array.
+
+        Arrays with no measured production sensor are deliberately included.
+        "There is nothing to learn from" is the most common reason a forecast
+        is never corrected, and leaving those arrays out of the report is
+        exactly what makes that invisible.
+        """
+        return [
+            sid for sid in (*self.pv_ac_subentry_ids, *self.pv_dc_subentry_ids) if sid
+        ]
+
     def pv_correction(self, subentry_id: str) -> float:
         """Learned gain factor applied to one PV array's forecast (1.0 = nominal)."""
         return self._pv_cal_correction.get(subentry_id, 1.0)
@@ -228,6 +257,20 @@ class ForecastCoordinator(DataUpdateCoordinator):
     def pv_sample_count(self, subentry_id: str) -> int:
         """Number of observations behind pv_correction for one array."""
         return len(self._pv_cal_samples.get(subentry_id, ()))
+
+    def pv_correction_applied(self, subentry_id: str) -> bool:
+        """Whether one array's forecast is currently being corrected.
+
+        A correction is only derived once PV_CALIBRATION_MIN_SAMPLES
+        observations exist, so this stays False while the window fills.
+        """
+        return subentry_id in self._pv_cal_correction
+
+    def pv_last_result(self, subentry_id: str) -> str:
+        """What the last calibration attempt for one array did, and why."""
+        if subentry_id not in self._pv_measured_sensors:
+            return PV_CAL_NO_MEASURED_SENSOR
+        return self._pv_cal_last_result.get(subentry_id, PV_CAL_OUTSIDE_LOAD_BAND)
 
     async def _async_load_pv_calibration(self) -> None:
         """Restore per-array PV corrections from storage."""
@@ -310,25 +353,30 @@ class ForecastCoordinator(DataUpdateCoordinator):
         if not snapshot:
             return
 
+        planned_by_sid: dict[str, float] = snapshot["forecast_kwh"] or {}
         elapsed_min = (now_utc - snapshot["taken_at"]).total_seconds() / 60.0
         step_min = FORECAST_INTERVAL_MINUTES
         if not (0.5 * step_min <= elapsed_min <= 1.5 * step_min):
             # The window the forecast described is not the window that elapsed.
+            self._set_pv_results(planned_by_sid, PV_CAL_WINDOW_MISMATCH)
             return
 
         if self.pv_curtailed:
             # Production was deliberately suppressed; the shortfall is not a
             # forecast error.
+            self._set_pv_results(planned_by_sid, PV_CAL_CURTAILED)
             return
 
         changed = False
-        for sid, planned_kwh in (snapshot["forecast_kwh"] or {}).items():
+        for sid, planned_kwh in planned_by_sid.items():
             entity_id = self._pv_measured_sensors.get(sid)
             before = (snapshot["meter_kwh"] or {}).get(sid)
             if not entity_id or before is None or planned_kwh <= 0:
+                self._pv_cal_last_result[sid] = PV_CAL_METER_UNREADABLE
                 continue
             after = self._read_pv_meter_kwh(entity_id)
             if after is None:
+                self._pv_cal_last_result[sid] = PV_CAL_METER_UNREADABLE
                 continue
             measured_kwh = after - before
             if measured_kwh < 0:
@@ -339,6 +387,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     before,
                     after,
                 )
+                self._pv_cal_last_result[sid] = PV_CAL_METER_RESET
                 continue
             if measured_kwh > PV_CALIBRATION_MAX_SAMPLE_RATIO * planned_kwh:
                 _LOGGER.debug(
@@ -348,12 +397,14 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     measured_kwh,
                     planned_kwh,
                 )
+                self._pv_cal_last_result[sid] = PV_CAL_IMPLAUSIBLE
                 continue
 
             samples = self._pv_cal_samples.setdefault(
                 sid, deque(maxlen=PV_CALIBRATION_WINDOW)
             )
             samples.append((measured_kwh, planned_kwh))
+            self._pv_cal_last_result[sid] = PV_CAL_SAMPLED
             total_measured = sum(m for m, _ in samples)
             total_planned = sum(f for _, f in samples)
             if len(samples) < PV_CALIBRATION_MIN_SAMPLES or total_planned <= 0:
@@ -379,6 +430,11 @@ class ForecastCoordinator(DataUpdateCoordinator):
         if changed:
             self.hass.async_create_task(self._async_save_pv_calibration())
 
+    def _set_pv_results(self, sids: Iterable[str], result: str) -> None:
+        """Record the same calibration outcome for several arrays at once."""
+        for sid in sids:
+            self._pv_cal_last_result[sid] = result
+
     def _snapshot_pv_calibration(
         self,
         now_utc: datetime,
@@ -399,6 +455,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             kwp = kwp_by_sid.get(sid, 0.0)
             raw_kw = raw_first_step_kw.get(sid, 0.0)
             if kwp <= 0:
+                self._pv_cal_last_result[sid] = PV_CAL_OUTSIDE_LOAD_BAND
                 continue
             load_fraction = raw_kw / kwp
             if not (
@@ -406,9 +463,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 <= load_fraction
                 <= PV_CALIBRATION_MAX_LOAD_FRACTION
             ):
+                # Night, deep cloud or near-clipping output: no usable signal.
+                self._pv_cal_last_result[sid] = PV_CAL_OUTSIDE_LOAD_BAND
                 continue
             meter = self._read_pv_meter_kwh(entity_id)
             if meter is None:
+                self._pv_cal_last_result[sid] = PV_CAL_METER_UNREADABLE
                 continue
             forecast_kwh[sid] = raw_kw * step_hours
             meter_kwh[sid] = meter
@@ -729,10 +789,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
             "pv_dc_coupled": has_dc,
             "pv_calibration": {
                 sid: {
-                    "correction": round(self._pv_cal_correction.get(sid, 1.0), 4),
-                    "samples": len(self._pv_cal_samples.get(sid, ())),
+                    "correction": round(self.pv_correction(sid), 4),
+                    "samples": self.pv_sample_count(sid),
+                    "applied": self.pv_correction_applied(sid),
+                    "last_result": self.pv_last_result(sid),
                 }
-                for sid in self._pv_measured_sensors
+                for sid in self.pv_calibrated_array_ids
             },
             "forecast_interval_minutes": step_min,
             "forecast_start_utc": current_step,

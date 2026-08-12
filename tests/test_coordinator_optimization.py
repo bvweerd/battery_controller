@@ -44,6 +44,13 @@ from custom_components.battery_controller.coordinator_optimization import (
 from custom_components.battery_controller.helpers import (
     extract_price_forecast_with_timestamps,
 )
+from custom_components.battery_controller.coordinator_optimization import (
+    CALIBRATION_DC_COUPLED,
+    CALIBRATION_NO_PLAN,
+    CALIBRATION_NO_RESULT,
+    CALIBRATION_PLAN_NOT_EXECUTED,
+    CALIBRATION_SAMPLED,
+)
 from custom_components.battery_controller.optimizer import OptimizationResult
 
 from .conftest import make_optimization_coordinator
@@ -3986,3 +3993,98 @@ def test_symmetric_noise_does_not_bias_the_correction(hass):
 
     assert coord.charge_eff_sample_count == 6
     assert coord.charge_eff_correction == pytest.approx(1.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Why a calibration is not learning
+#
+# A sample count stuck at zero has several causes, and some of them are
+# permanent for a given setup rather than a passing condition. The reason is
+# published so the user is not left guessing at an untouched 100%.
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_reports_a_taken_sample(hass):
+    """The happy path names itself, so 'no reason given' is never ambiguous."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_last_result == CALIBRATION_SAMPLED
+
+
+def test_calibration_reports_dc_coupling_as_the_blocker(hass):
+    """A DC-coupled system never samples; that is by design, not a fault."""
+    coord = _make_coordinator(hass)
+    coord.config[CONF_PV_DC_COUPLED] = True
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_last_result == CALIBRATION_DC_COUPLED
+
+
+def test_calibration_reports_a_plan_that_was_never_executed(hass):
+    """In zero_grid or manual the DP plan is not what runs, so nothing is learnt."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    # The controller was left on a different setpoint than the plan asked for.
+    coord._effective_mode = "zero_grid"
+    coord._controller_schedule_w = 0.0
+
+    coord._update_charge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.charge_eff_sample_count == 0
+    assert coord.charge_eff_last_result == CALIBRATION_PLAN_NOT_EXECUTED
+
+
+def test_calibration_reports_that_the_direction_was_not_planned(hass):
+    """Discharge calibration is idle while the DP is charging, and says so."""
+    coord = _make_coordinator(hass)
+    coord._last_result = _make_fake_result(
+        mode_schedule=["charging"], soc_schedule_kwh=[5.0, 6.0]
+    )
+    _mark_plan_executed(coord)
+
+    coord._update_discharge_eff_calibration(
+        BatteryState(soc_kwh=6.0, soc_percent=60.0, power_kw=1.0, mode="charging")
+    )
+
+    assert coord.discharge_eff_last_result == CALIBRATION_NO_PLAN
+
+
+def test_calibration_starts_out_admitting_it_knows_nothing(hass):
+    """Before the first run there is no evidence, and the sensor must not imply any."""
+    coord = _make_coordinator(hass)
+
+    assert coord.charge_eff_last_result == CALIBRATION_NO_RESULT
+    assert coord.discharge_eff_last_result == CALIBRATION_NO_RESULT
+    assert coord.charge_eff_applied is False
+    assert coord.discharge_eff_applied is False
+
+
+def test_a_correction_within_noise_of_nominal_is_reported_as_not_applied(hass):
+    """1.0 is stored but never handed to the optimizer; applied must reflect that."""
+    coord = _make_coordinator(hass)
+
+    coord._charge_eff_correction = 0.999
+    assert coord.charge_eff_applied is False
+
+    coord._charge_eff_correction = 0.94
+    assert coord.charge_eff_applied is True

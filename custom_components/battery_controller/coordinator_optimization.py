@@ -126,8 +126,24 @@ _CALIBRATION_APPLY_MIN = 0.5
 _CALIBRATION_APPLY_MAX = 1.05
 # Number of observations averaged into one correction.
 _CALIBRATION_WINDOW = 20
+
+# What the last calibration attempt did, published so a user can tell a
+# correction that has genuinely been measured from one that has simply never
+# had the chance to learn anything.
+CALIBRATION_SAMPLED = "sampled"
+CALIBRATION_NO_RESULT = "no_previous_run"
+CALIBRATION_NO_PLAN = "direction_not_planned"
+CALIBRATION_PLAN_NOT_EXECUTED = "plan_not_executed"
+CALIBRATION_STEP_INCOMPLETE = "step_not_finished"
+CALIBRATION_DC_COUPLED = "dc_coupled_pv"
+CALIBRATION_DELTA_TOO_SMALL = "step_too_small_to_measure"
+CALIBRATION_DERATING = "step_crosses_derating_threshold"
+CALIBRATION_IMPLAUSIBLE = "sample_dropped_implausible"
 # A correction is only persisted (and logged) once it moves by more than this.
 _CALIBRATION_SIGNIFICANT_CHANGE = 0.005
+# Corrections at or above this are within measurement noise of nominal and are
+# stored but never handed to the optimizer.
+_CALIBRATION_APPLY_THRESHOLD = 0.995
 
 
 @dataclass(frozen=True)
@@ -374,6 +390,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # to avoid confounding with passive PV.
         self._charge_eff_samples: deque[float] = deque(maxlen=_CALIBRATION_WINDOW)
         self._charge_eff_correction: float = 1.0
+        # Why the most recent run did or did not take a sample.
+        self._charge_eff_last_result: str = CALIBRATION_NO_RESULT
 
         # Cumulative throughput counters as they stood when _last_result was
         # planned. The difference against the next read is the energy the
@@ -398,6 +416,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # within one step. It does not change the economic cost model.
         self._discharge_eff_samples: deque[float] = deque(maxlen=_CALIBRATION_WINDOW)
         self._discharge_eff_correction: float = 1.0
+        self._discharge_eff_last_result: str = CALIBRATION_NO_RESULT
 
         # Persistent storage for discharge efficiency calibration (survives reboots).
         self._discharge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
@@ -492,6 +511,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def discharge_eff_sample_count(self) -> int:
         """Number of observations behind discharge_eff_correction."""
         return len(self._discharge_eff_samples)
+
+    @property
+    def charge_eff_applied(self) -> bool:
+        """Whether the charge correction currently changes the DP's plan.
+
+        The correction is only handed to the optimizer below 0.995 (see
+        _run_optimization): a value at or above that is within measurement
+        noise of nominal and is stored but never applied.
+        """
+        return self._charge_eff_correction < _CALIBRATION_APPLY_THRESHOLD
+
+    @property
+    def discharge_eff_applied(self) -> bool:
+        """Whether the discharge correction currently changes the DP's plan."""
+        return self._discharge_eff_correction < _CALIBRATION_APPLY_THRESHOLD
+
+    @property
+    def charge_eff_last_result(self) -> str:
+        """What the last charge-calibration attempt did, and why."""
+        return self._charge_eff_last_result
+
+    @property
+    def discharge_eff_last_result(self) -> str:
+        """What the last discharge-calibration attempt did, and why."""
+        return self._discharge_eff_last_result
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
@@ -1643,7 +1687,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             stored.get("samples", []), maxlen=_CALIBRATION_WINDOW
         )
         correction = float(stored.get("correction", 1.0))
-        if correction < 0.995:
+        if correction < _CALIBRATION_APPLY_THRESHOLD:
             _LOGGER.info(
                 "Restored %s efficiency calibration: correction=%.3f, n=%d samples",
                 name,
@@ -1804,8 +1848,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         planned_delta: float,
         actual_delta: float,
         source: str,
-    ) -> float:
+    ) -> tuple[float, str]:
         """Fold one actual/planned observation into a correction factor.
+
+        Returns:
+            (correction, outcome) — the outcome names why the observation did
+            or did not move the correction.
 
         Samples outside the acceptance window are dropped rather than clipped
         into it. Clipping was not symmetric around 1.0 — the ratio was capped
@@ -1824,7 +1872,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 planned_delta,
                 actual_delta,
             )
-            return current_correction
+            return current_correction, CALIBRATION_IMPLAUSIBLE
 
         samples.append(ratio)
         mean = sum(samples) / len(samples)
@@ -1843,7 +1891,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 planned_delta,
                 actual_delta,
             )
-        return new_correction
+        return new_correction, CALIBRATION_SAMPLED
 
     def _previous_step_complete(self) -> bool:
         """Return whether the previously planned first step has elapsed.
@@ -1911,7 +1959,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         samples: deque[float],
         correction: float,
         energy_totals_now: dict[str, float | None] | None,
-    ) -> float:
+    ) -> tuple[float, str]:
         """Score the previous plan against reality and return the new correction.
 
         Both directions ask the same question: did the battery move as much
@@ -1932,25 +1980,33 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         The correction is the mean of the last _CALIBRATION_WINDOW ratios
         (actual/planned), clamped for use. It is applied as a multiplier on the
         DP's SoC transition for this direction only; the economic cost model is
-        untouched. Returns ``correction`` unchanged when no sample is taken.
+        untouched.
+
+        Returns:
+            (correction, outcome) — ``correction`` is returned unchanged when no
+            sample is taken, and ``outcome`` names the reason why. Several of
+            those reasons are permanent for a given setup (a DC-coupled system
+            never samples at all, and a control mode that does not execute the
+            DP plan never will either), so the reason is published rather than
+            leaving the user with a sample count stuck at zero.
         """
         result = self._last_result
         if result is None:
-            return correction
+            return correction, CALIBRATION_NO_RESULT
         if len(result.mode_schedule) < 1 or len(result.soc_schedule_kwh) < 2:
-            return correction
+            return correction, CALIBRATION_NO_RESULT
         if result.mode_schedule[0] != spec.action:
-            return correction
+            return correction, CALIBRATION_NO_PLAN
 
         # Only sample when the plan was actually commanded; mode resolution
         # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
         # would otherwise drag the correction towards the 0.5 clip floor.
         if not self._planned_first_step_was_executed(spec.action):
-            return correction
+            return correction, CALIBRATION_PLAN_NOT_EXECUTED
         if not self._previous_step_complete():
-            return correction
+            return correction, CALIBRATION_STEP_INCOMPLETE
         if self.config.get(CONF_PV_DC_COUPLED, False):
-            return correction
+            return correction, CALIBRATION_DC_COUPLED
 
         prev_soc = result.soc_schedule_kwh[0]
         planned_next_soc = result.soc_schedule_kwh[1]
@@ -1972,7 +2028,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         if planned_delta < self._min_planned_delta_kwh(counter_delta is not None):
             # Too small to measure reliably at this resolution; skip.
-            return correction
+            return correction, CALIBRATION_DELTA_TOO_SMALL
 
         bc = self.battery_config
         if spec.derate_limit_kw(bc) > 0:
@@ -1990,7 +2046,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     spec.derate_threshold_pct(bc),
                     threshold_kwh,
                 )
-                return correction
+                return correction, CALIBRATION_DERATING
 
         if counter_delta is not None:
             actual_delta = counter_delta
@@ -2020,7 +2076,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Fold the previous charging step's outcome into the charge correction."""
         previous = self._charge_eff_correction
-        self._charge_eff_correction = self._update_eff_calibration(
+        (
+            self._charge_eff_correction,
+            self._charge_eff_last_result,
+        ) = self._update_eff_calibration(
             _CHARGE_CALIBRATION,
             battery_state,
             self._charge_eff_samples,
@@ -2066,7 +2125,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Fold the previous discharging step's outcome into the discharge correction."""
         previous = self._discharge_eff_correction
-        self._discharge_eff_correction = self._update_eff_calibration(
+        (
+            self._discharge_eff_correction,
+            self._discharge_eff_last_result,
+        ) = self._update_eff_calibration(
             _DISCHARGE_CALIBRATION,
             battery_state,
             self._discharge_eff_samples,
@@ -2758,7 +2820,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # nominal curve so a charging-speed problem is not double-counted as
         # extra energy cost or degradation.
         charge_eff_curve_override: EfficiencyCurve | None = None
-        if self._charge_eff_correction < 0.995:
+        if self.charge_eff_applied:
             charge_eff_curve_override = [
                 (p, min(1.0, eff * self._charge_eff_correction))
                 for p, eff in battery_config.charge_efficiency_curve_parsed
@@ -2780,7 +2842,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Curve points may exceed 1.0 here; that is intentional — the override
         # only affects SoC state transitions, not the economic cost.
         discharge_eff_curve_override: EfficiencyCurve | None = None
-        if self._discharge_eff_correction < 0.995:
+        if self.discharge_eff_applied:
             discharge_eff_curve_override = [
                 (p, max(1e-6, eff / self._discharge_eff_correction))
                 for p, eff in battery_config.discharge_efficiency_curve_parsed
@@ -2942,8 +3004,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "commitment_reason": commitment_reason,
                 "charge_eff_correction": round(self._charge_eff_correction, 4),
                 "charge_eff_samples": len(self._charge_eff_samples),
+                "charge_eff_last_result": self._charge_eff_last_result,
                 "discharge_eff_correction": round(self._discharge_eff_correction, 4),
                 "discharge_eff_samples": len(self._discharge_eff_samples),
+                "discharge_eff_last_result": self._discharge_eff_last_result,
             }
         )
         self._optimization_trigger_source = "unknown"
@@ -2985,7 +3049,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "price_interval": price_interval,
             "charge_eff_correction": round(self._charge_eff_correction, 4),
             "charge_eff_samples": len(self._charge_eff_samples),
+            "charge_eff_applied": self.charge_eff_applied,
+            "charge_eff_last_result": self._charge_eff_last_result,
             "discharge_eff_correction": round(self._discharge_eff_correction, 4),
             "discharge_eff_samples": len(self._discharge_eff_samples),
+            "discharge_eff_applied": self.discharge_eff_applied,
+            "discharge_eff_last_result": self._discharge_eff_last_result,
             "timestamp": dt_util.utcnow(),
         }
