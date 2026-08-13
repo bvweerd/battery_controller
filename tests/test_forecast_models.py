@@ -1328,6 +1328,52 @@ class TestPriceForecastModelUnitScaling:
 
         assert model._overall_avg == pytest.approx(0.25)
 
+    async def _learn(self, live_state, mean):
+        """Learn one statistics row against a given live state."""
+        hass = MagicMock()
+        hass.states.get = MagicMock(return_value=live_state)
+        model = PriceForecastModel(
+            hass=hass, price_sensor_id="sensor.price", entry_id=None
+        )
+        mock_instance = MagicMock()
+        mock_instance.async_add_executor_job = AsyncMock(
+            return_value={"sensor.price": [{"start": self._TS, "mean": mean}]}
+        )
+        with patch(
+            "homeassistant.components.recorder.util.get_instance",
+            return_value=mock_instance,
+        ):
+            await model.async_update_pattern()
+        return model
+
+    async def test_unitless_mwh_prices_are_scaled(self):
+        """A sensor with no unit is judged on magnitude, as the live path is.
+
+        The live forecast of such a sensor is scaled to EUR/kWh on magnitude, so
+        a model that skipped the same test learned prices 1000x too high — and
+        those prices are spliced onto the live ones to fill a 36 h horizon.
+        """
+        live_state = MagicMock()
+        live_state.attributes = {}
+
+        model = await self._learn(live_state, 170.0)
+
+        assert model._overall_avg == pytest.approx(0.170)
+
+    async def test_missing_live_state_falls_back_to_magnitude(self):
+        """The pattern can be rebuilt while the price sensor has no state."""
+        model = await self._learn(None, 170.0)
+
+        assert model._overall_avg == pytest.approx(0.170)
+
+    async def test_unitless_kwh_prices_are_left_alone(self):
+        live_state = MagicMock()
+        live_state.attributes = {}
+
+        model = await self._learn(live_state, 0.17)
+
+        assert model._overall_avg == pytest.approx(0.17)
+
 
 class TestAsyncUpdatePatternStartFormats:
     """The recorder's "start" field must be handled in every form it takes.

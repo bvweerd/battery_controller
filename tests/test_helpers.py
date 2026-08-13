@@ -275,7 +275,13 @@ class TestExtractPriceForecast:
         today_prices = [float(i) for i in range(24)]
         tomorrow_prices = [float(i + 24) for i in range(24)]
         state = self._make_state(
-            attributes={"today": today_prices, "tomorrow": tomorrow_prices}
+            attributes={
+                "today": today_prices,
+                "tomorrow": tomorrow_prices,
+                # Index markers run up to 47, so the sensor must declare its
+                # unit — unitless values that large read as €/MWh.
+                "unit_of_measurement": "EUR/kWh",
+            }
         )
 
         fake_now = dt_util.utcnow().replace(hour=20, minute=0, second=0, microsecond=0)
@@ -1175,7 +1181,13 @@ class TestDstSafeSkipIndex:
 
         prices = [float(i) for i in range(25)]  # one entry per hour-period
         state = MagicMock()
-        state.attributes = {"raw_today": prices, "raw_tomorrow": []}
+        state.attributes = {
+            "raw_today": prices,
+            "raw_tomorrow": [],
+            # Index markers double as prices here; declare the unit so they are
+            # not mistaken for €/MWh.
+            "unit_of_measurement": "EUR/kWh",
+        }
         state.state = "0.0"
 
         forecast, interval = h.extract_price_forecast_with_interval(state)
@@ -1360,6 +1372,67 @@ class TestOmieHoursDictExtraction:
         prices, _ = extract_price_forecast_with_interval(state)
         # Falls through to current-state fallback
         assert prices == [0.12]
+
+
+class TestPriceUnitScalingAcrossFormats:
+    """Every extraction path converts to EUR/kWh by the same rule.
+
+    Scaling used to live inside the OMIE hour-dict path only, so a €/MWh sensor
+    was handed to the optimizer unscaled through any other attribute — and
+    through the bare state value it falls back to on restart, before its
+    attributes exist.
+    """
+
+    def _make_state(self, attributes, state_value="85.0"):
+        state = MagicMock()
+        state.state = state_value
+        state.attributes = attributes
+        return state
+
+    def test_state_fallback_scales_mwh_unit(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({"unit_of_measurement": "€/MWh"}, state_value="85.0")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.085])
+
+    def test_state_fallback_scales_unitless_mwh_magnitude(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({}, state_value="17.0")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.017])
+
+    def test_raw_today_scales_mwh_unit(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        state = self._make_state(
+            {
+                "unit_of_measurement": "€/MWh",
+                "raw_today": [
+                    {"start": base, "value": 100.0},
+                    {"start": base + timedelta(hours=1), "value": 120.0},
+                ],
+            }
+        )
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.100, 0.120])
+
+    def test_kwh_prices_untouched(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({"forecast_prices": [0.10, 0.15]}, state_value="0.10")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.10, 0.15])
 
 
 class TestExtractPvForecastSeries:
