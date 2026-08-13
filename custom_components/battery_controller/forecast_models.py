@@ -17,7 +17,7 @@ from .const import (
 from .helpers import (
     calculate_consumption_pattern,
     calculate_pv_forecast,
-    price_unit_scale_from_state,
+    price_unit_scale,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -651,8 +651,14 @@ class PriceForecastModel:
             # Recorder statistics are in the sensor's native unit. Sensors
             # publishing €/MWh (e.g. OMIE) must be scaled to EUR/kWh so the
             # learned pattern matches the live forecast fed to the optimizer.
-            unit_scale = price_unit_scale_from_state(
-                self.hass.states.get(self.price_sensor_id)
+            # The learned means are passed as samples so a sensor that declares
+            # no unit — or has no state yet when the pattern is rebuilt — is
+            # judged on magnitude, exactly as the live forecast is. Without
+            # that, the model half of a spliced horizon lands a factor 1000
+            # above the live half.
+            unit_scale = price_unit_scale(
+                self.hass.states.get(self.price_sensor_id),
+                [price for _dt, price in price_hourly],
             )
             if unit_scale != 1.0:
                 price_hourly = [(dt, p * unit_scale) for dt, p in price_hourly]

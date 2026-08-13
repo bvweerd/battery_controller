@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -115,16 +115,33 @@ def _skip_index_since_local_midnight(now_local: datetime, interval_minutes: int)
     return int(elapsed_min // interval_minutes)
 
 
-def price_unit_scale_from_state(state: State | None) -> float:
-    """Return the factor converting the sensor's prices to EUR/kWh.
+# A per-kWh price never reaches 5 EUR and a per-MWh price practically always
+# passes it, so the magnitude settles the unit whenever the sensor does not.
+MWH_MAGNITUDE_THRESHOLD = 5.0
 
-    Based on the sensor's unit_of_measurement: per-MWh units (e.g. the OMIE
-    integration's €/MWh) yield 0.001; per-kWh or unknown units yield 1.0.
+
+def price_unit_scale(
+    state: State | None, samples: Sequence[float] | None = None
+) -> float:
+    """Return the factor converting a sensor's prices to EUR/kWh.
+
+    The sensor's ``unit_of_measurement`` decides whenever it has one: per-MWh
+    units (e.g. the OMIE integration's €/MWh) yield 0.001, anything else 1.0.
+    Sensors publishing no unit at all — templates, and any sensor read before
+    its attributes exist — are judged on the magnitude of ``samples`` instead.
+
+    Every price path must reach the same verdict. The live forecast and the
+    learned historical pattern are spliced into one horizon for the same DP, so
+    a unit rule applied to one but not the other puts the two halves a factor
+    1000 apart: the model-priced tail then dominates every decision and inflates
+    the reported baseline beyond recognition.
     """
-    if state is None:
-        return 1.0
-    unit = str(state.attributes.get("unit_of_measurement") or "").lower()
-    if "mwh" in unit:
+    unit = ""
+    if state is not None:
+        unit = str(state.attributes.get("unit_of_measurement") or "").lower()
+    if unit:
+        return 0.001 if "mwh" in unit else 1.0
+    if samples and any(abs(value) > MWH_MAGNITUDE_THRESHOLD for value in samples):
         return 0.001
     return 1.0
 
@@ -139,13 +156,12 @@ def _extract_hours_dict_forecast(
     to prices in €/MWh. ``tomorrow_hours`` is None before publication and
     values are None while provisional — both are skipped.
 
-    Prices are converted to EUR/kWh using the sensor's unit_of_measurement;
-    when no unit is available, values with magnitude > 5 are assumed €/MWh
-    (kWh prices never reach that, MWh prices practically always do).
+    Values are returned in the sensor's own unit; the caller converts them to
+    EUR/kWh, so that every extraction path is scaled by the same rule.
 
     Returns:
-        (prices_eur_kwh, start_times_utc, interval_minutes), or None when the
-        sensor has no hour-dict attributes with usable data.
+        (prices, start_times_utc, interval_minutes), or None when the sensor has
+        no hour-dict attributes with usable data.
     """
     entries: dict[datetime, float] = {}
     found_attr = False
@@ -181,17 +197,12 @@ def _extract_hours_dict_forecast(
         if minutes in (15, 30, 60):
             interval = minutes
 
-    scale = price_unit_scale_from_state(state)
-    if scale == 1.0 and not state.attributes.get("unit_of_measurement"):
-        if any(abs(v) > 5.0 for v in entries.values()):
-            scale = 0.001
-
     prices: list[float] = []
     start_times: list[datetime] = []
     for ts in sorted_ts:
         if ts + timedelta(minutes=interval) <= now:
             continue
-        prices.append(entries[ts] * scale)
+        prices.append(entries[ts])
         start_times.append(ts)
 
     if not prices:
@@ -258,12 +269,33 @@ def _fill_missing_timestamps(
 def extract_price_forecast_with_timestamps(
     state: State,
 ) -> tuple[list[float], list[datetime], int]:
-    """Extract price forecast with UTC start timestamps from a HA price state.
+    """Extract a price forecast in EUR/kWh with UTC start times from a price state.
+
+    Thin wrapper that converts whatever :func:`_extract_price_forecast_raw`
+    found into EUR/kWh. Scaling lives here rather than in the individual
+    formats so that a €/MWh sensor is treated identically no matter which
+    attribute it publishes — including the bare state value, which used to be
+    handed to the optimizer unscaled.
+
+    Returns:
+        Tuple of (prices in EUR/kWh, start_times_utc, interval_minutes)
+    """
+    prices, start_times, interval = _extract_price_forecast_raw(state)
+    scale = price_unit_scale(state, prices)
+    if scale != 1.0:
+        prices = [price * scale for price in prices]
+    return prices, start_times, interval
+
+
+def _extract_price_forecast_raw(
+    state: State,
+) -> tuple[list[float], list[datetime], int]:
+    """Extract a price forecast in the sensor's own unit, with UTC start times.
 
     Priority order (highest to lowest):
     1. net_prices_today/tomorrow  — timestamp-based skip, interval auto-detected
     2. raw_today/raw_tomorrow WITH per-entry timestamps — timestamp-based skip
-    2.5 today_hours/tomorrow_hours (OMIE) — hour-keyed dicts in EUR/MWh
+    2.5 today_hours/tomorrow_hours (OMIE) — hour-keyed dicts
     3. forecast_prices             — no skip-past, interval from timestamps or 60 min
     4. forecast (generic)          — no skip-past, interval from timestamps or 60 min
     5. raw_today/raw_tomorrow WITHOUT timestamps — index-based skip
