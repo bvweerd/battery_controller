@@ -831,7 +831,10 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   }
   let dischargeEffCurveOverride = null;
   if (dischargeEffCorrection != null && dischargeEffCorrection < 0.995) {
-    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.max(1e-6, e / dischargeEffCorrection)]);
+    // Bounded at 1.0 like the charge side: discharge_eff is AC delivered over
+    // pack energy drawn, so a point above 1.0 describes an inverter that puts
+    // out more than it takes, and the DP plans discharges that cannot happen.
+    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.min(1.0, Math.max(1e-6, e / dischargeEffCorrection))]);
   }
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,

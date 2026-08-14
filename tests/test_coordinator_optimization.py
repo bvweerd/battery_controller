@@ -57,6 +57,7 @@ from custom_components.battery_controller.efficiency_calibration import (
     CALIBRATION_DC_COUPLED,
     CALIBRATION_NO_PLAN,
     CALIBRATION_NO_RESULT,
+    CALIBRATION_NO_SOC_SOURCE,
     CALIBRATION_NOT_DISPATCHED,
     CALIBRATION_PLAN_NOT_EXECUTED,
     CALIBRATION_SAMPLED,
@@ -4112,8 +4113,14 @@ def _coordinator_with_counters(hass, capacity_kwh=10.0, soc_state="50"):
     return coord
 
 
-def test_calibration_prefers_the_energy_counter_over_the_soc_delta(hass):
-    """The counter measures the same energy without the SoC sensor's step size."""
+def test_energy_counter_never_drives_the_correction(hass):
+    """The counter is on the setpoint's side of the inverter, so it cannot price it.
+
+    Measured against a plan denominated in SoC, a counter reading returns the
+    conversion loss a second time: the correction then cancels out the very
+    efficiency the curve describes, and the DP starts believing in a round trip
+    that loses nothing.
+    """
     coord = _coordinator_with_counters(hass)
     coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
     hass.states.async_set("sensor.bat_charged", "100.9", {"unit_of_measurement": "kWh"})
@@ -4121,17 +4128,19 @@ def test_calibration_prefers_the_energy_counter_over_the_soc_delta(hass):
         "sensor.bat_discharged", "50.0", {"unit_of_measurement": "kWh"}
     )
 
-    # SoC sensor still reads its starting value — a SoC-based sample would be 0.
-    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.0)
+    # The pack's SoC did move — by less than the counter counted, which is what
+    # the conversion loss looks like from the two sides.
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.8)
     coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
 
     coord._update_charge_eff_calibration(coord._read_energy_totals())
 
-    # 0.9 kWh counted against 1.0 kWh planned
-    assert _calibration(coord).samples[0] == pytest.approx(0.9)
+    # The SoC delta, not the counter's 0.9
+    assert _calibration(coord).samples[0] == pytest.approx(0.8)
 
 
-def test_calibration_uses_the_discharge_counter(hass):
+def test_energy_counter_is_published_as_dispatch_fidelity(hass):
+    """What the counter can answer: did the device deliver what it was told?"""
     coord = _coordinator_with_counters(hass)
     hass.states.async_set("sensor.bat_charged", "100.0", {"unit_of_measurement": "kWh"})
     hass.states.async_set(
@@ -4142,14 +4151,38 @@ def test_calibration_uses_the_discharge_counter(hass):
         coord,
         action=ACTION_DISCHARGING,
         planned_delta_kwh=2.0,
-        actual_delta_kwh=0.0,
+        actual_delta_kwh=1.9,
         prev_soc_kwh=6.0,
+        step_hours=1.0,
     )
     coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
+    commanded = abs(coord._last_battery_setpoints["bat1"])
 
     coord._update_discharge_eff_calibration(coord._read_energy_totals())
 
-    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.9)
+    fidelity, samples = coord.battery_dispatch_fidelity("bat1", ACTION_DISCHARGING)
+    assert fidelity == pytest.approx(1.8 / commanded)
+    assert samples == 1
+    # ...and it stayed out of the correction, which is the SoC ratio.
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.95)
+
+
+def test_counter_without_a_soc_reading_takes_no_sample(hass):
+    """A counter alone cannot calibrate, and says so rather than sampling."""
+    coord = _coordinator_with_counters(hass)
+    hass.states.async_set("sensor.bat_charged", "100.9", {"unit_of_measurement": "kWh"})
+    hass.states.async_set(
+        "sensor.bat_discharged", "50.0", {"unit_of_measurement": "kWh"}
+    )
+
+    _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=None)
+    coord._energy_counter_snapshot = {"bat1": {"charged": 100.0, "discharged": 50.0}}
+
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
+
+    calibration = _calibration(coord)
+    assert calibration.sample_count == 0
+    assert calibration.last_result == CALIBRATION_NO_SOC_SOURCE
 
 
 def test_calibration_falls_back_to_soc_when_counters_absent(hass):
@@ -4228,15 +4261,12 @@ def test_soc_quantum_raises_the_sampling_threshold(hass):
     hass.states.async_set("sensor.test_soc", "50", {"unit_of_measurement": "%"})
     assert coord._soc_quantum_kwh() == pytest.approx(0.1)
     # 4 x the quantum, well above the old fixed 0.1 kWh floor
-    assert min_planned_delta_kwh(False, coord._soc_quantum_kwh()) == pytest.approx(0.4)
+    assert min_planned_delta_kwh(coord._soc_quantum_kwh()) == pytest.approx(0.4)
 
     # A sensor with one decimal resolves ten times finer.
     hass.states.async_set("sensor.test_soc", "50.5", {"unit_of_measurement": "%"})
     assert coord._soc_quantum_kwh() == pytest.approx(0.01)
-    assert min_planned_delta_kwh(False, coord._soc_quantum_kwh()) == pytest.approx(0.1)
-
-    # The counters are not limited by the SoC sensor at all.
-    assert min_planned_delta_kwh(True, coord._soc_quantum_kwh()) == pytest.approx(0.1)
+    assert min_planned_delta_kwh(coord._soc_quantum_kwh()) == pytest.approx(0.1)
 
 
 def test_small_step_is_skipped_on_a_coarse_soc_sensor(hass):

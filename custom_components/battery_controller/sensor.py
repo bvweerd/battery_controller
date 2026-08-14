@@ -918,6 +918,10 @@ class BatteryEfficiencyCalibrationSensor(BatteryControllerSensor):
         """Return (correction, samples, applied, last_result) for this direction."""
         raise NotImplementedError
 
+    def _dispatch(self) -> tuple[float | None, int]:
+        """Return (measured/commanded throughput, samples) for this direction."""
+        raise NotImplementedError
+
     @property
     def native_value(self) -> float:
         correction, _samples, _applied, _result = self._calibration()
@@ -926,11 +930,18 @@ class BatteryEfficiencyCalibrationSensor(BatteryControllerSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         correction, samples, applied, last_result = self._calibration()
+        fidelity, fidelity_samples = self._dispatch()
         return {
             "correction_factor": round(correction, 4),
             "samples": samples,
             "applied": applied,
             "last_result": last_result,
+            # Measured over commanded throughput from the energy counters.
+            # Never applied to the curve: it sits on the same side of the
+            # inverter as the setpoint, so it shows whether the device followed
+            # its instruction, not what it lost carrying it out.
+            "dispatch_fidelity": (round(fidelity, 4) if fidelity is not None else None),
+            "dispatch_samples": fidelity_samples,
         }
 
 
@@ -954,6 +965,9 @@ class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
             self.coordinator.charge_eff_last_result,
         )
 
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.dispatch_fidelity(ACTION_CHARGING)
+
 
 class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     """Learned correction on the discharge-side SoC transition, fleet-wide."""
@@ -969,6 +983,9 @@ class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
             self.coordinator.discharge_eff_applied,
             self.coordinator.discharge_eff_last_result,
         )
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.dispatch_fidelity(ACTION_DISCHARGING)
 
 
 class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
@@ -1004,6 +1021,11 @@ class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
 
     def _calibration(self) -> tuple[float, int, bool, str]:
         return self.coordinator.battery_calibration_state(
+            self._subentry_id, self._action
+        )
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.battery_dispatch_fidelity(
             self._subentry_id, self._action
         )
 

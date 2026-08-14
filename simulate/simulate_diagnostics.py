@@ -182,10 +182,12 @@ def get_discharge_eff_override(
         return None
     # SoC transition: soc -= power * hours / discharge_eff.
     # To reduce planned SoC drop by factor `correction`, divide each curve point by it
-    # (a larger divisor yields a smaller SoC drop). May exceed 1.0; only used for
-    # SoC state transitions, not for economic cost.
+    # (a larger divisor yields a smaller SoC drop). The result is bounded at 1.0:
+    # discharge_eff is AC delivered over pack energy drawn, so a point above 1.0
+    # describes an inverter that puts out more than it takes, and the DP plans
+    # discharges the battery cannot deliver.
     return [
-        (p, max(1e-6, eff / discharge_eff_correction))
+        (p, min(1.0, max(1e-6, eff / discharge_eff_correction)))
         for p, eff in battery.discharge_efficiency_curve
     ]
 

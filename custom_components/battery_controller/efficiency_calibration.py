@@ -32,12 +32,10 @@ from .efficiency_curve import EfficiencyCurve
 _LOGGER = logging.getLogger(__name__)
 
 # A sample is only worth taking when the planned SoC change is comfortably
-# larger than the resolution of whatever measured it. The energy counters are
-# fine-grained, so the floor there is just "big enough to be a real action". A
-# SoC sensor reporting whole percent, by contrast, quantises at capacity/100 —
-# 0.1 kWh on a 10 kWh pack, which is exactly the old fixed floor, so a single
-# sample carried up to +/-50 % quantisation error. On that path the floor
-# scales with the observed quantum instead.
+# larger than the resolution of what measured it. A SoC sensor reporting whole
+# percent quantises at capacity/100 — 0.1 kWh on a 10 kWh pack, which is exactly
+# the old fixed floor, so a single sample carried up to +/-50 % quantisation
+# error. The floor therefore scales with the observed quantum.
 CALIBRATION_MIN_DELTA_KWH = 0.1
 CALIBRATION_SOC_QUANTUM_FACTOR = 4.0
 
@@ -65,6 +63,7 @@ CALIBRATION_APPLY_THRESHOLD = 0.995
 # had the chance to learn anything.
 CALIBRATION_SAMPLED = "sampled"
 CALIBRATION_NO_RESULT = "no_previous_run"
+CALIBRATION_NO_SOC_SOURCE = "no_soc_measurement"
 CALIBRATION_NO_PLAN = "direction_not_planned"
 CALIBRATION_NOT_DISPATCHED = "battery_not_dispatched"
 CALIBRATION_PLAN_NOT_EXECUTED = "plan_not_executed"
@@ -112,10 +111,8 @@ DISCHARGE_CALIBRATION = CalibrationSpec(
 )
 
 
-def min_planned_delta_kwh(from_counters: bool, soc_quantum_kwh: float) -> float:
-    """Smallest planned SoC change worth sampling, given how it is measured."""
-    if from_counters:
-        return CALIBRATION_MIN_DELTA_KWH
+def min_planned_delta_kwh(soc_quantum_kwh: float) -> float:
+    """Smallest planned SoC change worth sampling at the SoC sensor's resolution."""
     return max(
         CALIBRATION_MIN_DELTA_KWH,
         CALIBRATION_SOC_QUANTUM_FACTOR * soc_quantum_kwh,
@@ -166,12 +163,23 @@ def discharge_curve_override(
 
     The transition is ``soc -= power * hours / discharge_eff``, so reducing the
     planned SoC drop by ``correction`` needs a LARGER efficiency: each point is
-    DIVIDED by the correction, not multiplied. Points may exceed 1.0, which is
-    safe precisely because this curve never enters the cost model.
+    DIVIDED by the correction, not multiplied.
+
+    A correction above 1.0 is legitimate — it means the pack outperforms the
+    curve the user entered, and pessimistic entries must be allowed to be
+    corrected upwards. The resulting *curve* is bounded at 1.0 all the same,
+    because ``discharge_eff`` is defined as AC delivered over pack energy drawn:
+    a point above 1.0 says the inverter puts out more than it takes, and the DP
+    then plans discharges the battery cannot deliver. The charge side has always
+    bounded its curve this way; this one used to be justified as harmless
+    "because it never enters the cost model", which is true of the accounting
+    and false of the decisions — the DP chooses its actions against exactly this
+    transition, and an over-unity round trip makes flat price wiggles look
+    profitable.
     """
     if correction >= CALIBRATION_APPLY_THRESHOLD:
         return None
-    return [(p, max(1e-6, eff / correction)) for p, eff in curve]
+    return [(p, min(1.0, max(1e-6, eff / correction))) for p, eff in curve]
 
 
 @dataclass
@@ -199,6 +207,43 @@ class DirectionCalibration:
     # user can tell a correction that has genuinely been measured from one that
     # has never had the chance to learn anything.
     last_result: str = CALIBRATION_NO_RESULT
+    # Measured throughput over commanded throughput, from the energy counters.
+    # Deliberately not persisted and never applied: it is an observation about
+    # the device, not a stored property of it. See record_dispatch.
+    dispatch_samples: deque[float] = field(
+        default_factory=lambda: deque(maxlen=CALIBRATION_WINDOW)
+    )
+
+    @property
+    def dispatch_fidelity(self) -> float | None:
+        """Mean measured/commanded AC throughput, or None if never measured."""
+        if not self.dispatch_samples:
+            return None
+        return sum(self.dispatch_samples) / len(self.dispatch_samples)
+
+    @property
+    def dispatch_sample_count(self) -> int:
+        """Observations behind dispatch_fidelity."""
+        return len(self.dispatch_samples)
+
+    def record_dispatch(self, commanded_kwh: float, measured_kwh: float) -> None:
+        """Fold in one measured-over-commanded observation from the counters.
+
+        This is not an efficiency. A battery energy counter sits on the same
+        side of the inverter as the setpoint that drove it — for an AC-coupled
+        pack there is no other side to put it on — so the ratio says whether the
+        device delivered what it was told to, not what it lost doing so. Feeding
+        it to the curve as if it were an efficiency measures the conversion loss
+        a second time and cancels it out, which is how a discharge correction
+        near the nominal efficiency (and a charge correction pinned to its clamp)
+        arises on a perfectly healthy pack.
+
+        Published as a diagnostic instead: a device that stops following its
+        setpoint is worth seeing, and this is the number that shows it.
+        """
+        if commanded_kwh <= 0:
+            return
+        self.dispatch_samples.append(measured_kwh / commanded_kwh)
 
     @property
     def applied(self) -> bool:
@@ -271,6 +316,7 @@ class DirectionCalibration:
                 len(self.samples),
             )
         self.samples.clear()
+        self.dispatch_samples.clear()
         self.correction = 1.0
         self.last_result = CALIBRATION_NO_RESULT
         await self.async_save()
