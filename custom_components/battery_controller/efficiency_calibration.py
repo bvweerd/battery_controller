@@ -3,8 +3,9 @@
 The DP plans a SoC change for every step. Reality does not always deliver it —
 a battery in its CV phase charges slower than a flat efficiency curve predicts,
 and an ageing pack discharges slower than its rating. This module scores the
-previous plan against what the battery actually moved and folds the ratio into a
-correction factor.
+previous plan against what the battery actually moved and folds the result into a
+correction factor: measured efficiency over modelled efficiency, so that below
+1.0 means "slower than the curve says" in both directions.
 
 The correction is applied to the DP's SoC **transition** only, never to the cost
 model: a charging-speed problem is not extra energy cost, and double-counting it
@@ -45,6 +46,8 @@ CALIBRATION_SOC_QUANTUM_FACTOR = 4.0
 # code capped the ratio at 1.05 while allowing it down to 0.5, so symmetric
 # noise biased the mean downward and could apply a correction below 1.0 to a
 # perfectly healthy battery. The applied correction is still clamped (below).
+# Both bounds act on the efficiency factor, so they mean the same thing in
+# both directions: a factor, not a raw measured-over-planned ratio.
 CALIBRATION_ACCEPT_MIN = 0.5
 CALIBRATION_ACCEPT_MAX = 1.5
 # Bounds on the correction actually handed to the optimizer.
@@ -57,6 +60,11 @@ CALIBRATION_SIGNIFICANT_CHANGE = 0.005
 # Corrections at or above this are within measurement noise of nominal: they are
 # stored but never handed to the optimizer, which gets the unmodified curve.
 CALIBRATION_APPLY_THRESHOLD = 0.995
+
+# Marks a stored payload whose samples are efficiency factors. Anything without
+# it holds raw measured/planned ratios, which mean the opposite on the discharge
+# side; see DirectionCalibration._migrate_ratios.
+STORED_EFFICIENCY_FACTOR = "efficiency_factor"
 
 # What the last calibration attempt did, published so a user can tell a
 # correction that has genuinely been measured from one that has simply never
@@ -87,10 +95,31 @@ class CalibrationSpec:
     action: str  # planned first-step mode that makes a sample eligible
     counter_key: str  # key into the cumulative throughput counters
     derate_label: str  # "high-SoC" / "low-SoC", used in log messages
+    # Whether measured/planned has to be inverted to become an efficiency
+    # factor. The planned SoC change is `AC * eff` when charging and `AC / eff`
+    # when discharging, so the same observation points opposite ways: a pack
+    # that is slower than modelled moves LESS SoC than planned while charging
+    # and MORE while discharging. Storing the raw ratio therefore gave one
+    # number two meanings — and the "only apply a correction below nominal"
+    # rule, which is the whole point of the module, then discarded exactly the
+    # discharge derating it was written to catch, while applying the optimistic
+    # direction it was written to ignore. See efficiency_factor().
+    invert_ratio: bool
     # Inverter derating within the step invalidates a sample; these read the
     # relevant limit and its SoC threshold off the aggregated battery config.
     derate_limit_kw: Callable[[BatteryConfig], float]
     derate_threshold_pct: Callable[[BatteryConfig], float]
+
+    def efficiency_factor(self, ratio: float) -> float | None:
+        """Measured efficiency over modelled efficiency, from measured/planned.
+
+        Below 1.0 means "slower than the curve says" in both directions, which
+        is what makes one apply rule and one clamp correct for both. None when
+        the ratio carries no efficiency at all (nothing measured).
+        """
+        if ratio <= 0:
+            return None
+        return 1.0 / ratio if self.invert_ratio else ratio
 
 
 CHARGE_CALIBRATION = CalibrationSpec(
@@ -98,6 +127,7 @@ CHARGE_CALIBRATION = CalibrationSpec(
     action=ACTION_CHARGING,
     counter_key="charged",
     derate_label="high-SoC",
+    invert_ratio=False,
     derate_limit_kw=lambda bc: bc.high_soc_max_charge_kw,
     derate_threshold_pct=lambda bc: bc.high_soc_charge_threshold_pct,
 )
@@ -106,6 +136,7 @@ DISCHARGE_CALIBRATION = CalibrationSpec(
     action=ACTION_DISCHARGING,
     counter_key="discharged",
     derate_label="low-SoC",
+    invert_ratio=True,
     derate_limit_kw=lambda bc: bc.low_soc_max_discharge_kw,
     derate_threshold_pct=lambda bc: bc.low_soc_discharge_threshold_pct,
 )
@@ -143,43 +174,26 @@ def counter_delta_kwh(
     return delta
 
 
-def charge_curve_override(
-    curve: EfficiencyCurve, correction: float
-) -> EfficiencyCurve | None:
-    """Curve for the DP's charge-side SoC transition, or None to keep nominal.
+def curve_override(curve: EfficiencyCurve, correction: float) -> EfficiencyCurve | None:
+    """Curve for the DP's SoC transition, or None to keep the nominal one.
 
-    When the battery charges slower than modelled, the DP should plan less
-    charge within the step, so each point is scaled down by the correction.
+    The correction is an efficiency factor (see CalibrationSpec.efficiency_
+    factor), so both directions scale the same way: a pack running at 96 % of
+    the curve it was given transitions as if every point were 96 %, whether it
+    is filling or emptying.
+
+    Two bounds, for two different reasons. Only a factor below
+    CALIBRATION_APPLY_THRESHOLD produces a curve at all — a pack that meets or
+    beats its curve is planned with the curve the user entered, because the
+    measurement can confirm the entry but has no business making the DP more
+    optimistic than the user was. And the result is capped at 1.0 because these
+    are efficiencies: a point above 1.0 describes a battery that returns more
+    than it was given, and the DP, which selects its actions against exactly
+    this transition, will happily plan the resulting free round trips.
     """
     if correction >= CALIBRATION_APPLY_THRESHOLD:
         return None
-    return [(p, min(1.0, eff * correction)) for p, eff in curve]
-
-
-def discharge_curve_override(
-    curve: EfficiencyCurve, correction: float
-) -> EfficiencyCurve | None:
-    """Curve for the DP's discharge-side SoC transition, or None to keep nominal.
-
-    The transition is ``soc -= power * hours / discharge_eff``, so reducing the
-    planned SoC drop by ``correction`` needs a LARGER efficiency: each point is
-    DIVIDED by the correction, not multiplied.
-
-    A correction above 1.0 is legitimate — it means the pack outperforms the
-    curve the user entered, and pessimistic entries must be allowed to be
-    corrected upwards. The resulting *curve* is bounded at 1.0 all the same,
-    because ``discharge_eff`` is defined as AC delivered over pack energy drawn:
-    a point above 1.0 says the inverter puts out more than it takes, and the DP
-    then plans discharges the battery cannot deliver. The charge side has always
-    bounded its curve this way; this one used to be justified as harmless
-    "because it never enters the cost model", which is true of the accounting
-    and false of the decisions — the DP chooses its actions against exactly this
-    transition, and an over-unity round trip makes flat price wiggles look
-    profitable.
-    """
-    if correction >= CALIBRATION_APPLY_THRESHOLD:
-        return None
-    return [(p, min(1.0, max(1e-6, eff / correction))) for p, eff in curve]
+    return [(p, min(1.0, max(1e-6, eff * correction))) for p, eff in curve]
 
 
 @dataclass
@@ -249,7 +263,7 @@ class DirectionCalibration:
     def applied(self) -> bool:
         """Whether this correction currently changes the DP's plan.
 
-        Same gate as charge_curve_override / discharge_curve_override: a
+        Same gate as curve_override(): a
         correction at or above CALIBRATION_APPLY_THRESHOLD is within
         measurement noise of nominal, so it is stored but never handed to the
         optimizer.
@@ -290,8 +304,12 @@ class DirectionCalibration:
                 )
         if stored is None:
             return
-        self.samples = deque(stored.get("samples", []), maxlen=CALIBRATION_WINDOW)
-        self.correction = float(stored.get("correction", 1.0))
+        samples = [float(value) for value in stored.get("samples", [])]
+        correction = float(stored.get("correction", 1.0))
+        if stored.get("measures") != STORED_EFFICIENCY_FACTOR:
+            samples, correction = self._migrate_ratios(samples, correction)
+        self.samples = deque(samples, maxlen=CALIBRATION_WINDOW)
+        self.correction = correction
         if self.correction < CALIBRATION_APPLY_THRESHOLD:
             _LOGGER.info(
                 "Restored %s efficiency calibration: correction=%.3f, n=%d samples",
@@ -300,10 +318,49 @@ class DirectionCalibration:
                 len(self.samples),
             )
 
+    def _migrate_ratios(
+        self, samples: list[float], correction: float
+    ) -> tuple[list[float], float]:
+        """Convert a payload persisted as measured/planned into efficiency factors.
+
+        Only the discharge side changes value — the charge ratio always was the
+        efficiency factor — but both go through the same call so the stored
+        marker means one thing.
+
+        A discharge history full of the energy-counter artefact converts to
+        factors well above nominal and lands on the clamp, where it is stored
+        and never applied. That is the right destination for a measurement that
+        was never an efficiency, and it is also why the converted correction is
+        re-clamped here: the old bounds were applied to a number that meant
+        something else.
+        """
+        converted = [
+            factor
+            for factor in (self.spec.efficiency_factor(value) for value in samples)
+            if factor is not None
+        ]
+        migrated = self.spec.efficiency_factor(correction)
+        migrated = 1.0 if migrated is None else migrated
+        migrated = max(CALIBRATION_APPLY_MIN, min(CALIBRATION_APPLY_MAX, migrated))
+        if self.spec.invert_ratio and (samples or correction != 1.0):
+            _LOGGER.info(
+                "Converted stored %s calibration to efficiency factors: "
+                "%.3f -> %.3f (%d samples)",
+                self.spec.name,
+                correction,
+                migrated,
+                len(converted),
+            )
+        return converted, migrated
+
     async def async_save(self) -> None:
         """Persist the current samples and correction."""
         await self.store.async_save(
-            {"samples": list(self.samples), "correction": self.correction}
+            {
+                "samples": list(self.samples),
+                "correction": self.correction,
+                "measures": STORED_EFFICIENCY_FACTOR,
+            }
         )
 
     async def async_reset(self) -> None:
@@ -333,13 +390,15 @@ class DirectionCalibration:
         mean below 1.0 and a healthy battery could end up with a correction
         applied to it. Only the resulting mean is clamped, and only for use.
         """
-        ratio = actual_delta / planned_delta
-        if not (CALIBRATION_ACCEPT_MIN <= ratio <= CALIBRATION_ACCEPT_MAX):
+        factor = self.spec.efficiency_factor(actual_delta / planned_delta)
+        if factor is None or not (
+            CALIBRATION_ACCEPT_MIN <= factor <= CALIBRATION_ACCEPT_MAX
+        ):
             _LOGGER.debug(
                 "%s efficiency calibration: dropping implausible sample "
-                "(ratio=%.3f from %s, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
+                "(factor=%s from %s, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
                 self.who,
-                ratio,
+                f"{factor:.3f}" if factor is not None else "n/a",
                 source,
                 planned_delta,
                 actual_delta,
@@ -348,9 +407,9 @@ class DirectionCalibration:
             return False
 
         previous = self.correction
-        self.samples.append(ratio)
-        # A ratio is only meaningful next to the ratios of the same battery, so
-        # the mean below is per battery; the fleet number the DP uses is
+        self.samples.append(factor)
+        # A factor is only meaningful next to the factors of the same battery,
+        # so the mean below is per battery; the fleet number the DP uses is
         # assembled from these by aggregate_correction().
         mean = sum(self.samples) / len(self.samples)
         self.correction = max(CALIBRATION_APPLY_MIN, min(CALIBRATION_APPLY_MAX, mean))
@@ -359,12 +418,12 @@ class DirectionCalibration:
         if moved:
             _LOGGER.info(
                 "%s efficiency correction updated: %.3f → %.3f "
-                "(latest ratio=%.3f from %s, n=%d samples, "
+                "(latest factor=%.3f from %s, n=%d samples, "
                 "planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
                 self.who,
                 previous,
                 self.correction,
-                ratio,
+                factor,
                 source,
                 len(self.samples),
                 planned_delta,

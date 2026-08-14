@@ -3151,7 +3151,12 @@ def test_discharge_calibration_no_sample_when_plan_overridden(hass):
 
 
 def test_discharge_calibration_samples_when_plan_executed(hass):
-    """Discharge calibration samples normally when the plan was executed."""
+    """A pack that loses less SoC than planned is discharging BETTER than modelled.
+
+    The planned drop is `AC / eff`, so measured-below-planned means the pack
+    beat its curve: the factor lands above 1.0, is stored, and is not handed to
+    the DP — a measurement may confirm the user's entry, not make the DP bolder.
+    """
     coord = _make_coordinator(hass)
     _plan_battery_step(
         coord,
@@ -3164,8 +3169,9 @@ def test_discharge_calibration_samples_when_plan_executed(hass):
     coord._update_discharge_eff_calibration()
 
     assert coord.discharge_eff_sample_count == 1
-    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.8)
-    assert coord.discharge_eff_correction == pytest.approx(0.8)
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(1.25)
+    assert coord.discharge_eff_correction == pytest.approx(1.05)  # clamped
+    assert coord.discharge_eff_applied is False
 
 
 def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
@@ -3196,7 +3202,13 @@ def test_discharge_calibration_skips_when_crossing_low_soc_derating(hass):
 
 
 def test_discharge_calibration_samples_above_low_soc_derating(hass):
-    """Sampling continues when derating is configured but the step stays above it."""
+    """Sampling continues when derating is configured but the step stays above it.
+
+    Scored on a pack that emptied 2.5 kWh where 2.0 was planned: that is a
+    discharge 20 % slower than its curve, the case the module exists to catch.
+    Stored as a raw ratio it read as 1.25 and was discarded by the "only apply
+    below nominal" rule; as an efficiency factor it is 0.8 and reaches the DP.
+    """
     coord = _make_coordinator(hass)
     cfg = coord._individual_battery_configs[0][1]
     cfg.low_soc_discharge_threshold_pct = 20.0
@@ -3207,7 +3219,7 @@ def test_discharge_calibration_samples_above_low_soc_derating(hass):
         coord,
         action=ACTION_DISCHARGING,
         planned_delta_kwh=2.0,
-        actual_delta_kwh=1.6,
+        actual_delta_kwh=2.5,
         prev_soc_kwh=6.0,
     )
 
@@ -3215,6 +3227,8 @@ def test_discharge_calibration_samples_above_low_soc_derating(hass):
 
     assert coord.discharge_eff_sample_count == 1
     assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.8)
+    assert coord.discharge_eff_correction == pytest.approx(0.8)
+    assert coord.discharge_eff_applied is True
 
 
 # Feed-in interval handling
@@ -4163,8 +4177,8 @@ def test_energy_counter_is_published_as_dispatch_fidelity(hass):
     fidelity, samples = coord.battery_dispatch_fidelity("bat1", ACTION_DISCHARGING)
     assert fidelity == pytest.approx(1.8 / commanded)
     assert samples == 1
-    # ...and it stayed out of the correction, which is the SoC ratio.
-    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(0.95)
+    # ...and it stayed out of the correction, which comes from the SoC delta.
+    assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(1 / 0.95)
 
 
 def test_counter_without_a_soc_reading_takes_no_sample(hass):

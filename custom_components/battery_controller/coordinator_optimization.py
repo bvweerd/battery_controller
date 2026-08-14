@@ -38,9 +38,8 @@ from .efficiency_calibration import (
     DirectionCalibration,
     aggregate_correction,
     aggregate_last_result,
-    charge_curve_override,
     counter_delta_kwh,
-    discharge_curve_override,
+    curve_override,
     min_planned_delta_kwh,
 )
 from .efficiency_curve import interpolate_efficiency
@@ -573,7 +572,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         The aggregate is only handed to the optimizer below 0.995: a value at or
         above that is within measurement noise of nominal and is stored but
-        never applied. Same gate as charge_curve_override(). Judged on the
+        never applied. Same gate as curve_override(). Judged on the
         aggregate, because that is what the DP is given — a single derated pack
         can be applied on its own sensor and still leave the fleet at nominal.
         """
@@ -2786,11 +2785,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # stored but not applied.
         charge_eff_correction = self.charge_eff_correction
         discharge_eff_correction = self.discharge_eff_correction
-        charge_eff_curve_override = charge_curve_override(
+        charge_eff_curve_override = curve_override(
             battery_config.charge_efficiency_curve_parsed,
             charge_eff_correction,
         )
-        discharge_eff_curve_override = discharge_curve_override(
+        discharge_eff_curve_override = curve_override(
             battery_config.discharge_efficiency_curve_parsed,
             discharge_eff_correction,
         )

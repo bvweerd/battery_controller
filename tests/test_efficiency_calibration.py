@@ -1,14 +1,11 @@
-"""Tests for the curves the calibration hands the DP, and for what it refuses.
+"""Tests for what the calibration measures and for the curve it hands the DP.
 
-The correction itself is a ratio against the curve the *user* entered, so it may
-legitimately land above 1.0 — a pessimistic entry has to be correctable upwards.
-The curve built from it is a different matter: the efficiencies in it are
-physical quantities with a ceiling, and the DP selects its actions against them.
-
-The two directions used to disagree about that, and the discharge side is where
-it showed: an over-unity discharge point makes the modelled round trip nearly
-lossless, which turns price wiggles far below the real break-even spread into
-apparent profit.
+The correction is an efficiency factor: measured efficiency over the efficiency
+the *user* entered. That definition is what lets one apply rule and one clamp
+serve both directions. Stored as a raw measured-over-planned ratio it meant the
+opposite on each side, and the module's own rule — only ever plan a battery as
+slower than its curve, never as faster — then discarded the discharge derating
+it exists to catch while applying the optimism it exists to ignore.
 """
 
 from __future__ import annotations
@@ -19,59 +16,63 @@ import pytest
 
 from custom_components.battery_controller.efficiency_calibration import (
     CALIBRATION_WINDOW,
-    charge_curve_override,
-    discharge_curve_override,
+    CHARGE_CALIBRATION,
+    DISCHARGE_CALIBRATION,
+    curve_override,
 )
 
 # A pack whose entered curve peaks at 0.909, as a measured AC-to-AC curve does.
 CURVE = [(0.2, 0.857), (0.5, 0.909), (1.2, 0.892)]
 
 
-class TestDischargeCurveOverride:
-    def test_no_curve_when_the_correction_is_within_noise(self):
-        assert discharge_curve_override(CURVE, 0.999) is None
+class TestEfficiencyFactor:
+    """Below 1.0 must mean "slower than modelled" on both sides."""
 
-    def test_correction_raises_the_curve_towards_measured_behaviour(self):
-        """Below the ceiling the correction passes through unchanged."""
-        curve = discharge_curve_override(CURVE, 0.95)
+    def test_charging_slower_than_modelled_lands_below_one(self):
+        # planned = AC * eff, so a slow pack gains less SoC than planned
+        assert CHARGE_CALIBRATION.efficiency_factor(0.9) == pytest.approx(0.9)
 
-        assert curve is not None
-        assert dict(curve)[0.2] == pytest.approx(0.857 / 0.95)
+    def test_discharging_slower_than_modelled_lands_below_one(self):
+        # planned = AC / eff, so a slow pack loses MORE SoC than planned
+        assert DISCHARGE_CALIBRATION.efficiency_factor(1.25) == pytest.approx(0.8)
 
-    def test_curve_never_exceeds_unity(self):
-        """discharge_eff is AC delivered over pack energy drawn: 1.0 is the ceiling.
+    def test_discharging_better_than_modelled_lands_above_one(self):
+        assert DISCHARGE_CALIBRATION.efficiency_factor(0.8583) == pytest.approx(
+            1.1651, abs=1e-4
+        )
 
-        0.8583 is the correction a healthy pack acquires when an AC-side energy
-        counter is scored against a SoC-denominated plan. Unbounded, it lifted
-        this curve to 1.04 and the modelled round trip from 0.80 to 0.93.
-        """
-        curve = discharge_curve_override(CURVE, 0.8583)
-
-        assert curve is not None
-        assert max(eff for _p, eff in curve) <= 1.0
-        assert dict(curve)[0.5] == pytest.approx(1.0)
-        # Points that stay under the ceiling are still corrected.
-        assert dict(curve)[0.2] == pytest.approx(0.857 / 0.8583)
-
-    def test_modelled_round_trip_stays_physical(self):
-        """The pair of curves may not describe a battery that gains energy."""
-        discharge = discharge_curve_override(CURVE, 0.8583)
-        assert discharge is not None
-
-        for (_p, charge_eff), (_q, discharge_eff) in zip(CURVE, discharge):
-            assert charge_eff * discharge_eff <= 1.0
+    def test_nothing_measured_is_not_a_factor(self):
+        assert DISCHARGE_CALIBRATION.efficiency_factor(0.0) is None
 
 
-class TestChargeCurveOverride:
-    def test_no_curve_when_the_correction_is_within_noise(self):
-        assert charge_curve_override(CURVE, 0.999) is None
+class TestCurveOverride:
+    def test_no_curve_when_the_factor_is_within_noise(self):
+        assert curve_override(CURVE, 0.999) is None
 
-    def test_curve_is_scaled_down_and_bounded(self):
-        curve = charge_curve_override(CURVE, 0.9)
+    def test_no_curve_when_the_pack_beats_its_own_curve(self):
+        """A measurement may confirm the user's entry, not make the DP bolder."""
+        assert curve_override(CURVE, 1.05) is None
+
+    def test_factor_scales_every_point(self):
+        curve = curve_override(CURVE, 0.9)
 
         assert curve is not None
         assert dict(curve)[0.5] == pytest.approx(0.909 * 0.9)
-        assert max(eff for _p, eff in curve) <= 1.0
+        assert dict(curve)[0.2] == pytest.approx(0.857 * 0.9)
+
+    def test_curve_never_exceeds_unity(self):
+        """These are efficiencies; a battery cannot return more than it was given.
+
+        With a factor the cap is a backstop rather than the main defence — only
+        an entered curve above 1.0 can reach it, since the factor itself is
+        below 1 by the time a curve is produced at all. It stays because the
+        unbounded version of this line is what let an over-unity discharge point
+        through, and the DP plans its actions against these numbers.
+        """
+        curve = curve_override([(0.5, 1.2)], 0.99)
+
+        assert curve is not None
+        assert max(eff for _p, eff in curve) == pytest.approx(1.0)
 
 
 class TestDispatchFidelity:
