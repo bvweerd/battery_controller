@@ -831,7 +831,11 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   }
   let dischargeEffCurveOverride = null;
   if (dischargeEffCorrection != null && dischargeEffCorrection < 0.995) {
-    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.max(1e-6, e / dischargeEffCorrection)]);
+    // The correction is an efficiency factor in both directions, so this scales
+    // like the charge side and is bounded at 1.0 for the same reason: a point
+    // above 1.0 is a battery returning more than it was given, and the DP plans
+    // discharges that cannot happen.
+    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.min(1.0, Math.max(1e-6, e * dischargeEffCorrection))]);
   }
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,

@@ -1312,9 +1312,12 @@ def test_extra_attributes_empty_without_coordinator_data(sensor_cls, kind):
 
 
 def _make_calibration_coord(
-    correction=0.94, samples=7, applied=True, last_result="sampled"
+    correction=0.94, samples=7, applied=True, last_result="sampled", fidelity=None
 ):
     coord = _make_opt_coord()
+    coord.dispatch_fidelity = MagicMock(
+        return_value=(fidelity, 0 if fidelity is None else samples)
+    )
     coord.charge_eff_correction = correction
     coord.charge_eff_sample_count = samples
     coord.charge_eff_applied = applied
@@ -1356,6 +1359,8 @@ def test_efficiency_calibration_publishes_sample_count_and_reason(sensor_cls):
     assert attrs["applied"] is False
     assert attrs["last_result"] == "dc_coupled_pv"
     assert attrs["correction_factor"] == pytest.approx(1.0)
+    assert attrs["dispatch_fidelity"] is None
+    assert attrs["dispatch_samples"] == 0
 
 
 def test_efficiency_calibration_sensors_have_distinct_unique_ids():
@@ -1382,6 +1387,12 @@ def test_per_battery_calibration_reads_its_own_battery(hass):
             ("bat2", ACTION_CHARGING): (1.0, 0, False, "battery_not_dispatched"),
         }[(sid, action)]
     )
+    coord.battery_dispatch_fidelity = MagicMock(
+        side_effect=lambda sid, action: {
+            ("bat1", ACTION_CHARGING): (0.99, 12),
+            ("bat2", ACTION_CHARGING): (None, 0),
+        }[(sid, action)]
+    )
     entry = _make_entry()
 
     worked = BatterySubentryChargeCalibrationSensor(
@@ -1395,6 +1406,8 @@ def test_per_battery_calibration_reads_its_own_battery(hass):
     assert worked.extra_state_attributes["samples"] == 12
     assert idle.native_value == pytest.approx(100.0)
     assert idle.extra_state_attributes["last_result"] == "battery_not_dispatched"
+    assert worked.extra_state_attributes["dispatch_fidelity"] == pytest.approx(0.99)
+    assert idle.extra_state_attributes["dispatch_fidelity"] is None
     assert worked.unique_id != idle.unique_id
 
 

@@ -27,6 +27,7 @@ from .efficiency_calibration import (
     CALIBRATION_DERATING,
     CALIBRATION_NO_PLAN,
     CALIBRATION_NO_RESULT,
+    CALIBRATION_NO_SOC_SOURCE,
     CALIBRATION_NOT_DISPATCHED,
     CALIBRATION_PLAN_NOT_EXECUTED,
     CALIBRATION_STEP_INCOMPLETE,
@@ -37,9 +38,8 @@ from .efficiency_calibration import (
     DirectionCalibration,
     aggregate_correction,
     aggregate_last_result,
-    charge_curve_override,
     counter_delta_kwh,
-    discharge_curve_override,
+    curve_override,
     min_planned_delta_kwh,
 )
 from .efficiency_curve import interpolate_efficiency
@@ -391,6 +391,39 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             direction.last_result,
         )
 
+    def battery_dispatch_fidelity(
+        self, subentry_id: str, action: str
+    ) -> tuple[float | None, int]:
+        """One battery's (measured/commanded throughput, samples) for a direction.
+
+        None until the energy counters have measured a dispatched step. Reported
+        rather than applied: it says whether the device followed its setpoint,
+        which the correction cannot — see DirectionCalibration.record_dispatch.
+        """
+        calibration = self._battery_calibrations.get(subentry_id)
+        if calibration is None:
+            return (None, 0)
+        direction = calibration.for_action(action)
+        return (direction.dispatch_fidelity, direction.dispatch_sample_count)
+
+    def dispatch_fidelity(self, action: str) -> tuple[float | None, int]:
+        """The fleet's dispatch fidelity for one direction.
+
+        A plain mean over the batteries that have measured something: unlike the
+        correction this never reaches the DP, so there is no single figure it has
+        to be faithful to — it only has to make a device that stopped following
+        its setpoint visible.
+        """
+        measured = [
+            (cal.dispatch_fidelity, cal.dispatch_sample_count)
+            for cal in self._direction_calibrations(action)
+            if cal.dispatch_fidelity is not None
+        ]
+        if not measured:
+            return (None, 0)
+        total = sum(value for value, _n in measured if value is not None)
+        return (total / len(measured), sum(n for _v, n in measured))
+
     def battery_calibration_report(self) -> dict[str, dict[str, Any]]:
         """Every battery's calibration, for diagnostics."""
         report: dict[str, dict[str, Any]] = {}
@@ -400,11 +433,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 continue
             entry: dict[str, Any] = {"name": data.get(CONF_NAME) or sid}
             for direction in calibration.both():
+                fidelity = direction.dispatch_fidelity
                 entry[direction.spec.name] = {
                     "correction": round(direction.correction, 4),
                     "samples": direction.sample_count,
                     "applied": direction.applied,
                     "last_result": direction.last_result,
+                    "dispatch_fidelity": (
+                        round(fidelity, 4) if fidelity is not None else None
+                    ),
+                    "dispatch_samples": direction.dispatch_sample_count,
                 }
             report[sid] = entry
         return report
@@ -534,7 +572,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         The aggregate is only handed to the optimizer below 0.995: a value at or
         above that is within measurement noise of nominal and is stored but
-        never applied. Same gate as charge_curve_override(). Judged on the
+        never applied. Same gate as curve_override(). Judged on the
         aggregate, because that is what the DP is given — a single derated pack
         can be applied on its own sensor and still leave the fleet at nominal.
         """
@@ -1913,10 +1951,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else prev_soc - planned_delta
             )
 
-        # Prefer the cumulative throughput counter over the SoC delta. Both
-        # measure the same quantity — energy moved through this battery, which
-        # is what the planned SoC change represents — but the counter is not
-        # limited by the SoC sensor's step size.
+        # The energy counters answer a different question than the SoC sensor.
+        # A counter sits on the same side of the inverter as the setpoint that
+        # drove it, so measured-over-commanded is dispatch fidelity, not
+        # efficiency; the SoC delta is the only measurement that spans the
+        # conversion and can price it. The counter reading is therefore recorded
+        # as a diagnostic and kept out of the correction entirely.
         snapshot = self._energy_counter_snapshot.get(subentry_id) or {}
         counter_delta = (
             counter_delta_kwh(
@@ -1927,8 +1967,13 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if counters_now is not None
             else None
         )
+        if counter_delta is not None:
+            calibration.record_dispatch(
+                abs(setpoint_kw) * self._previous_step_hours(), counter_delta
+            )
+
         if planned_delta < min_planned_delta_kwh(
-            counter_delta is not None, self._battery_soc_quantum_kwh(data, cfg)
+            self._battery_soc_quantum_kwh(data, cfg)
         ):
             # Too small to measure reliably at this resolution; skip.
             calibration.last_result = CALIBRATION_DELTA_TOO_SMALL
@@ -1952,26 +1997,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 calibration.last_result = CALIBRATION_DERATING
                 return
 
-        if counter_delta is not None:
-            actual_delta = counter_delta
-            source = "energy counter"
-        elif prev_soc is not None:
-            state = self._per_battery_states.get(subentry_id)
-            if state is None:
-                calibration.last_result = CALIBRATION_NO_RESULT
-                return
-            measured = (
-                state.soc_kwh - prev_soc
-                if spec.action == ACTION_CHARGING
-                else prev_soc - state.soc_kwh
-            )
-            actual_delta = max(0.0, measured)
-            source = "SoC delta"
-        else:
+        if prev_soc is None:
             calibration.last_result = CALIBRATION_NO_RESULT
             return
+        state = self._per_battery_states.get(subentry_id)
+        if state is None:
+            calibration.last_result = (
+                CALIBRATION_NO_SOC_SOURCE
+                if counter_delta is not None
+                else CALIBRATION_NO_RESULT
+            )
+            return
+        measured = (
+            state.soc_kwh - prev_soc
+            if spec.action == ACTION_CHARGING
+            else prev_soc - state.soc_kwh
+        )
+        actual_delta = max(0.0, measured)
 
-        if calibration.record(planned_delta, actual_delta, source):
+        if calibration.record(planned_delta, actual_delta, "SoC delta"):
             self.hass.async_create_task(calibration.async_save())
 
     def _update_charge_eff_calibration(
@@ -2741,11 +2785,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # stored but not applied.
         charge_eff_correction = self.charge_eff_correction
         discharge_eff_correction = self.discharge_eff_correction
-        charge_eff_curve_override = charge_curve_override(
+        charge_eff_curve_override = curve_override(
             battery_config.charge_efficiency_curve_parsed,
             charge_eff_correction,
         )
-        discharge_eff_curve_override = discharge_curve_override(
+        discharge_eff_curve_override = curve_override(
             battery_config.discharge_efficiency_curve_parsed,
             discharge_eff_correction,
         )

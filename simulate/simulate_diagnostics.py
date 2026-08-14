@@ -180,12 +180,12 @@ def get_discharge_eff_override(
     """Return corrected discharge efficiency curve when diagnostics contain a calibration."""
     if discharge_eff_correction is None or discharge_eff_correction >= 0.995:
         return None
-    # SoC transition: soc -= power * hours / discharge_eff.
-    # To reduce planned SoC drop by factor `correction`, divide each curve point by it
-    # (a larger divisor yields a smaller SoC drop). May exceed 1.0; only used for
-    # SoC state transitions, not for economic cost.
+    # The correction is an efficiency factor in both directions, so the curve is
+    # scaled the same way as the charge side, and bounded at 1.0 for the same
+    # reason: a point above 1.0 describes a battery returning more than it was
+    # given, and the DP plans discharges it cannot deliver.
     return [
-        (p, max(1e-6, eff / discharge_eff_correction))
+        (p, min(1.0, max(1e-6, eff * discharge_eff_correction)))
         for p, eff in battery.discharge_efficiency_curve
     ]
 

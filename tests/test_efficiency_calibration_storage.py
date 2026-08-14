@@ -21,6 +21,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.battery_controller.const import ACTION_CHARGING
+from custom_components.battery_controller.efficiency_calibration import (
+    STORED_EFFICIENCY_FACTOR,
+)
 
 
 @pytest.fixture
@@ -161,7 +164,11 @@ async def test_save_writes_samples_and_correction(coord_with_fake_stores):
     await coord._async_save_charge_eff_calibration()
 
     _charge(coord).store.async_save.assert_awaited_once_with(
-        {"samples": [0.91, 0.93], "correction": 0.92}
+        {
+            "samples": [0.91, 0.93],
+            "correction": 0.92,
+            "measures": STORED_EFFICIENCY_FACTOR,
+        }
     )
 
 
@@ -228,7 +235,7 @@ async def test_reset_charge_clears_state_and_persists(coord_with_fake_stores):
     assert list(_charge(coord).samples) == []
     assert coord.charge_eff_correction == 1.0
     _charge(coord).store.async_save.assert_awaited_once_with(
-        {"samples": [], "correction": 1.0}
+        {"samples": [], "correction": 1.0, "measures": STORED_EFFICIENCY_FACTOR}
     )
 
 
@@ -242,7 +249,7 @@ async def test_reset_discharge_clears_state_and_persists(coord_with_fake_stores)
     assert list(_discharge(coord).samples) == []
     assert coord.discharge_eff_correction == 1.0
     _discharge(coord).store.async_save.assert_awaited_once_with(
-        {"samples": [], "correction": 1.0}
+        {"samples": [], "correction": 1.0, "measures": STORED_EFFICIENCY_FACTOR}
     )
 
 
@@ -269,3 +276,79 @@ async def test_charge_and_discharge_calibrations_are_independent(
     assert list(_discharge(coord).samples) == [0.88, 0.89]
     assert coord.discharge_eff_correction == pytest.approx(0.885)
     _discharge(coord).store.async_save.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# Migration: payloads written before the correction became an efficiency factor
+# --------------------------------------------------------------------------
+
+
+async def test_charge_history_survives_the_migration_unchanged(
+    coord_with_fake_stores,
+):
+    """The charge ratio always was the efficiency factor."""
+    coord = coord_with_fake_stores
+    _charge(coord).store.async_load = AsyncMock(
+        return_value={"samples": [0.93, 0.91], "correction": 0.92}
+    )
+
+    await coord._async_load_charge_eff_calibration()
+
+    assert list(_charge(coord).samples) == [0.93, 0.91]
+    assert coord.charge_eff_correction == pytest.approx(0.92)
+
+
+async def test_discharge_history_is_inverted_on_load(coord_with_fake_stores):
+    """A stored discharge ratio means the opposite of a factor.
+
+    1.25 was "emptied a quarter more than planned" — a pack discharging 20 %
+    slower than its curve, which the old apply rule threw away. It has to come
+    back as 0.8 and be applied.
+    """
+    coord = coord_with_fake_stores
+    _discharge(coord).store.async_load = AsyncMock(
+        return_value={"samples": [1.25], "correction": 1.25}
+    )
+
+    await coord._async_load_discharge_eff_calibration()
+
+    assert list(_discharge(coord).samples) == [pytest.approx(0.8)]
+    assert coord.discharge_eff_correction == pytest.approx(0.8)
+    assert coord.discharge_eff_applied is True
+
+
+async def test_the_energy_counter_artefact_migrates_to_the_clamp(
+    coord_with_fake_stores,
+):
+    """0.8583 was never an efficiency; it must not become one now.
+
+    That value is what an AC-side energy counter produces when scored against a
+    SoC-denominated plan. Inverted it claims a pack 17 % better than its curve,
+    which the clamp caps at 1.05 — stored, and never handed to the DP.
+    """
+    coord = coord_with_fake_stores
+    _discharge(coord).store.async_load = AsyncMock(
+        return_value={"samples": [0.8583], "correction": 0.8583}
+    )
+
+    await coord._async_load_discharge_eff_calibration()
+
+    assert coord.discharge_eff_correction == pytest.approx(1.05)
+    assert coord.discharge_eff_applied is False
+
+
+async def test_a_migrated_payload_is_not_migrated_twice(coord_with_fake_stores):
+    """The marker is what stops the second load from inverting it back."""
+    coord = coord_with_fake_stores
+    _discharge(coord).store.async_load = AsyncMock(
+        return_value={
+            "samples": [0.8],
+            "correction": 0.8,
+            "measures": STORED_EFFICIENCY_FACTOR,
+        }
+    )
+
+    await coord._async_load_discharge_eff_calibration()
+
+    assert list(_discharge(coord).samples) == [pytest.approx(0.8)]
+    assert coord.discharge_eff_correction == pytest.approx(0.8)
