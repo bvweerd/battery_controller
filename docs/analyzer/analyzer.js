@@ -85,9 +85,43 @@ function solveFillW(deltaWh, stepH, curve, seedEff) {
   return deltaWh / (stepH * eff);
 }
 
+// Largest AC charge setpoint that keeps grid import within the connection cap.
+// Mirrors optimizer.grid_cap_charge_limit_w: the cap bounds the ACTION, not the
+// price of the resulting flow. Clipping the cost of over-cap import instead
+// made every watt above the cap free — the SoC still rose while the cost
+// stopped growing — so the DP charged at full power whenever the cap was
+// binding and planned imports well past the physical connection.
+// acPvW is AC-side PV only; assuming no DC PV reaches the AC bus is the bound
+// that cannot be violated. Returns Infinity when no cap is configured.
+function gridCapChargeLimitW(maxGridPowerKw, consumW, acPvW) {
+  if (!(maxGridPowerKw > 0)) return Infinity;
+  return Math.max(0, maxGridPowerKw * 1000 - consumW + acPvW);
+}
+
+// Battery-side charge energy still available in this step, in Wh. The rating is
+// read as a limit on the COMBINED charge path, so energy an AC setpoint already
+// stores is deducted before the passive DC path may use the rest.
+// maxChargeKw <= 0 means "no rating known" and imposes no bound.
+function chargeBudgetWh(maxChargeKw, stepH, acStoredWh) {
+  if (!(maxChargeKw > 0)) return Infinity;
+  return Math.max(0, maxChargeKw * 1000 * stepH - acStoredWh);
+}
+
+// Energy the DC MPPT absorbs into the battery over one step, in Wh: bounded by
+// production, by SoC headroom, and by the remaining charge-power budget. The
+// last bound is what stops a DC array larger than the inverter from charging
+// the pack faster than it physically can.
+function passiveDcChargeWh(pvDcW, dcEff, stepH, headroomWh, budgetWh) {
+  return Math.max(0, Math.min(pvDcW * dcEff * stepH, headroomWh, budgetWh));
+}
+
 function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
     pvW, consumW, chargeCurve, dischargeCurve, degradCostPerKwh, pvDcCoupled, pvDcW, pvDcEfficiency, maxGridPowerKw, maxSocWh,
-    chargeEffPre = null, dischargeEffPre = null) {
+    chargeEffPre = null, dischargeEffPre = null, arbitrageCostPerKwh = 0, maxChargeKw = 0) {
+  // arbitrageCostPerKwh is half the configured min_price_spread, charged per
+  // kWh of COMMANDED AC throughput so one full cycle carries
+  // 2 * degradation + min_price_spread.  Passive DC PV is exempt: it happens
+  // whatever the setpoint is, so it is not an arbitrage decision.
   // chargeEffPre / dischargeEffPre may be supplied pre-interpolated (hot-path
   // optimisation); they MUST come from the same curves passed above.
   // Interpolate only when the caller did not pre-compute (mirrors optimizer.py).
@@ -105,7 +139,9 @@ function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
   pvW   = Math.max(0, pvW);
   pvDcW = Math.max(0, pvDcW || 0);
 
-  let gridToBatteryW = 0, throughputKwh = 0;
+  // Throughput split: energy the AC setpoint commanded (an arbitrage
+  // decision) vs energy the DC MPPT absorbed passively (not a decision).
+  let gridToBatteryW = 0, acThroughputKwh = 0, passiveThroughputKwh = 0;
   let dcPvExcessW = pvDcW;
 
   if (actionW > 0) {
@@ -113,46 +149,51 @@ function calculateStepCost(stepH, socWh, actionW, gridPrice, feedInPrice,
     // continues on top, limited by the remaining headroom.
     gridToBatteryW  = actionW;
     const acStoredWh = actionW * stepH * chargeEff;
-    throughputKwh   = acStoredWh / 1000;
+    acThroughputKwh = acStoredWh / 1000;
     if (pvDcCoupled && pvDcW > 0 && maxSocWh !== undefined) {
       const headroomWh      = Math.max(0, maxSocWh - socWh - acStoredWh);
-      const passiveChargeWh = Math.min(pvDcW * dcEff * stepH, headroomWh);
+      const passiveChargeWh = passiveDcChargeWh(pvDcW, dcEff, stepH, headroomWh,
+                                                chargeBudgetWh(maxChargeKw, stepH, acStoredWh));
       const passiveChargeW  = stepH > 0 ? passiveChargeWh / stepH : 0;
       const dcPvConsumedW   = dcEff > 0 ? passiveChargeW / dcEff : 0;
       dcPvExcessW    = Math.max(0, pvDcW - dcPvConsumedW);
-      throughputKwh += passiveChargeWh / 1000;
+      passiveThroughputKwh = passiveChargeWh / 1000;
     }
   } else if (actionW < 0) {
     // Discharging
     dcPvExcessW     = pvDcW;
     const usablePowerW = Math.abs(actionW);
     gridToBatteryW  = -usablePowerW;
-    throughputKwh   = Math.abs(actionW) * stepH / dischargeEff / 1000;
+    acThroughputKwh = Math.abs(actionW) * stepH / dischargeEff / 1000;
   } else {
     // Idle
     gridToBatteryW = 0;
     if (pvDcCoupled && pvDcW > 0 && maxSocWh !== undefined) {
       const headroomWh      = Math.max(0, maxSocWh - socWh);
-      const passiveChargeWh = Math.min(pvDcW * dcEff * stepH, headroomWh);
+      const passiveChargeWh = passiveDcChargeWh(pvDcW, dcEff, stepH, headroomWh,
+                                                chargeBudgetWh(maxChargeKw, stepH, 0));
       const passiveChargeW  = stepH > 0 ? passiveChargeWh / stepH : 0;
       const dcPvConsumedW   = dcEff > 0 ? passiveChargeW / dcEff : 0;
       dcPvExcessW   = Math.max(0, pvDcW - dcPvConsumedW);
-      throughputKwh = passiveChargeWh / 1000;
+      passiveThroughputKwh = passiveChargeWh / 1000;
     }
   }
 
   const dcPvToAcW  = dcPvExcessW > 0 ? dcPvExcessW * DC_TO_AC_EFF : 0;
   const totalAcPvW = pvW + dcPvToAcW;
   let netGridW     = consumW - totalAcPvW + gridToBatteryW;
+  // Export side only: curtailed PV earns nothing, which is the correct model,
+  // and discharging past the cap is therefore self-limiting. Import is bounded
+  // on the action set instead — see gridCapChargeLimitW.
   if (maxGridPowerKw > 0) {
-    const capW = maxGridPowerKw * 1000;
-    netGridW   = Math.max(-capW, Math.min(capW, netGridW));
+    netGridW = Math.max(-maxGridPowerKw * 1000, netGridW);
   }
 
   const energyKwh = Math.abs(netGridW) * stepH / 1000;
   const gridCost  = netGridW > 0 ? energyKwh * gridPrice : -energyKwh * feedInPrice;
-  const degradCost= throughputKwh * degradCostPerKwh;
-  return gridCost + degradCost;
+  const degradCost = (acThroughputKwh + passiveThroughputKwh) * degradCostPerKwh;
+  const arbCost    = acThroughputKwh * arbitrageCostPerKwh;
+  return gridCost + degradCost + arbCost;
 }
 
 // Total PV available on the AC side, per step. DC-coupled PV reaches the
@@ -191,6 +232,10 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const dischargeCurve = dischargeEffCurveOverride ?? cfg.dischargeCurve;
   const costChargeCurve    = cfg.chargeCurve;
   const costDischargeCurve = cfg.dischargeCurve;
+
+  // Arbitrage hurdle: half the configured spread per direction, so a full
+  // cycle carries 2 * degradation + min_price_spread (mirrors optimizer.py).
+  const arbCostPerKwh = Math.max(0, minPriceSpread || 0) / 2;
   // Seed for the boundary-action fixed point (see solveFillW / solveDrainW)
   const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
   const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
@@ -209,11 +254,15 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
   // Coarsen the SoC grid for large batteries so the state count stays
   // bounded (mirrors optimizer.py).
-  const socResWh  = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
-  const alignedStepW = socResWh / fullStepH;
+  const socResTargetWh = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
+  const alignedStepW = socResTargetWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
-  const nSocStates = Math.round((maxSocWh - minSocWh) / socResWh) + 1;
+  const nSocStates = Math.round((maxSocWh - minSocWh) / socResTargetWh) + 1;
+  // Exact-fit grid so the top state IS maxSocWh (mirrors optimizer.py).
+  const socResWh = nSocStates > 1
+    ? (maxSocWh - minSocWh) / (nSocStates - 1)
+    : socResTargetWh;
   const socStates  = [];
   for (let i = 0; i < nSocStates; i++) socStates.push(minSocWh + i * socResWh);
 
@@ -283,10 +332,13 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
     const pvDcW     = t < pvDcFc.length  ? pvDcFc[t]  * 1000  : 0;
     const consumW   = t < consumFc.length ? consumFc[t] * 1000 : 0;
     const Vnext     = V[t + 1];
+    // Charging is bounded by the battery (SoC derating) and by the grid
+    // connection; whichever binds first wins.
+    const stepChargeCapW = gridCapChargeLimitW(cfg.maxGridPowerKw, consumW, pvW);
 
     for (let s = 0; s < nSocStates; s++) {
       const socWh  = socStates[s];
-      const maxChgW = socMaxChargeW[s];
+      const maxChgW = Math.min(socMaxChargeW[s], stepChargeCapW);
       const maxDisW = socMaxDischargeW[s];
       let bestCost = Infinity;
       let bestAction = 0;
@@ -301,7 +353,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           if (newSocWh > maxSocWh) continue;
           if (cfg.pvDcCoupled && pvDcW > 0) {
             const headroomWh = Math.max(0, maxSocWh - newSocWh);
-            newSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+            newSocWh += passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH, headroomWh,
+              chargeBudgetWh(cfg.maxChargeKw, stepH, actionW * stepH * eff));
           }
         } else if (actionW < 0) {
           if (-actionW > maxDisW) continue;
@@ -311,7 +364,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
         } else {
           if (cfg.pvDcCoupled && pvDcW > 0) {
             const headroomWh = Math.max(0, maxSocWh - socWh);
-            newSocWh = socWh + Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+            newSocWh = socWh + passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH, headroomWh,
+              chargeBudgetWh(cfg.maxChargeKw, stepH, 0));
           } else {
             newSocWh = socWh;
           }
@@ -324,7 +378,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           stepH, socWh, actionW, gridPrice, feedIn,
           pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
           cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
-          costChargeEff.get(actionW), costDischargeEff.get(actionW)
+          costChargeEff.get(actionW), costDischargeEff.get(actionW), arbCostPerKwh, cfg.maxChargeKw
         );
         const totalCost = stepCost + Vnext[newSocIdx];
         if (totalCost < bestCost) {
@@ -340,7 +394,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           const stepCost = calculateStepCost(
             stepH, socWh, -drainW, gridPrice, feedIn,
             pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
-            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
+            null, null, arbCostPerKwh, cfg.maxChargeKw
           );
           const totalCost = stepCost + Vnext[0];
           if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; }
@@ -352,7 +407,8 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
           const stepCost = calculateStepCost(
             stepH, socWh, fillW, gridPrice, feedIn,
             pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
-            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+            cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
+            null, null, arbCostPerKwh, cfg.maxChargeKw
           );
           const totalCost = stepCost + Vnext[nSocStates - 1];
           if (totalCost < bestCost) { bestCost = totalCost; bestAction = fillW; }
@@ -363,11 +419,13 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
     }
   }
 
-  return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh, terminalPrice, nSteps };
+  return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh,
+           terminalPrice, nSteps, minPriceSpread };
 }
 
 function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurveOverride, dischargeEffCurveOverride) {
-  const { V, socStates, stepDurations, minSocWh, maxSocWh, nSteps, powerStepW } = dpResult;
+  const { V, socStates, stepDurations, minSocWh, maxSocWh, nSteps, powerStepW,
+          minPriceSpread } = dpResult;
   const { priceFc, feedInFc, pvFc, consumFc, degradCost } = inputs;
   // Overrides apply to SoC TRANSITIONS only; costs use the nominal curves
   // (mirrors optimizer.py).
@@ -375,6 +433,10 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
   const dischargeCurve = dischargeEffCurveOverride ?? cfg.dischargeCurve;
   const costChargeCurve    = cfg.chargeCurve;
   const costDischargeCurve = cfg.dischargeCurve;
+
+  // Arbitrage hurdle: half the configured spread per direction, so a full
+  // cycle carries 2 * degradation + min_price_spread (mirrors optimizer.py).
+  const arbCostPerKwh = Math.max(0, minPriceSpread || 0) / 2;
   const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
   const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
   const nSocStates   = socStates.length;
@@ -406,9 +468,11 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
     const consumW    = consumFc && t < consumFc.length ? consumFc[t] * 1000 : 0;
 
     const sIdx = findNearestSocIdx(curSocWh, socStates);
-    const maxChgW = cfg.highSocChargeThresholdPct && cfg.highSocMaxChargeKw &&
+    const stepChargeCapW = gridCapChargeLimitW(cfg.maxGridPowerKw, consumW, pvW);
+    const maxChgW = Math.min(stepChargeCapW,
+      cfg.highSocChargeThresholdPct && cfg.highSocMaxChargeKw &&
       (curSocWh / (cfg.capacityKwh * 10) >= cfg.highSocChargeThresholdPct)
-        ? cfg.highSocMaxChargeKw * 1000 : maxChargeW;
+        ? cfg.highSocMaxChargeKw * 1000 : maxChargeW);
     const maxDisW = cfg.lowSocDischargeThresholdPct && cfg.lowSocMaxDischargeKw &&
       (curSocWh / (cfg.capacityKwh * 10) <= cfg.lowSocDischargeThresholdPct)
         ? cfg.lowSocMaxDischargeKw * 1000 : maxDischargeW;
@@ -424,7 +488,8 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
         if (newSocWh > maxSocWh) continue;
         if (cfg.pvDcCoupled && pvDcW > 0) {
           const headroomWh = Math.max(0, maxSocWh - newSocWh);
-          newSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+          newSocWh += passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH, headroomWh,
+            chargeBudgetWh(cfg.maxChargeKw, stepH, actionW * stepH * eff));
         }
       } else if (actionW < 0) {
         if (-actionW > maxDisW) continue;
@@ -433,10 +498,9 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
         if (newSocWh < minSocWh) continue;
       } else {
         if (cfg.pvDcCoupled && pvDcW > 0) {
-          const dcEff      = cfg.pvDcEfficiency;
           const headroomWh = Math.max(0, maxSocWh - curSocWh);
-          const passiveWh  = Math.min(pvDcW * dcEff * stepH, headroomWh);
-          newSocWh = curSocWh + passiveWh;
+          newSocWh = curSocWh + passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH,
+            headroomWh, chargeBudgetWh(cfg.maxChargeKw, stepH, 0));
         } else {
           newSocWh = curSocWh;
         }
@@ -449,7 +513,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
         stepH, curSocWh, actionW, gridPrice, feedIn,
         pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
         cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
-        costChargeEff.get(actionW), costDischargeEff.get(actionW)
+        costChargeEff.get(actionW), costDischargeEff.get(actionW), arbCostPerKwh, cfg.maxChargeKw
       );
       const totalCost = stepCost + V[t + 1][newSocIdx];
       if (totalCost < bestCost) { bestCost = totalCost; bestAction = actionW; bestNewSoc = newSocWh; }
@@ -462,7 +526,8 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
         const stepCost = calculateStepCost(
           stepH, curSocWh, -drainW, gridPrice, feedIn,
           pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
-          cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
+          null, null, arbCostPerKwh, cfg.maxChargeKw
         );
         const totalCost = stepCost + V[t + 1][0];
         if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; bestNewSoc = minSocWh; }
@@ -474,7 +539,8 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
         const stepCost = calculateStepCost(
           stepH, curSocWh, fillW, gridPrice, feedIn,
           pvW, consumW, costChargeCurve, costDischargeCurve, degradCost,
-          cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh
+          cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
+          null, null, arbCostPerKwh, cfg.maxChargeKw
         );
         const totalCost = stepCost + V[t + 1][nSocStates - 1];
         if (totalCost < bestCost) { bestCost = totalCost; bestAction = fillW; bestNewSoc = maxSocWh; }
@@ -515,10 +581,12 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc, c
     if (modes[t] === 'charging' && p < -1e-9) {
       const actionW = -p * 1000;   // positive
       const eff = interpolateEfficiency(chargeCurve, actionW / 1000);
+      const prevSocWh = curSocWh;
       curSocWh = Math.min(curSocWh + actionW * stepH * eff, maxSocWh);
       if (cfg.pvDcCoupled && pvDcW > 0) {
         const headroomWh = Math.max(0, maxSocWh - curSocWh);
-        curSocWh += Math.min(pvDcW * cfg.pvDcEfficiency * stepH, headroomWh);
+        curSocWh += passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH, headroomWh,
+          chargeBudgetWh(cfg.maxChargeKw, stepH, curSocWh - prevSocWh));
       }
     } else if (modes[t] === 'discharging' && p > 1e-9) {
       const actionW = p * 1000;    // positive
@@ -526,9 +594,9 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc, c
       curSocWh = Math.max(curSocWh - actionW * stepH / eff, minSocWh);
     } else {
       if (cfg.pvDcCoupled && pvDcW > 0) {
-        const dcEff      = cfg.pvDcEfficiency;
         const headroomWh = Math.max(0, maxSocWh - curSocWh);
-        const passiveWh  = Math.min(pvDcW * dcEff * stepH, headroomWh);
+        const passiveWh  = passiveDcChargeWh(pvDcW, cfg.pvDcEfficiency, stepH, headroomWh,
+          chargeBudgetWh(cfg.maxChargeKw, stepH, 0));
         curSocWh = Math.min(curSocWh + passiveWh, maxSocWh);
       }
     }
@@ -631,21 +699,39 @@ function filterOscillations(powerKw, modes, cfg, priceFc, feedInFc, pvFc,
 /**
  * Micro-cycle filter: removes charge/discharge blocks that move less than
  * MIN_CYCLE_KWH total energy — too small to be worthwhile.
+ *
+ * Unlike the oscillation filter this is deliberately NOT gated on cost: the
+ * per-cycle wear it avoids is real but unpriced, so a cost guard would disable
+ * it entirely. Block energy is measured on the BATTERY side (stored when
+ * charging, drawn when discharging) — the quantity that wears the cells and the
+ * one degradation is priced on.
  * Mirrors Python _filter_micro_cycles.
  */
-function filterMicroCycles(powerKw, modes, stepDurations) {
+function filterMicroCycles(powerKw, modes, stepDurations, chargeCurve = null, dischargeCurve = null) {
   if (!powerKw.length) return { powerKw, modes };
 
   const filtPow  = [...powerKw];
   const filtMode = [...modes];
+  // Step 0 is shortened to the remainder of the current price period; size the
+  // block on the reference interval so an action is not suppressed merely for
+  // starting late in a period (mirrors optimizer.py).
+  const refStepH = stepDurations.length > 1
+    ? stepDurations[1]
+    : (stepDurations[0] || 0.25);
   let i = 0;
   while (i < filtMode.length) {
     const dir = filtMode[i];
     if (dir !== 'charging' && dir !== 'discharging') { i++; continue; }
     let j = i, totalEnergy = 0;
     while (j < filtMode.length && filtMode[j] === dir) {
-      const stepH = stepDurations[j] || 0.25;
-      totalEnergy += Math.abs(filtPow[j]) * stepH;
+      const stepH = j === 0 ? refStepH : (stepDurations[j] || 0.25);
+      const p = Math.abs(filtPow[j]);
+      if (dir === 'charging') {
+        totalEnergy += p * stepH * (chargeCurve ? interpolateEfficiency(chargeCurve, p) : 1);
+      } else {
+        const eff = dischargeCurve ? interpolateEfficiency(dischargeCurve, p) : 1;
+        totalEnergy += eff > 0 ? p * stepH / eff : 0;
+      }
       j++;
     }
     if (totalEnergy < MIN_CYCLE_KWH) {
@@ -687,10 +773,10 @@ function computeBaselineCost(inputs, cfg) {
     const dcPvToAcW = pvDcW > 0 ? pvDcW * DC_TO_AC_EFF : 0;
     const totalPvW  = pvW + dcPvToAcW;
     let netGridW    = consumW - totalPvW;
-    // Apply the grid capacity cap like calculateStepCost does.
+    // Export side only, like calculateStepCost. Clipping import here would
+    // hand the no-battery house free energy and understate the savings.
     if (cfg.maxGridPowerKw > 0) {
-      const capW = cfg.maxGridPowerKw * 1000;
-      netGridW   = Math.max(-capW, Math.min(capW, netGridW));
+      netGridW = Math.max(-cfg.maxGridPowerKw * 1000, netGridW);
     }
     const energyKwh = Math.abs(netGridW) * stepH / 1000;
     baseline += netGridW > 0 ? energyKwh * priceFc[t] : -energyKwh * feedIn;
@@ -715,7 +801,8 @@ function computeScheduleCost(powerKw, socKwh, inputs, cfg, terminalPrice) {
     total += calculateStepCost(
       stepH, socKwh[t] * 1000, -powerKw[t] * 1000,
       priceFc[t], feedIn, pvW, consumW,
-      cfg.chargeCurve, cfg.dischargeCurve, degradCost, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC
+      cfg.chargeCurve, cfg.dischargeCurve, degradCost, cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWhC,
+      null, null, 0, cfg.maxChargeKw
     );
   }
   // Terminal value: stored energy above min SoC at end of horizon is worth terminalPrice
@@ -744,7 +831,11 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   }
   let dischargeEffCurveOverride = null;
   if (dischargeEffCorrection != null && dischargeEffCorrection < 0.995) {
-    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.max(1e-6, e / dischargeEffCorrection)]);
+    // The correction is an efficiency factor in both directions, so this scales
+    // like the charge side and is bounded at 1.0 for the same reason: a point
+    // above 1.0 is a battery returning more than it was given, and the DP plans
+    // discharges that cannot happen.
+    dischargeEffCurveOverride = cfg.dischargeCurve.map(([p, e]) => [p, Math.min(1.0, Math.max(1e-6, e * dischargeEffCorrection))]);
   }
 
   const dp = runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
@@ -752,14 +843,38 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   let { powerKw, modes } = forwardPass(dp, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurveOverride, dischargeEffCurveOverride);
 
   // Post-processing filters (matching optimizer.py)
+  const rawPowerKw = powerKw.slice();
+  const rawModes   = modes.slice();
+  const rawSocKwh  = rebuildSoc(
+    rawPowerKw, rawModes, cfg, currentSocKwh, dp.stepDurations, pvDcFc,
+    chargeEffCurveOverride, dischargeEffCurveOverride
+  );
+  const rawTotal = computeScheduleCost(rawPowerKw, rawSocKwh, inputs, cfg, dp.terminalPrice);
+
   const oscResult = filterOscillations(
     powerKw, modes, cfg, priceFc, feedInFc || priceFc, pvFc, consumFc,
     dp.stepDurations, degradCost, minPriceSpread || 0.05, pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
   );
-  powerKw = oscResult.powerKw;
-  modes   = oscResult.modes;
+  // Accept the filter only when it does not cost money. The arbitrage hurdle
+  // now lives inside the DP objective, so the DP already returns the optimum
+  // under the user's own threshold; the filter is a second opinion built from a
+  // cruder proxy (feed-in pricing for everything above the instantaneous
+  // residual load, no terminal value, a fixed lookahead window instead of the
+  // SoC trajectory). Where they disagree the DP is right. Mirrors optimizer.py.
+  const oscSocKwh = rebuildSoc(
+    oscResult.powerKw, oscResult.modes, cfg, currentSocKwh, dp.stepDurations,
+    pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
+  );
+  if (computeScheduleCost(oscResult.powerKw, oscSocKwh, inputs, cfg, dp.terminalPrice) <= rawTotal) {
+    powerKw = oscResult.powerKw;
+    modes   = oscResult.modes;
+  }
 
-  const mcResult = filterMicroCycles(powerKw, modes, dp.stepDurations);
+  const mcResult = filterMicroCycles(
+    powerKw, modes, dp.stepDurations,
+    chargeEffCurveOverride ?? cfg.chargeCurve,
+    dischargeEffCurveOverride ?? cfg.dischargeCurve
+  );
   powerKw = mcResult.powerKw;
   modes   = mcResult.modes;
 
@@ -1128,6 +1243,9 @@ if (typeof module !== 'undefined') {
     solveDrainW,
     solveFillW,
     flatCurve,
+    gridCapChargeLimitW,
+    chargeBudgetWh,
+    passiveDcChargeWh,
     calculateStepCost,
     totalPvSeries,
     netPvSeries,

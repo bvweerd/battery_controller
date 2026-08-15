@@ -110,10 +110,10 @@
     },
     "expected": {
       "power_schedule_kw": [
-        1.6,
-        1.6,
-        0.5999999999999996,
-        0.4162959839780753,
+        2.0000000000000004,
+        1.4000000000000006,
+        0.40000000000000097,
+        0.4162959839780735,
         -1.9,
         -1.9999999999999998,
         -1.9,
@@ -125,9 +125,9 @@
       ],
       "soc_schedule_kwh": [
         5.0,
-        6.51792,
-        8.03584,
-        8.60506,
+        6.8974,
+        8.22558,
+        8.605060000000002,
         9.0,
         6.997259407610414,
         4.889111415621377,
@@ -231,7 +231,7 @@
     },
     "expected": {
       "power_schedule_kw": [
-        -3.999999999999999,
+        -4.0,
         -4.0,
         0.0,
         0.0,
@@ -247,7 +247,7 @@
         3.333333333333335,
         3.333333333333335
       ],
-      "total_cost": -2.976666666666666,
+      "total_cost": -2.9766666666666666,
       "baseline_cost": 0.36000000000000004
     }
   },
@@ -351,14 +351,14 @@
     },
     "expected": {
       "power_schedule_kw": [
-        -0.40000000000000024,
-        -0.10000000000000005,
+        -0.4,
+        -0.1,
         0.0,
         0.0,
-        -0.0999999999999992,
-        -0.40000000000000024,
-        -0.40000000000000024,
-        -0.40000000000000024
+        -0.1,
+        -0.4,
+        -0.4,
+        -0.4
       ],
       "soc_schedule_kwh": [
         6.0,
@@ -373,6 +373,295 @@
       ],
       "total_cost": -0.4132391624708338,
       "baseline_cost": 0.14999999999999997
+    }
+  },
+  {
+    "name": "grid_cap_binds_on_charge",
+    "description": "Grid cap below the charge rating: with 1 kW of load under a 3 kW cap the charge setpoint may not exceed 2 kW, even though the battery could take 4 kW and the price spread easily justifies it. Pins that the cap bounds the ACTION \u2014 clipping the cost of over-cap import instead made every watt above the cap free.",
+    "config": {
+      "capacity_kwh": 20.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 4.0,
+      "max_discharge_power_kw": 2.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          4.0,
+          0.9487
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          2.0,
+          0.9487
+        ]
+      ],
+      "pv_dc_coupled": false,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 3.0
+    },
+    "inputs": {
+      "soc_kwh": 8.0,
+      "prices": [
+        0.1,
+        0.1,
+        0.1,
+        0.4,
+        0.4,
+        0.4
+      ],
+      "feed_in": [
+        0.08,
+        0.08,
+        0.08,
+        0.35,
+        0.35,
+        0.35
+      ],
+      "pv": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "pv_dc": null,
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.01,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        1.9999999999999993,
+        1.9999999999999993,
+        1.9999999999999993,
+        -1.9999999999999998,
+        -1.9999999999999998,
+        -1.9999999999999998
+      ],
+      "soc_schedule_kwh": [
+        8.0,
+        9.8974,
+        11.794799999999999,
+        13.692199999999998,
+        11.58405200801096,
+        9.475904016021923,
+        7.367756024032886
+      ],
+      "total_cost": -1.1839011054073993,
+      "baseline_cost": 1.5
+    }
+  },
+  {
+    "name": "load_above_grid_cap",
+    "description": "Household load alone exceeds the grid cap, so charging headroom is zero and the import genuinely runs over the connection. Pins that over-cap import is still PRICED: clipping it (as the cost model used to) handed the house free energy and understated the baseline, which is what made over-cap charging look profitable.",
+    "config": {
+      "capacity_kwh": 20.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 2.0,
+      "max_discharge_power_kw": 2.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          2.0,
+          0.9487
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.9487
+        ],
+        [
+          2.0,
+          0.9487
+        ]
+      ],
+      "pv_dc_coupled": false,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 2.0
+    },
+    "inputs": {
+      "soc_kwh": 10.0,
+      "prices": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "feed_in": [
+        0.02,
+        0.02,
+        0.02
+      ],
+      "pv": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        3.0,
+        3.0,
+        3.0
+      ],
+      "pv_dc": null,
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.01,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        -2.0,
+        -2.0,
+        -2.0
+      ],
+      "soc_schedule_kwh": [
+        10.0,
+        7.891852008010963,
+        5.783704016021925,
+        3.6755560240328875
+      ],
+      "total_cost": 1.5297333192790135,
+      "baseline_cost": 4.5
+    }
+  },
+  {
+    "name": "dc_pv_over_charge_rating",
+    "description": "A 4 kW DC array on a 2 kW battery, with worthless export and an expensive evening so the DP wants every kWh it can store. The AC setpoint and the passive MPPT path must SHARE the 2 kW charge budget: without that bound the battery absorbed the AC setpoint and the full DC array on top, charging far past its rating.",
+    "config": {
+      "capacity_kwh": 20.0,
+      "min_soc_percent": 10.0,
+      "max_soc_percent": 90.0,
+      "max_charge_power_kw": 2.0,
+      "max_discharge_power_kw": 2.0,
+      "charge_curve": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          2.0,
+          0.92
+        ]
+      ],
+      "discharge_curve": [
+        [
+          0.0,
+          0.95
+        ],
+        [
+          2.0,
+          0.92
+        ]
+      ],
+      "pv_dc_coupled": true,
+      "pv_dc_efficiency": 0.97,
+      "max_grid_power_kw": 0.0
+    },
+    "inputs": {
+      "soc_kwh": 2.5,
+      "prices": [
+        0.2,
+        0.2,
+        0.2,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "feed_in": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "pv": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "consumption": [
+        0.5,
+        0.5,
+        0.5,
+        1.5,
+        1.5,
+        1.5
+      ],
+      "pv_dc": [
+        4.0,
+        4.0,
+        4.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "step_hours": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "degradation_cost_per_kwh": 0.02,
+      "min_price_spread": 0.05
+    },
+    "expected": {
+      "power_schedule_kw": [
+        0.0,
+        0.0,
+        0.0,
+        -1.5,
+        -1.5,
+        -1.5
+      ],
+      "soc_schedule_kwh": [
+        2.5,
+        4.5,
+        6.5,
+        8.5,
+        6.882749326145553,
+        5.265498652291106,
+        3.6482479784366584
+      ],
+      "total_cost": 0.21703504043126687,
+      "baseline_cost": 2.25
     }
   }
 ]

@@ -17,7 +17,7 @@ from .const import (
 from .helpers import (
     calculate_consumption_pattern,
     calculate_pv_forecast,
-    price_unit_scale_from_state,
+    price_unit_scale,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -651,8 +651,14 @@ class PriceForecastModel:
             # Recorder statistics are in the sensor's native unit. Sensors
             # publishing €/MWh (e.g. OMIE) must be scaled to EUR/kWh so the
             # learned pattern matches the live forecast fed to the optimizer.
-            unit_scale = price_unit_scale_from_state(
-                self.hass.states.get(self.price_sensor_id)
+            # The learned means are passed as samples so a sensor that declares
+            # no unit — or has no state yet when the pattern is rebuilt — is
+            # judged on magnitude, exactly as the live forecast is. Without
+            # that, the model half of a spliced horizon lands a factor 1000
+            # above the live half.
+            unit_scale = price_unit_scale(
+                self.hass.states.get(self.price_sensor_id),
+                [price for _dt, price in price_hourly],
             )
             if unit_scale != 1.0:
                 price_hourly = [(dt, p * unit_scale) for dt, p in price_hourly]
@@ -767,12 +773,26 @@ class PriceForecastModel:
         overall = self._overall_avg or 0.20
 
         def _sharpen(vals: list[float]) -> float:
-            """Return avg ± k×std, direction based on deviation from overall avg."""
-            avg = sum(vals) / len(vals)
-            variance = sum((v - avg) ** 2 for v in vals) / len(vals)
+            """Return avg ± k×std, direction based on deviation from overall avg.
+
+            The amplification is shrunk by (n-1)/n. A bin only needs
+            _MIN_SAMPLES (2) observations to be used, and at n = 2 the spread of
+            two points is not evidence of a peak — it is the difference between
+            two draws. Shrinking towards the plain average there, and relaxing
+            to the full amplification as samples accumulate, keeps the
+            peak/valley structure the sharpening exists for without letting two
+            noisy hours invent one. The sample standard deviation (n-1
+            denominator) is used for the same reason.
+            """
+            n = len(vals)
+            avg = sum(vals) / n
+            if n < 2:
+                return float(avg)
+            variance = sum((v - avg) ** 2 for v in vals) / (n - 1)
             std = variance**0.5
             direction = 1.0 if avg >= overall else -1.0
-            return float(avg + direction * self._STD_AMPLIFICATION * std)
+            shrink = (n - 1) / n
+            return float(avg + direction * self._STD_AMPLIFICATION * shrink * std)
 
         result = []
         for h in range(hours):

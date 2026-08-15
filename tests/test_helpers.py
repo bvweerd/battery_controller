@@ -8,12 +8,21 @@ from custom_components.battery_controller.helpers import (
     clamp,
     safe_float,
     resample_forecast,
+    resample_to_steps,
     calculate_pv_forecast,
     calculate_consumption_pattern,
     extract_pv_forecast_series,
     extract_price_forecast_with_interval,
     extract_price_forecast_with_timestamps,
 )
+from custom_components.battery_controller import helpers as h
+from custom_components.battery_controller.helpers import _poa_irradiance
+from custom_components.battery_controller.helpers import _solar_position
+from custom_components.battery_controller.helpers import extract_price_forecast
+from custom_components.battery_controller.helpers import get_sensor_value
+from homeassistant.util import dt as dt_util
+from zoneinfo import ZoneInfo
+import math
 
 
 class TestClamp:
@@ -237,8 +246,6 @@ class TestExtractPriceForecast:
 
     def test_today_skips_past_hours(self):
         """today attribute must not include already-elapsed hours."""
-        from unittest.mock import patch
-        from homeassistant.util import dt as dt_util
 
         # 24 hourly prices for a full day
         today_prices = [float(i) * 0.01 for i in range(24)]
@@ -264,13 +271,17 @@ class TestExtractPriceForecast:
 
     def test_today_and_tomorrow_combined(self):
         """today[hour:] + tomorrow should be combined correctly."""
-        from unittest.mock import patch
-        from homeassistant.util import dt as dt_util
 
         today_prices = [float(i) for i in range(24)]
         tomorrow_prices = [float(i + 24) for i in range(24)]
         state = self._make_state(
-            attributes={"today": today_prices, "tomorrow": tomorrow_prices}
+            attributes={
+                "today": today_prices,
+                "tomorrow": tomorrow_prices,
+                # Index markers run up to 47, so the sensor must declare its
+                # unit — unitless values that large read as €/MWh.
+                "unit_of_measurement": "EUR/kWh",
+            }
         )
 
         fake_now = dt_util.utcnow().replace(hour=20, minute=0, second=0, microsecond=0)
@@ -291,7 +302,6 @@ class TestExtractPriceForecast:
 
     def _make_15min_raw_today(self, base_dt, count=96):
         """Build a Nordpool-style raw_today with 15-min entries and timestamps."""
-        from datetime import timedelta
 
         entries = []
         for i in range(count):
@@ -411,7 +421,6 @@ class TestExtractPriceForecast:
 
     def test_forecast_prices_15min_detects_interval(self):
         """forecast_prices with 15-min timestamps returns interval=15."""
-        from datetime import timedelta
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
         entries = [
@@ -429,7 +438,7 @@ class TestExtractPriceForecast:
 
     def test_extract_with_timestamps_15min_returns_correct_durations(self):
         """extract_price_forecast_with_timestamps returns interval=15 for 15-min data."""
-        from datetime import timedelta
+
         from custom_components.battery_controller.helpers import (
             compute_step_durations_hours,
         )
@@ -479,18 +488,15 @@ class TestSolarPositionAndPOA:
     """Tests for _solar_position and _poa_irradiance helper functions."""
 
     def _solar_position(self, dt_utc, lat, lon):
-        from custom_components.battery_controller.helpers import _solar_position
 
         return _solar_position(dt_utc, lat, lon)
 
     def _poa_irradiance(self, *args, **kwargs):
-        from custom_components.battery_controller.helpers import _poa_irradiance
 
         return _poa_irradiance(*args, **kwargs)
 
     def test_solar_elevation_summer_noon(self):
         """Sun elevation at solar noon in summer should be positive."""
-        from datetime import timezone
 
         # June 21, solar noon UTC at 52°N, 0°E (longitude 0 → solar time ≈ UTC)
         dt = datetime(2024, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
@@ -499,7 +505,6 @@ class TestSolarPositionAndPOA:
 
     def test_solar_elevation_midnight_negative(self):
         """Sun elevation at midnight should be negative."""
-        from datetime import timezone
 
         dt = datetime(2024, 6, 21, 0, 0, 0, tzinfo=timezone.utc)
         elev, _ = self._solar_position(dt, 52.0, 0.0)
@@ -507,7 +512,6 @@ class TestSolarPositionAndPOA:
 
     def test_solar_afternoon_azimuth_west(self):
         """Afternoon sun should be west of south (azimuth > 180°)."""
-        from datetime import timezone
 
         # 15:00 UTC at 52°N, 0°E
         dt = datetime(2024, 6, 21, 15, 0, 0, tzinfo=timezone.utc)
@@ -517,13 +521,15 @@ class TestSolarPositionAndPOA:
 
     def test_solar_zenith_returns_180_azimuth(self):
         """When sun is near zenith, azimuth should be 180 (fallback)."""
-        from datetime import timezone
 
         # Near-zenith: latitude = declination ~ 23.5°N at summer solstice, local noon
         dt = datetime(2024, 6, 21, 11, 0, 0, tzinfo=timezone.utc)
         elev, azim = self._solar_position(dt, 23.4, 0.0)
-        # At near zenith, azimuth is set to 180 if cos_elev < 1e-6
-        # This may or may not hit the edge case exactly, but elevation should be high
+
+        # High summer sun near solar noon; azimuth stays well-defined and in
+        # range even as the cos(elevation) denominator gets small.
+        assert elev > 70.0
+        assert 0.0 <= azim <= 360.0
 
     def test_poa_zero_when_sun_below_horizon(self):
         """POA irradiance is 0 when sun elevation <= 0."""
@@ -562,9 +568,6 @@ class TestCalculatePvForecastWithPOA:
 
     def test_poa_model_used_when_all_params_provided(self):
         """POA path is used when dni, diffuse, timestamps, lat, lon all provided."""
-        from datetime import timedelta, timezone
-
-        from custom_components.battery_controller.helpers import calculate_pv_forecast
 
         base = datetime(2024, 6, 21, 10, 0, 0, tzinfo=timezone.utc)
         n = 6
@@ -591,9 +594,6 @@ class TestCalculatePvForecastWithPOA:
 
     def test_poa_model_out_of_bounds_appends_zero(self):
         """When timestamps list is shorter than radiation, zeros are appended."""
-        from datetime import timezone
-
-        from custom_components.battery_controller.helpers import calculate_pv_forecast
 
         base = datetime(2024, 6, 21, 10, 0, 0, tzinfo=timezone.utc)
         radiation = [600.0, 700.0, 800.0]
@@ -620,7 +620,6 @@ class TestCalculatePvForecastWithPOA:
 
     def test_non_south_orientation_in_ghi_fallback(self):
         """East-facing panels should get reduced output (GHI fallback)."""
-        from custom_components.battery_controller.helpers import calculate_pv_forecast
 
         east = calculate_pv_forecast([500.0], peak_power_kwp=5.0, orientation_deg=90)
         south = calculate_pv_forecast([500.0], peak_power_kwp=5.0, orientation_deg=180)
@@ -631,15 +630,12 @@ class TestGetSensorValue:
     """Tests for get_sensor_value."""
 
     def test_returns_default_when_no_entity_id(self):
-        from custom_components.battery_controller.helpers import get_sensor_value
 
         hass = object()
         result = get_sensor_value(hass, None, default=5.0)
         assert result == 5.0
 
     def test_returns_default_when_entity_not_found(self):
-        from custom_components.battery_controller.helpers import get_sensor_value
-        from unittest.mock import MagicMock
 
         hass = MagicMock()
         hass.states.get = MagicMock(return_value=None)
@@ -647,8 +643,6 @@ class TestGetSensorValue:
         assert result == 3.0
 
     def test_returns_default_when_unavailable(self):
-        from custom_components.battery_controller.helpers import get_sensor_value
-        from unittest.mock import MagicMock
 
         hass = MagicMock()
         state = MagicMock()
@@ -658,8 +652,6 @@ class TestGetSensorValue:
         assert result == 2.0
 
     def test_returns_sensor_float_value(self):
-        from custom_components.battery_controller.helpers import get_sensor_value
-        from unittest.mock import MagicMock
 
         hass = MagicMock()
         state = MagicMock()
@@ -680,7 +672,6 @@ class TestExtractPriceForecastWithTimestamps:
 
     def test_net_prices_today_with_timestamps(self):
         """net_prices_today with timestamps returns prices and timestamps."""
-        from datetime import timedelta, timezone
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
         entries = [
@@ -725,8 +716,6 @@ class TestExtractPriceForecastWithTimestamps:
 
     def test_today_tomorrow_fallback_with_timestamps(self):
         """today/tomorrow attributes get synthesized timestamps."""
-        from unittest.mock import patch
-        from homeassistant.util import dt as dt_util
 
         today_prices = [float(i) * 0.01 for i in range(24)]
         state = self._make_state(attributes={"today": today_prices})
@@ -749,7 +738,6 @@ class TestExtractPriceForecastWithTimestamps:
 
     def test_raw_today_no_timestamps_index_skip(self):
         """raw_today without timestamps gets synthesized timestamps."""
-        from unittest.mock import patch
 
         raw_today = [{"value": float(i) * 0.01} for i in range(24)]
         state = self._make_state(attributes={"raw_today": raw_today})
@@ -792,10 +780,9 @@ class TestExtractPriceForecastWithTimestamps:
 
 
 class TestNormalizePriceValueEdgeCases:
-    """Cover _normalize_price_value returning None (lines 23-24)."""
+    """Cover _normalize_price_value returning None."""
 
     def _make_state(self, attributes):
-        from unittest.mock import MagicMock
 
         s = MagicMock()
         s.state = "unknown"
@@ -833,11 +820,10 @@ class TestNormalizePriceValueEdgeCases:
 
 
 class TestDetectIntervalWithDatetimeStart:
-    """Cover _detect_interval_from_entries with datetime start objects (line 44)."""
+    """Cover _detect_interval_from_entries with datetime start objects."""
 
     def test_datetime_start_in_entries_detects_15min(self):
         """Entries with datetime (not string) start fields are detected."""
-        from datetime import timedelta, timezone
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
         entries = [
@@ -852,10 +838,9 @@ class TestDetectIntervalWithDatetimeStart:
 
 
 class TestNetPricesTodayPath:
-    """Cover net_prices_today path returning interval_forecast (lines 113-114, 129)."""
+    """Cover net_prices_today path returning interval_forecast (, 129)."""
 
     def _make_state(self, attributes):
-        from unittest.mock import MagicMock
 
         s = MagicMock()
         s.state = "0.20"
@@ -863,12 +848,10 @@ class TestNetPricesTodayPath:
         return s
 
     def test_net_prices_today_with_datetime_start(self):
-        """net_prices_today with datetime start hits lines 113-114 and returns via 129."""
-        from datetime import timedelta, timezone
-        from unittest.mock import patch
+        """net_prices_today with datetime start hits and returns via 129."""
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
-        # datetime start objects (not strings) — covers line 113-114
+        # datetime start objects (not strings) — covers
         entries = [
             {"start": midnight + timedelta(hours=i), "value": 0.10 + i * 0.01}
             for i in range(10)
@@ -897,8 +880,6 @@ class TestNetPricesTodayPath:
 
     def test_net_prices_today_only_string_timestamps(self):
         """net_prices_today with ISO string timestamps returns via line 129."""
-        from datetime import timedelta, timezone
-        from unittest.mock import patch
 
         midnight = datetime(2024, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
         entries = [
@@ -927,10 +908,9 @@ class TestNetPricesTodayPath:
 
 
 class TestGenericForecastAttribute:
-    """Cover generic 'forecast' attribute in extract_price_forecast_with_interval (155-162)."""
+    """Cover generic 'forecast' attribute in extract_price_forecast_with_interval."""
 
     def _make_state(self, attributes):
-        from unittest.mock import MagicMock
 
         s = MagicMock()
         s.state = "unknown"
@@ -946,12 +926,10 @@ class TestGenericForecastAttribute:
 
 
 class TestExtractPriceForecastWrapper:
-    """Cover extract_price_forecast wrapper (lines 213-214)."""
+    """Cover extract_price_forecast wrapper."""
 
     def test_extract_price_forecast_calls_underlying(self):
         """extract_price_forecast is a thin wrapper over _with_interval."""
-        from custom_components.battery_controller.helpers import extract_price_forecast
-        from unittest.mock import MagicMock
 
         state = MagicMock()
         state.state = "0.25"
@@ -961,14 +939,13 @@ class TestExtractPriceForecastWrapper:
 
 
 class TestFillMissingTimestampsAllNone:
-    """Cover _fill_missing_timestamps when all timestamps are None (line 241)."""
+    """Cover _fill_missing_timestamps when all timestamps are None."""
 
     def test_fill_missing_all_none_uses_synthesize(self):
         """When all timestamps are None, synthesize_timestamps is used."""
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_timestamps,
         )
-        from unittest.mock import MagicMock
 
         # net_prices_today with entries that have no parseable start → all timestamps None
         entries = [{"value": 0.10}, {"value": 0.15}, {"value": 0.20}]
@@ -983,12 +960,11 @@ class TestFillMissingTimestampsAllNone:
 
 
 class TestExtendWithTimestampsDatetimeBranch:
-    """Cover _extend_with_timestamps datetime start branch (lines 304-305)."""
+    """Cover _extend_with_timestamps datetime start branch."""
 
     def test_datetime_start_in_net_prices_today_with_timestamps(self):
-        """net_prices_today with datetime start objects hits lines 304-305."""
-        from datetime import timedelta, timezone
-        from unittest.mock import MagicMock, patch
+        """net_prices_today with datetime start objects hits."""
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_timestamps,
         )
@@ -1023,12 +999,11 @@ class TestExtendWithTimestampsDatetimeBranch:
 
 
 class TestRawTomorrowInPriority5WithTimestamps:
-    """Cover raw_tomorrow entries in priority 5 (lines 383-385)."""
+    """Cover raw_tomorrow entries in priority 5."""
 
     def test_raw_tomorrow_appended_in_priority5(self):
         """raw_tomorrow without timestamps is appended in extract_price_forecast_with_timestamps."""
-        from datetime import timezone
-        from unittest.mock import MagicMock, patch
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_timestamps,
         )
@@ -1059,12 +1034,11 @@ class TestRawTomorrowInPriority5WithTimestamps:
 
 
 class TestTodayTomorrowWithTimestamps:
-    """Cover combined.extend(tomorrow_attr) in extract_price_forecast_with_timestamps (line 405)."""
+    """Cover combined.extend(tomorrow_attr) in extract_price_forecast_with_timestamps."""
 
     def test_today_tomorrow_combined_with_timestamps(self):
         """today + tomorrow attributes are combined in extract_price_forecast_with_timestamps."""
-        from datetime import timezone
-        from unittest.mock import MagicMock, patch
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_timestamps,
         )
@@ -1095,11 +1069,11 @@ class TestTodayTomorrowWithTimestamps:
 
 
 class TestComputeStepDurationsSingleEntry:
-    """Cover compute_step_durations_hours with <=1 entries (line 445)."""
+    """Cover compute_step_durations_hours with <=1 entries."""
 
     def test_single_start_time_returns_full_interval(self):
         """A single-entry start_times list returns [full_h]."""
-        from datetime import timezone
+
         from custom_components.battery_controller.helpers import (
             compute_step_durations_hours,
         )
@@ -1110,7 +1084,7 @@ class TestComputeStepDurationsSingleEntry:
 
     def test_empty_start_times_returns_empty(self):
         """Empty start_times returns []."""
-        from datetime import timezone
+
         from custom_components.battery_controller.helpers import (
             compute_step_durations_hours,
         )
@@ -1121,15 +1095,12 @@ class TestComputeStepDurationsSingleEntry:
 
 
 class TestSolarPositionZenith:
-    """Cover _solar_position azimuth=180 fallback when cos_elev < 1e-6 (line 578)."""
+    """Cover _solar_position azimuth=180 fallback when cos_elev < 1e-6."""
 
     def test_zenith_azimuth_fallback(self):
         """When elevation = 90°, azimuth returns 180° (the undefined zenith fallback)."""
-        import math
-        from datetime import timezone
-        from unittest.mock import patch
+
         import custom_components.battery_controller.helpers as helpers_mod
-        from custom_components.battery_controller.helpers import _solar_position
 
         dt = datetime(2024, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
         # Force math.asin to return π/2 so that elevation_deg = 90.0 exactly,
@@ -1145,7 +1116,6 @@ class TestForecastSkipPast:
     """forecast_prices / forecast entries with timestamps skip elapsed periods."""
 
     def _make_entries(self, now):
-        from datetime import timedelta
 
         return [
             {"time": (now - timedelta(hours=2)).isoformat(), "price": 0.10},
@@ -1155,9 +1125,6 @@ class TestForecastSkipPast:
         ]
 
     def test_forecast_prices_skips_elapsed_periods(self, monkeypatch):
-        from datetime import timezone
-
-        from custom_components.battery_controller import helpers as h
 
         now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
         monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
@@ -1175,9 +1142,6 @@ class TestForecastSkipPast:
         assert starts[0] == now
 
     def test_generic_forecast_skips_elapsed_periods(self, monkeypatch):
-        from datetime import timezone
-
-        from custom_components.battery_controller import helpers as h
 
         now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
         monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
@@ -1190,9 +1154,6 @@ class TestForecastSkipPast:
         assert prices == [0.12, 0.13]
 
     def test_plain_value_lists_unchanged(self, monkeypatch):
-        from datetime import timezone
-
-        from custom_components.battery_controller import helpers as h
 
         now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
         monkeypatch.setattr(h.dt_util, "utcnow", lambda: now)
@@ -1211,9 +1172,6 @@ class TestDstSafeSkipIndex:
     def test_25_hour_day_skips_correct_entries(self, monkeypatch):
         """On the DST fall-back day, raw_today has 25 entries; wall-clock 04:30
         is 5.5 elapsed hours, so 5 entries must be skipped (not 4)."""
-        from zoneinfo import ZoneInfo
-
-        from custom_components.battery_controller import helpers as h
 
         tz = ZoneInfo("Europe/Amsterdam")
         # 2026-10-25: EU DST ends, 03:00 -> 02:00 (25-hour day).
@@ -1223,7 +1181,13 @@ class TestDstSafeSkipIndex:
 
         prices = [float(i) for i in range(25)]  # one entry per hour-period
         state = MagicMock()
-        state.attributes = {"raw_today": prices, "raw_tomorrow": []}
+        state.attributes = {
+            "raw_today": prices,
+            "raw_tomorrow": [],
+            # Index markers double as prices here; declare the unit so they are
+            # not mistaken for €/MWh.
+            "unit_of_measurement": "EUR/kWh",
+        }
         state.state = "0.0"
 
         forecast, interval = h.extract_price_forecast_with_interval(state)
@@ -1232,7 +1196,6 @@ class TestDstSafeSkipIndex:
         assert forecast[0] == 5.0
 
     def test_skip_index_helper_normal_day(self):
-        from zoneinfo import ZoneInfo
 
         from custom_components.battery_controller.helpers import (
             _skip_index_since_local_midnight,
@@ -1261,7 +1224,7 @@ class TestOmieHoursDictExtraction:
         }
 
     def test_today_hours_mwh_converted_and_past_skipped(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1282,7 +1245,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.102, 0.103, 0.104, 0.105])
 
     def test_tomorrow_hours_appended(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1299,7 +1262,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.050, 0.051, 0.080, 0.081])
 
     def test_none_values_skipped(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1312,7 +1275,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.060, 0.062])
 
     def test_string_keys_parsed(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1331,7 +1294,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.100, 0.101, 0.102])
 
     def test_quarter_hour_keys_detect_15min_interval(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_timestamps,
         )
@@ -1352,7 +1315,7 @@ class TestOmieHoursDictExtraction:
         assert start_times[0] == now_quarter
 
     def test_no_unit_heuristic_detects_mwh_scale(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1363,7 +1326,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.100, 0.101])
 
     def test_no_unit_kwh_scale_values_unchanged(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1381,7 +1344,7 @@ class TestOmieHoursDictExtraction:
         assert prices == pytest.approx([0.10, 0.25])
 
     def test_kwh_unit_never_scaled(self):
-        from homeassistant.util import dt as dt_util
+
         from custom_components.battery_controller.helpers import (
             extract_price_forecast_with_interval,
         )
@@ -1409,6 +1372,67 @@ class TestOmieHoursDictExtraction:
         prices, _ = extract_price_forecast_with_interval(state)
         # Falls through to current-state fallback
         assert prices == [0.12]
+
+
+class TestPriceUnitScalingAcrossFormats:
+    """Every extraction path converts to EUR/kWh by the same rule.
+
+    Scaling used to live inside the OMIE hour-dict path only, so a €/MWh sensor
+    was handed to the optimizer unscaled through any other attribute — and
+    through the bare state value it falls back to on restart, before its
+    attributes exist.
+    """
+
+    def _make_state(self, attributes, state_value="85.0"):
+        state = MagicMock()
+        state.state = state_value
+        state.attributes = attributes
+        return state
+
+    def test_state_fallback_scales_mwh_unit(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({"unit_of_measurement": "€/MWh"}, state_value="85.0")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.085])
+
+    def test_state_fallback_scales_unitless_mwh_magnitude(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({}, state_value="17.0")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.017])
+
+    def test_raw_today_scales_mwh_unit(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        state = self._make_state(
+            {
+                "unit_of_measurement": "€/MWh",
+                "raw_today": [
+                    {"start": base, "value": 100.0},
+                    {"start": base + timedelta(hours=1), "value": 120.0},
+                ],
+            }
+        )
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.100, 0.120])
+
+    def test_kwh_prices_untouched(self):
+        from custom_components.battery_controller.helpers import (
+            extract_price_forecast_with_interval,
+        )
+
+        state = self._make_state({"forecast_prices": [0.10, 0.15]}, state_value="0.10")
+        prices, _ = extract_price_forecast_with_interval(state)
+        assert prices == pytest.approx([0.10, 0.15])
 
 
 class TestExtractPvForecastSeries:
@@ -1550,3 +1574,87 @@ class TestExtractPvForecastSeries:
             (ts, pytest.approx(3.5)),
             (ts + timedelta(hours=1), pytest.approx(1.5)),
         ]
+
+
+# ---------------------------------------------------------------------------
+# resample_to_steps — time-anchored projection onto the DP step windows
+# ---------------------------------------------------------------------------
+
+
+class TestResampleToSteps:
+    """Tests for resample_to_steps."""
+
+    @staticmethod
+    def _dt(hour, minute=0):
+        return datetime(2026, 3, 21, hour, minute, tzinfo=timezone.utc)
+
+    def test_identical_grid_is_passthrough(self):
+        """Aligned quarter-hour source and quarter-hour steps: values unchanged."""
+        values = [1.0, 2.0, 3.0, 4.0]
+        starts = [self._dt(10, 15 * i) for i in range(4)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [0.25] * 4)
+        assert result == pytest.approx(values)
+
+    def test_hourly_steps_average_quarter_hour_source(self):
+        """One hourly step averages the four quarters it covers."""
+        values = [1.0, 2.0, 3.0, 4.0, 10.0, 10.0, 10.0, 10.0]
+        starts = [self._dt(10), self._dt(11)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [1.0, 1.0])
+        assert result == pytest.approx([2.5, 10.0])
+
+    def test_offset_source_is_not_shifted_onto_later_steps(self):
+        """A source anchored mid-period must not slide onto the next step.
+
+        This is the hourly-price regression: the forecast pipeline anchors to
+        the current quarter (10:30) while DP steps land on hour boundaries.
+        Interval-only resampling built [avg(10:30..11:30), avg(11:30..12:30)]
+        and handed the first entry to the 10:30-11:00 step and the second to
+        the 11:00-12:00 step — a 30-minute shift on every step.
+        """
+        # Quarter-hourly source starting at 10:30.
+        values = [1.0, 1.0, 5.0, 5.0, 5.0, 5.0, 9.0, 9.0]  # 10:30 .. 12:30
+        # Step 0 is the remainder of the current hour, then full hours.
+        starts = [self._dt(10, 30), self._dt(11), self._dt(12)]
+        result = resample_to_steps(
+            values, self._dt(10, 30), 15, starts, [0.5, 1.0, 1.0]
+        )
+        # 10:30-11:00 -> 1.0, 11:00-12:00 -> 5.0, 12:00-12:30 -> 9.0 (partial)
+        assert result == pytest.approx([1.0, 5.0, 9.0])
+
+    def test_partial_first_step_takes_only_its_own_window(self):
+        """A one-minute step 0 reads the value covering that minute, not an hour."""
+        values = [2.0, 8.0]  # two hourly values from 10:00
+        starts = [self._dt(10, 59), self._dt(11)]
+        result = resample_to_steps(values, self._dt(10), 60, starts, [1 / 60.0, 1.0])
+        assert result == pytest.approx([2.0, 8.0])
+
+    def test_stops_at_end_of_source(self):
+        """Steps beyond the source horizon are not produced (caller pads)."""
+        values = [1.0, 2.0]
+        starts = [self._dt(10) + timedelta(minutes=15 * i) for i in range(6)]
+        result = resample_to_steps(values, self._dt(10), 15, starts, [0.25] * 6)
+        assert result == pytest.approx([1.0, 2.0])
+
+    def test_source_entirely_after_horizon_returns_empty(self):
+        """No overlap at all yields an empty list so the caller can fall back."""
+        values = [0.10, 0.10]
+        starts = [self._dt(10), self._dt(11)]
+        result = resample_to_steps(
+            values, self._dt(10) + timedelta(days=1), 15, starts, [1.0, 1.0]
+        )
+        assert result == []
+
+    def test_empty_inputs(self):
+        assert resample_to_steps([], self._dt(10), 15, [self._dt(10)], [0.25]) == []
+        assert resample_to_steps([1.0], self._dt(10), 15, [], []) == []
+        assert resample_to_steps([1.0], self._dt(10), 0, [self._dt(10)], [0.25]) == []
+
+    def test_is_mean_preserving_for_power(self):
+        """Total energy over the covered span is preserved."""
+        values = [0.0, 1.0, 3.0, 4.0, 2.0, 0.0, 0.0, 0.0]
+        starts = [self._dt(10), self._dt(11)]
+        durations = [1.0, 1.0]
+        result = resample_to_steps(values, self._dt(10), 15, starts, durations)
+        source_kwh = sum(values) * 0.25
+        step_kwh = sum(v * d for v, d in zip(result, durations))
+        assert step_kwh == pytest.approx(source_kwh)

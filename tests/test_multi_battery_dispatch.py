@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from custom_components.battery_controller.battery_dispatch import BatteryDispatcher
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
     BatteryState,
@@ -34,14 +35,16 @@ def _battery(max_charge_kw: float = 5.0, max_discharge_kw: float = 5.0):
 
 
 def _with_batteries(coord, batteries: dict[str, tuple[BatteryConfig, float]]):
-    """Attach battery configs and their current SoC to the coordinator."""
-    coord._individual_battery_configs = [
-        (sid, cfg) for sid, (cfg, _) in batteries.items()
-    ]
-    coord._per_battery_states = {
+    """Return a dispatcher loaded with these battery configs and their SoC.
+
+    ``coord`` is accepted (and ignored) so the existing call sites read
+    unchanged; dispatch lives in BatteryDispatcher, not on the coordinator.
+    """
+    dispatcher = BatteryDispatcher([(sid, cfg) for sid, (cfg, _) in batteries.items()])
+    dispatcher.states = {
         sid: BatteryState(soc_kwh=soc) for sid, (_, soc) in batteries.items()
     }
-    return coord
+    return dispatcher
 
 
 # --------------------------------------------------------------------------
@@ -61,7 +64,7 @@ def test_split_charge_is_proportional_to_headroom(optimization_coordinator):
     )
 
     # Headroom is 7.0 and 1.0 kWh, so 4 kW splits 7:1.
-    result = coord._proportional_split(4.0, coord._individual_battery_configs)
+    result = coord._proportional_split(4.0, coord.configs)
 
     assert result["bat1"] == pytest.approx(3.5)
     assert result["bat2"] == pytest.approx(0.5)
@@ -76,7 +79,7 @@ def test_split_discharge_is_proportional_to_stored_energy(optimization_coordinat
     )
 
     # Available energy is 1.0 and 7.0 kWh, so -4 kW splits 1:7.
-    result = coord._proportional_split(-4.0, coord._individual_battery_configs)
+    result = coord._proportional_split(-4.0, coord.configs)
 
     assert result["bat1"] == pytest.approx(-0.5)
     assert result["bat2"] == pytest.approx(-3.5)
@@ -96,7 +99,7 @@ def test_split_redistributes_power_limited_overflow(optimization_coordinator):
 
     # By headroom bat1 would take 3.5 kW; it is capped at 1.0 and the
     # remaining 2.5 kW moves to bat2 on the next round.
-    result = coord._proportional_split(4.0, coord._individual_battery_configs)
+    result = coord._proportional_split(4.0, coord.configs)
 
     assert result["bat1"] == pytest.approx(1.0)
     assert result["bat2"] == pytest.approx(3.0)
@@ -110,7 +113,7 @@ def test_split_gives_nothing_to_a_full_battery_when_charging(optimization_coordi
         {"bat1": (_battery(), 9.0), "bat2": (_battery(), 2.0)},
     )
 
-    result = coord._proportional_split(3.0, coord._individual_battery_configs)
+    result = coord._proportional_split(3.0, coord.configs)
 
     assert result["bat1"] == pytest.approx(0.0)
     assert result["bat2"] == pytest.approx(3.0)
@@ -123,7 +126,7 @@ def test_split_of_zero_returns_zero_for_every_battery(optimization_coordinator):
         {"bat1": (_battery(), 2.0), "bat2": (_battery(), 8.0)},
     )
 
-    result = coord._proportional_split(0.0, coord._individual_battery_configs)
+    result = coord._proportional_split(0.0, coord.configs)
 
     assert result == {"bat1": 0.0, "bat2": 0.0}
 
@@ -179,13 +182,13 @@ def test_selection_holds_the_current_battery_within_hysteresis(
         optimization_coordinator,
         {"bat1": (_battery(), 5.0), "bat2": (_battery(), 5.24)},
     )
-    coord._zero_grid_active_battery = "bat2"
+    coord.zero_grid_active = "bat2"
 
     # bat1 scores 0.03 better, under the 0.05 hysteresis band.
     rel_socs = {"bat1": 0.50, "bat2": 0.53}
 
     assert coord._select_active_battery(1.0, rel_socs, MODE_HYBRID) == "bat2"
-    assert coord._zero_grid_active_battery == "bat2"
+    assert coord.zero_grid_active == "bat2"
 
 
 def test_selection_switches_once_hysteresis_is_exceeded(optimization_coordinator):
@@ -194,13 +197,13 @@ def test_selection_switches_once_hysteresis_is_exceeded(optimization_coordinator
         optimization_coordinator,
         {"bat1": (_battery(), 5.0), "bat2": (_battery(), 2.6)},
     )
-    coord._zero_grid_active_battery = "bat2"
+    coord.zero_grid_active = "bat2"
 
     # bat1 scores 0.30 better, well past the band.
     rel_socs = {"bat1": 0.50, "bat2": 0.20}
 
     assert coord._select_active_battery(1.0, rel_socs, MODE_HYBRID) == "bat1"
-    assert coord._zero_grid_active_battery == "bat1"
+    assert coord.zero_grid_active == "bat1"
 
 
 def test_realtime_and_scheduled_selection_track_separately(optimization_coordinator):
@@ -214,8 +217,8 @@ def test_realtime_and_scheduled_selection_track_separately(optimization_coordina
     coord._select_active_battery(1.0, rel_socs, MODE_HYBRID)
     coord._select_active_battery(1.0, rel_socs, MODE_FOLLOW_SCHEDULE)
 
-    assert coord._zero_grid_active_battery == "bat2"
-    assert coord._scheduled_active_battery == "bat1"
+    assert coord.zero_grid_active == "bat2"
+    assert coord.scheduled_active == "bat1"
 
 
 # --------------------------------------------------------------------------

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from .const import (
+    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+)
 from .efficiency_curve import (
     EfficiencyCurve,
     aggregate_curves,
@@ -201,100 +206,6 @@ class BatteryConfig:
         )
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> BatteryConfig:
-        """Create BatteryConfig from Home Assistant config dict."""
-        from .const import (
-            CONF_CAPACITY_KWH,
-            CONF_CHARGE_EFFICIENCY_CURVE,
-            CONF_DISCHARGE_EFFICIENCY_CURVE,
-            CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
-            CONF_HIGH_SOC_MAX_CHARGE_KW,
-            CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
-            CONF_LOW_SOC_MAX_DISCHARGE_KW,
-            CONF_MAX_CHARGE_POWER_KW,
-            CONF_MAX_DISCHARGE_POWER_KW,
-            CONF_MAX_GRID_POWER_KW,
-            CONF_MAX_SOC_PERCENT,
-            CONF_MIN_SOC_PERCENT,
-            CONF_PV_DC_COUPLED,
-            CONF_PV_DC_EFFICIENCY,
-            CONF_PV_DC_PEAK_POWER_KWP,
-            CONF_ROUND_TRIP_EFFICIENCY,
-            CONF_USABLE_CAPACITY_KWH,
-            DEFAULT_CAPACITY_KWH,
-            DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
-            DEFAULT_HIGH_SOC_MAX_CHARGE_KW,
-            DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
-            DEFAULT_LOW_SOC_MAX_DISCHARGE_KW,
-            DEFAULT_MAX_CHARGE_POWER_KW,
-            DEFAULT_MAX_DISCHARGE_POWER_KW,
-            DEFAULT_MAX_GRID_POWER_KW,
-            DEFAULT_MAX_SOC_PERCENT,
-            DEFAULT_MIN_SOC_PERCENT,
-            DEFAULT_PV_DC_COUPLED,
-            DEFAULT_PV_DC_EFFICIENCY,
-            DEFAULT_PV_DC_PEAK_POWER_KWP,
-            DEFAULT_ROUND_TRIP_EFFICIENCY,
-        )
-
-        # Backward compat: if new curve keys absent, derive flat curves from scalar RTE
-        rte = float(
-            config.get(CONF_ROUND_TRIP_EFFICIENCY, DEFAULT_ROUND_TRIP_EFFICIENCY)
-        )
-        sqrt_rte_str = f"{math.sqrt(rte):.6f}"
-        charge_curve_str = config.get(CONF_CHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
-        discharge_curve_str = config.get(CONF_DISCHARGE_EFFICIENCY_CURVE, sqrt_rte_str)
-
-        return cls(
-            capacity_kwh=float(config.get(CONF_CAPACITY_KWH, DEFAULT_CAPACITY_KWH)),
-            usable_capacity_kwh=config.get(CONF_USABLE_CAPACITY_KWH),
-            max_charge_power_kw=float(
-                config.get(CONF_MAX_CHARGE_POWER_KW, DEFAULT_MAX_CHARGE_POWER_KW)
-            ),
-            max_discharge_power_kw=float(
-                config.get(CONF_MAX_DISCHARGE_POWER_KW, DEFAULT_MAX_DISCHARGE_POWER_KW)
-            ),
-            charge_efficiency_curve=charge_curve_str,
-            discharge_efficiency_curve=discharge_curve_str,
-            min_soc_percent=float(
-                config.get(CONF_MIN_SOC_PERCENT, DEFAULT_MIN_SOC_PERCENT)
-            ),
-            max_soc_percent=float(
-                config.get(CONF_MAX_SOC_PERCENT, DEFAULT_MAX_SOC_PERCENT)
-            ),
-            pv_dc_coupled=bool(config.get(CONF_PV_DC_COUPLED, DEFAULT_PV_DC_COUPLED)),
-            pv_dc_peak_power_kwp=float(
-                config.get(CONF_PV_DC_PEAK_POWER_KWP, DEFAULT_PV_DC_PEAK_POWER_KWP)
-            ),
-            pv_dc_efficiency=float(
-                config.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY)
-            ),
-            max_grid_power_kw=float(
-                config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
-            ),
-            high_soc_charge_threshold_pct=float(
-                config.get(
-                    CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
-                    DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT,
-                )
-            ),
-            high_soc_max_charge_kw=float(
-                config.get(CONF_HIGH_SOC_MAX_CHARGE_KW, DEFAULT_HIGH_SOC_MAX_CHARGE_KW)
-            ),
-            low_soc_discharge_threshold_pct=float(
-                config.get(
-                    CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
-                    DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
-                )
-            ),
-            low_soc_max_discharge_kw=float(
-                config.get(
-                    CONF_LOW_SOC_MAX_DISCHARGE_KW, DEFAULT_LOW_SOC_MAX_DISCHARGE_KW
-                )
-            ),
-        )
-
-    @classmethod
     def _from_aggregated(
         cls,
         *,
@@ -351,7 +262,10 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     if not configs:
         return BatteryConfig()
     if len(configs) == 1:
-        return configs[0]
+        # Deep-copied, not returned as-is: the caller overlays entry-level
+        # settings (DC coupling, grid cap) onto the aggregate, and sharing the
+        # object would mutate the single battery's own config through it.
+        return copy.deepcopy(configs[0])
 
     total_cap = sum(c.capacity_kwh for c in configs)
 
@@ -375,36 +289,88 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     combined_min_pct = total_min_kwh / total_cap * 100.0
     combined_max_pct = total_max_kwh / total_cap * 100.0
 
-    # DC PV: aggregate across all batteries
-    dc_configs = [c for c in configs if c.pv_dc_coupled]
-    pv_dc_coupled = bool(dc_configs)
+    # DC PV: aggregate across all batteries.
+    #
+    # pv_dc_coupled is an entry-level flag (it lives on the PV-array subentries)
+    # that the caller overlays afterwards, so it is never set on the inputs
+    # here.  The MPPT efficiency, by contrast, IS configured per battery
+    # subentry.  Weighting it by pv_dc_peak_power_kwp — also unset on battery
+    # subentries — therefore always found a zero total and silently fell back
+    # to the hard-coded default, discarding the configured values whenever more
+    # than one battery was present (a single battery kept them, because that
+    # path returns the config unchanged).  Weight by usable capacity instead:
+    # it is always populated, and it is what determines how much DC PV each
+    # inverter can actually absorb.
+    pv_dc_coupled = any(c.pv_dc_coupled for c in configs)
     pv_dc_peak = sum(c.pv_dc_peak_power_kwp for c in configs)
+    eff_weights = [max(0.0, c.max_soc_kwh - c.min_soc_kwh) for c in configs]
+    total_eff_weight = sum(eff_weights)
     pv_dc_eff = (
-        sum(c.pv_dc_efficiency * c.pv_dc_peak_power_kwp for c in dc_configs)
-        / sum(c.pv_dc_peak_power_kwp for c in dc_configs)
-        if dc_configs and sum(c.pv_dc_peak_power_kwp for c in dc_configs) > 0
-        else 0.97
+        sum(c.pv_dc_efficiency * w for c, w in zip(configs, eff_weights))
+        / total_eff_weight
+        if total_eff_weight > 0
+        else sum(c.pv_dc_efficiency for c in configs) / len(configs)
     )
 
-    # Feed-in cap: sum of individual caps (0 = unlimited for any → unlimited overall)
+    # Grid cap: sum of individual caps (0 = unlimited for any → unlimited
+    # overall). In the integration this is always overwritten afterwards by
+    # OptimizationCoordinator._apply_entry_level_config, because the cap is a
+    # property of the house connection rather than of any battery; the
+    # aggregation below only matters to direct callers of this function.
     feed_in_caps = [c.max_grid_power_kw for c in configs]
     combined_feed_in_kw = (
         0.0 if any(cap == 0.0 for cap in feed_in_caps) else sum(feed_in_caps)
     )
 
-    # SoC-dependent derating: capacity-weighted average thresholds, summed derated powers.
-    # If no battery has derating configured (kw == 0), the combined value is also 0
-    # (disabled), so defaults are preserved correctly.
-    combined_high_threshold = (
-        sum(c.high_soc_charge_threshold_pct * c.capacity_kwh for c in configs)
-        / total_cap
-    )
-    combined_high_max_charge_kw = sum(c.high_soc_max_charge_kw for c in configs)
-    combined_low_threshold = (
-        sum(c.low_soc_discharge_threshold_pct * c.capacity_kwh for c in configs)
-        / total_cap
-    )
-    combined_low_max_discharge_kw = sum(c.low_soc_max_discharge_kw for c in configs)
+    # SoC-dependent derating.  The fleet is assumed to sit at a common relative
+    # SoC, so above the fleet threshold the combined limit is the sum of what
+    # each battery can still do there: its own derated limit if it derates,
+    # its full rating if it does not.
+    #
+    # The threshold is the FIRST one reached (lowest for charge, highest for
+    # discharge), not a capacity-weighted average.  Averaging mixed the
+    # thresholds of batteries that derate with the disabling sentinels of
+    # batteries that do not (100 % / 0 %), and pairing that average with a sum
+    # of only the derated powers capped the whole fleet at one battery's
+    # reduced rating — a 5 kW pack without derating lost 5 kW of charge power
+    # because its neighbour throttles above 90 %.  Applying the first
+    # threshold to the summed per-battery limits is conservative in timing
+    # (derating may start slightly early for some packs) but never understates
+    # the power the fleet can deliver.
+    charge_derated = [c for c in configs if c.high_soc_max_charge_kw > 0]
+    if charge_derated:
+        combined_high_threshold = min(
+            c.high_soc_charge_threshold_pct for c in charge_derated
+        )
+        combined_high_max_charge_kw = sum(
+            c.high_soc_max_charge_kw
+            if c.high_soc_max_charge_kw > 0
+            else c.max_charge_power_kw
+            for c in configs
+        )
+    else:
+        # No battery derates: keep the disabled sentinel (kw == 0) so
+        # max_charge_at_soc returns the nominal rating at every SoC, and the
+        # sentinel threshold to match. A capacity-weighted average of the
+        # per-battery thresholds used to be computed here, which read as if it
+        # mattered — max_charge_at_soc never looks at it while the kW limit is 0.
+        combined_high_threshold = DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT
+        combined_high_max_charge_kw = 0.0
+
+    discharge_derated = [c for c in configs if c.low_soc_max_discharge_kw > 0]
+    if discharge_derated:
+        combined_low_threshold = max(
+            c.low_soc_discharge_threshold_pct for c in discharge_derated
+        )
+        combined_low_max_discharge_kw = sum(
+            c.low_soc_max_discharge_kw
+            if c.low_soc_max_discharge_kw > 0
+            else c.max_discharge_power_kw
+            for c in configs
+        )
+    else:
+        combined_low_threshold = DEFAULT_LOW_SOC_DISCHARGE_THRESHOLD_PCT
+        combined_low_max_discharge_kw = 0.0
 
     return BatteryConfig._from_aggregated(
         capacity_kwh=total_cap,
@@ -434,40 +400,3 @@ class BatteryState:
     power_kw: float = 0.0
     mode: str = "idle"  # 'idle', 'charging', 'discharging'
     cycles_today: float = 0.0
-
-    @classmethod
-    def from_soc_kwh(cls, soc_kwh: float, capacity_kwh: float) -> BatteryState:
-        """Create BatteryState from SoC in kWh."""
-        soc_percent = (soc_kwh / capacity_kwh) * 100.0 if capacity_kwh > 0 else 0.0
-        return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)
-
-    @classmethod
-    def from_soc_percent(cls, soc_percent: float, capacity_kwh: float) -> BatteryState:
-        """Create BatteryState from SoC in percent."""
-        soc_kwh = (soc_percent / 100.0) * capacity_kwh
-        return cls(soc_kwh=soc_kwh, soc_percent=soc_percent)
-
-
-def calculate_degradation_cost_per_kwh(
-    replacement_cost_per_kwh: float = 500.0,
-    lifecycle_cycles: int = 6000,
-    dod_factor: float = 0.8,
-) -> float:
-    """Calculate degradation cost per kWh throughput.
-
-    Args:
-        replacement_cost_per_kwh: Battery replacement cost per kWh capacity
-        lifecycle_cycles: Number of cycles at given DoD
-        dod_factor: Depth of discharge factor (0-1)
-
-    Returns:
-        Degradation cost per kWh throughput (EUR/kWh)
-    """
-    # Cost per cycle = replacement_cost / lifecycle_cycles
-    cost_per_cycle = replacement_cost_per_kwh / lifecycle_cycles
-
-    # Energy per cycle = 2 * capacity * DoD (charge + discharge)
-    # Cost per kWh = cost_per_cycle / (2 * DoD)
-    cost_per_kwh = cost_per_cycle / (2 * dod_factor)
-
-    return cost_per_kwh

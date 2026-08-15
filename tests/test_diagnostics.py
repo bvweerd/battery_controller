@@ -9,10 +9,45 @@ import pytest
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from custom_components.battery_controller import const
 from custom_components.battery_controller.diagnostics import (
+    TO_REDACT,
     async_get_config_entry_diagnostics,
 )
 from custom_components.battery_controller.__init__ import BatteryControllerData
+
+
+def test_every_sensor_config_key_is_redacted() -> None:
+    """No config key holding an entity ID may leak into diagnostics.
+
+    Diagnostics are routinely pasted into public issue trackers, and the redact
+    list is maintained by hand, so it silently fell behind: it once carried a
+    key name that did not exist while eight real ones were missing. Derive the
+    expectation from const.py so adding a sensor option cannot repeat that.
+    """
+    sensor_keys = {
+        value
+        for name, value in vars(const).items()
+        if name.startswith("CONF_")
+        and isinstance(value, str)
+        and (name.endswith("_SENSOR") or name.endswith("_SENSORS"))
+    }
+    assert sensor_keys, "no sensor config keys discovered — check the naming rule"
+    assert sensor_keys <= TO_REDACT, (
+        f"unredacted sensor config keys: {sorted(sensor_keys - TO_REDACT)}"
+    )
+
+
+def test_redact_list_has_no_dead_entries() -> None:
+    """Every redacted key must correspond to a real config key."""
+    all_conf_values = {
+        value
+        for name, value in vars(const).items()
+        if name.startswith("CONF_") and isinstance(value, str)
+    }
+    assert TO_REDACT <= all_conf_values, (
+        f"redact entries matching no config key: {sorted(TO_REDACT - all_conf_values)}"
+    )
 
 
 @pytest.fixture
@@ -163,7 +198,7 @@ async def test_diagnostics_missing_runtime_data(
 async def test_diagnostics_entity_state_none(
     hass: HomeAssistant, mock_config_entry: MagicMock
 ):
-    """Test diagnostics when hass.states.get returns None for an entity (lines 212-213)."""
+    """Test diagnostics when hass.states.get returns None for an entity."""
     mock_config_entry.runtime_data = None
     if hasattr(mock_config_entry, "runtime_data"):
         del mock_config_entry.runtime_data
@@ -189,3 +224,109 @@ async def test_diagnostics_entity_state_none(
 
     assert diagnostics["entities"][0]["state"] is None
     assert diagnostics["entities"][0]["attributes"] == {}
+
+
+async def test_diagnostics_carries_the_calibration_report(
+    hass: HomeAssistant, mock_config_entry: MagicMock
+):
+    """The learned calibration is the whole reason this dump gets requested.
+
+    Without it in the diagnostics there is no way — short of reading the
+    .storage files by hand — to see whether the integration has learned
+    anything about this installation, or why it has not.
+    """
+    mock_config_entry.subentries = {
+        "pv1": MagicMock(title="South Array", subentry_type="pv", data={}),
+        "bat1": MagicMock(title="Marstek", subentry_type="battery", data={}),
+    }
+
+    weather_coord = MagicMock()
+    weather_coord.data = None
+
+    forecast_coord = MagicMock()
+    forecast_coord.data = {
+        "pv_calibration": {
+            "pv1": {
+                "correction": 0.87,
+                "samples": 64,
+                "applied": True,
+                "last_result": "sampled",
+            }
+        },
+        "timestamp": "2024-01-01T00:00:00",
+    }
+    forecast_coord.last_update_success = True
+    del forecast_coord.consumption_model
+
+    optimization_coord = MagicMock()
+    optimization_coord.data = {
+        "charge_eff_correction": 0.94,
+        "charge_eff_samples": 12,
+        "charge_eff_applied": True,
+        "charge_eff_last_result": "sampled",
+        "discharge_eff_correction": 1.0,
+        "discharge_eff_samples": 0,
+        "discharge_eff_applied": False,
+        "discharge_eff_last_result": "dc_coupled_pv",
+        "battery_calibration": {
+            "bat1": {
+                "name": "Marstek",
+                "charge": {
+                    "correction": 0.88,
+                    "samples": 12,
+                    "applied": True,
+                    "last_result": "sampled",
+                },
+                "discharge": {
+                    "correction": 1.0,
+                    "samples": 0,
+                    "applied": False,
+                    "last_result": "battery_not_dispatched",
+                },
+            }
+        },
+        "timestamp": "2024-01-01T00:00:00",
+    }
+    optimization_coord.last_update_success = True
+    optimization_coord.battery_config = MagicMock(charge_efficiency=0.95)
+
+    mock_config_entry.runtime_data = BatteryControllerData(
+        weather_coordinator=weather_coord,
+        forecast_coordinator=forecast_coord,
+        optimization_coordinator=optimization_coord,
+        config={},
+        device=MagicMock(),
+        battery_devices={},
+        pv_devices={},
+    )
+
+    with patch("homeassistant.helpers.entity_registry.async_get") as mock_er_get:
+        mock_er_get.return_value = MagicMock()
+        with patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_config_entry"
+        ) as mock_entries:
+            mock_entries.return_value = []
+            diagnostics = await async_get_config_entry_diagnostics(
+                hass, mock_config_entry
+            )
+
+    opt = diagnostics["optimization"]
+    assert opt["charge_eff_correction"] == 0.94
+    assert opt["charge_eff_applied"] is True
+    # A correction of 1.0 with no samples is not a clean bill of health, and the
+    # reason travels with it so the reader can tell the difference.
+    assert opt["discharge_eff_samples"] == 0
+    assert opt["discharge_eff_last_result"] == "dc_coupled_pv"
+
+    # Keyed by the array's title, not its opaque subentry ID.
+    pv_cal = diagnostics["forecast"]["pv_calibration"]
+    assert pv_cal["South Array"]["correction"] == 0.87
+    assert pv_cal["South Array"]["samples"] == 64
+
+    # The fleet figures above are an average; only the per-battery report can
+    # show that this pack is the one that has derated.
+    battery_cal = opt["battery_calibration"]
+    assert battery_cal["Marstek"]["charge"]["correction"] == 0.88
+    assert (
+        battery_cal["Marstek"]["discharge"]["last_result"] == "battery_not_dispatched"
+    )

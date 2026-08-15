@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,11 +11,17 @@ import pytest
 
 from custom_components.battery_controller.const import (
     CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_PV_MEASURED_PRODUCTION_SENSOR,
+    PV_CALIBRATION_MIN_SAMPLES,
 )
 from custom_components.battery_controller.coordinator_forecast import (
+    PV_CAL_CURTAILED,
+    PV_CAL_METER_RESET,
+    PV_CAL_NO_MEASURED_SENSOR,
+    PV_CAL_SAMPLED,
     ForecastCoordinator,
-    _battery_energy_sensors,
 )
+from custom_components.battery_controller.helpers import battery_energy_sensor_ids
 
 
 def _minimal_config(pv_arrays=None, battery_subentries=None):
@@ -189,7 +196,12 @@ async def test_async_shutdown_without_unsub(hass):
         coord = ForecastCoordinator(hass, weather_coord, config)
 
     coord._unsub_pattern_refresh = None
-    await coord.async_shutdown()  # Should not raise
+
+    await coord.async_shutdown()
+
+    # Nothing was registered, so nothing had to be released.
+    assert coord._unsub_pattern_refresh is None
+    assert coord._unsub_weather is None
 
 
 @pytest.mark.asyncio
@@ -291,7 +303,7 @@ async def test_handle_pattern_refresh(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_time_shifted_forecast(hass):
-    """When weather data is older than 0 hours, forecasts are shifted (lines 152-163)."""
+    """When weather data is older than 0 hours, forecasts are shifted."""
     config = _minimal_config()
 
     # Weather data from 2 hours ago — hours_elapsed = 2
@@ -340,7 +352,7 @@ async def test_async_update_data_time_shifted_forecast(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_ac_pv_model(hass):
-    """ForecastCoordinator processes AC PV arrays in _async_update_data (lines 189-202)."""
+    """ForecastCoordinator processes AC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_ac_1",
@@ -394,7 +406,7 @@ async def test_async_update_data_with_ac_pv_model(hass):
 
 @pytest.mark.asyncio
 async def test_async_update_data_with_dc_pv_model(hass):
-    """ForecastCoordinator processes DC PV arrays in _async_update_data (lines 213-226)."""
+    """ForecastCoordinator processes DC PV arrays in _async_update_data."""
     pv_arrays = [
         {
             "subentry_id": "pv_dc_1",
@@ -1207,44 +1219,500 @@ class TestBatteryEnergySensors:
     """Collecting the per-subentry battery energy counters."""
 
     def test_empty_without_subentries(self):
-        assert (
-            _battery_energy_sensors(
-                _minimal_config(), CONF_BATTERY_ENERGY_CHARGED_SENSOR
-            )
-            == []
-        )
+        assert battery_energy_sensor_ids([], CONF_BATTERY_ENERGY_CHARGED_SENSOR) == []
 
     def test_collects_one_per_subentry(self):
-        config = _minimal_config(
-            battery_subentries=[
-                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
-                ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_b_in"}),
-            ]
-        )
-        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
+        subentries = [
+            ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
+            ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_b_in"}),
+        ]
+        assert battery_energy_sensor_ids(
+            subentries, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+        ) == [
             "sensor.pack_a_in",
             "sensor.pack_b_in",
         ]
 
     def test_skips_subentries_without_the_sensor(self):
-        config = _minimal_config(
-            battery_subentries=[
-                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
-                ("b", {}),
-            ]
-        )
-        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
-            "sensor.pack_a_in"
+        subentries = [
+            ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.pack_a_in"}),
+            ("b", {}),
         ]
+        assert battery_energy_sensor_ids(
+            subentries, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+        ) == ["sensor.pack_a_in"]
 
     def test_deduplicates_a_shared_inverter_counter(self):
         """One inverter counter selected on several packs must count once."""
-        config = _minimal_config(
-            battery_subentries=[
-                ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
-                ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
-            ]
-        )
-        assert _battery_energy_sensors(config, CONF_BATTERY_ENERGY_CHARGED_SENSOR) == [
-            "sensor.inverter_in"
+        subentries = [
+            ("a", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
+            ("b", {CONF_BATTERY_ENERGY_CHARGED_SENSOR: "sensor.inverter_in"}),
         ]
+        assert battery_energy_sensor_ids(
+            subentries, CONF_BATTERY_ENERGY_CHARGED_SENSOR
+        ) == ["sensor.inverter_in"]
+
+
+# ---------------------------------------------------------------------------
+# Per-array PV forecast calibration
+# ---------------------------------------------------------------------------
+
+
+def _pv_array(sid="pv1", kwp=4.0, measured="sensor.pv1_energy", dc=False):
+    return {
+        "subentry_id": sid,
+        "peak_power_kwp": kwp,
+        "orientation": 180.0,
+        "tilt": 35.0,
+        "efficiency_factor": 0.85,
+        "dc_coupled": dc,
+        CONF_PV_MEASURED_PRODUCTION_SENSOR: measured,
+    }
+
+
+def _make_cal_coordinator(hass, pv_arrays=None, legacy_pv_sensors=None):
+    weather_coord = MagicMock()
+    weather_coord.data = None
+    config = _minimal_config(pv_arrays=pv_arrays or [_pv_array()])
+    config["pv_production_sensors"] = legacy_pv_sensors or []
+    with patch(
+        "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+        return_value=_make_mock_consumption(),
+    ):
+        return ForecastCoordinator(hass, weather_coord, config)
+
+
+@pytest.mark.asyncio
+async def test_measured_sensor_joins_the_reconstruction_without_migration(hass):
+    """The per-array sensor is additive: the legacy list keeps working as-is."""
+    weather_coord = MagicMock()
+    weather_coord.data = None
+    config = _minimal_config(pv_arrays=[_pv_array(measured="sensor.pv1_energy")])
+    config["pv_production_sensors"] = ["sensor.legacy_total"]
+
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _make_mock_consumption()
+
+    with patch(
+        "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+        side_effect=_capture,
+    ):
+        ForecastCoordinator(hass, weather_coord, config)
+
+    assert captured["pv_production_sensors"] == [
+        "sensor.legacy_total",
+        "sensor.pv1_energy",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_measured_sensor_is_deduplicated_against_the_legacy_list(hass):
+    """The same entity configured in both places must be counted once."""
+    weather_coord = MagicMock()
+    weather_coord.data = None
+    config = _minimal_config(pv_arrays=[_pv_array(measured="sensor.shared")])
+    config["pv_production_sensors"] = ["sensor.shared"]
+
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _make_mock_consumption()
+
+    with patch(
+        "custom_components.battery_controller.coordinator_forecast.ConsumptionForecastModel",
+        side_effect=_capture,
+    ):
+        ForecastCoordinator(hass, weather_coord, config)
+
+    assert captured["pv_production_sensors"] == ["sensor.shared"]
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_learns_an_energy_weighted_gain(hass):
+    """A systematically over-forecast array converges on the measured ratio."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    step_h = 0.25
+    meter = 100.0
+
+    # Enough quarter-hours to clear the floor, each delivering 80 % of forecast.
+    for i in range(PV_CALIBRATION_MIN_SAMPLES + 10):
+        forecast_kw = 2.0  # 50 % of the 4 kWp rating: inside the sampling band
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": forecast_kw * step_h},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.8 * forecast_kw * step_h
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+
+    assert coord.pv_correction("pv1") == pytest.approx(0.8, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_waits_for_enough_samples(hass):
+    """Below the sample floor no correction is applied at all."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    meter = 100.0
+    for _ in range(5):
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": 0.5},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.4
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+
+    assert coord.pv_sample_count("pv1") == 5
+    assert coord.pv_correction("pv1") == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_skipped_while_curtailed(hass):
+    """Deliberately suppressed production is not a forecast error."""
+    coord = _make_cal_coordinator(hass)
+    coord.pv_curtailed = True
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "100.0", {"unit_of_measurement": "kWh"})
+    coord._update_pv_calibration(now + timedelta(minutes=15))
+
+    assert coord.pv_sample_count("pv1") == 0
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_ignores_a_mismatched_window(hass):
+    """If the elapsed time is not the window the forecast described, skip."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "100.4", {"unit_of_measurement": "kWh"})
+    coord._update_pv_calibration(now + timedelta(hours=2))
+
+    assert coord.pv_sample_count("pv1") == 0
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_ignores_a_meter_reset(hass):
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "0.2", {"unit_of_measurement": "kWh"})
+    coord._update_pv_calibration(now + timedelta(minutes=15))
+
+    assert coord.pv_sample_count("pv1") == 0
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_drops_an_absurd_sample(hass):
+    """Five times the forecast in one step is not a gain error."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "110.0", {"unit_of_measurement": "kWh"})
+    coord._update_pv_calibration(now + timedelta(minutes=15))
+
+    assert coord.pv_sample_count("pv1") == 0
+
+
+@pytest.mark.asyncio
+async def test_pv_snapshot_only_inside_the_sampling_band(hass):
+    """Night-time and near-rating steps are not recorded."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    hass.states.async_set("sensor.pv1_energy", "100.0", {"unit_of_measurement": "kWh"})
+
+    # 0.1 kW on a 4 kWp array = 2.5 %: below the floor.
+    coord._snapshot_pv_calibration(now, {"pv1": 0.1}, {"pv1": 4.0})
+    assert coord._pv_cal_snapshot == {}
+
+    # 3.8 kW = 95 %: clipping and thermal derating territory.
+    coord._snapshot_pv_calibration(now, {"pv1": 3.8}, {"pv1": 4.0})
+    assert coord._pv_cal_snapshot == {}
+
+    # 2.0 kW = 50 %: recorded.
+    coord._snapshot_pv_calibration(now, {"pv1": 2.0}, {"pv1": 4.0})
+    assert coord._pv_cal_snapshot["forecast_kwh"]["pv1"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_pv_snapshot_covers_a_clear_midday_peak(hass):
+    """A well-oriented array peaks near 85 % of its rating, and must sample there.
+
+    Those are the steps with the best signal-to-noise ratio. Excluding them left
+    a south array learning only from its oblique hours — where the transposition
+    model is weakest — and applying that error all day.
+    """
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    hass.states.async_set("sensor.pv1_energy", "100.0", {"unit_of_measurement": "kWh"})
+
+    coord._snapshot_pv_calibration(now, {"pv1": 3.4}, {"pv1": 4.0})
+
+    assert coord._pv_cal_snapshot["forecast_kwh"]["pv1"] == pytest.approx(0.85)
+
+
+@pytest.mark.asyncio
+async def test_pv_sample_is_scaled_to_the_window_that_elapsed(hass):
+    """A late run measures more minutes than the snapshot describes.
+
+    A weather update refreshes this coordinator off its own cadence, so the
+    meter delta regularly covers a longer window than one step. Scoring it
+    against a fixed quarter-hour of forecast energy read as a 33 % better array.
+    """
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    meter = 100.0
+
+    # 2 kW forecast, an array performing exactly on target, sampled 20 minutes
+    # later each time: the meter moves 2 kW x 20 min, the snapshot says 15.
+    for _ in range(PV_CALIBRATION_MIN_SAMPLES + 5):
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": 2.0 * 0.25},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 2.0 * (20 / 60)
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=20)
+        coord._update_pv_calibration(now)
+
+    assert coord.pv_correction("pv1") == pytest.approx(1.0, abs=1e-6)
+    assert coord.pv_correction_applied("pv1") is False
+
+
+@pytest.mark.asyncio
+async def test_pv_correction_is_clamped(hass):
+    """However bad the ratio, the applied factor stays inside its bounds."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    meter = 100.0
+    for _ in range(PV_CALIBRATION_MIN_SAMPLES + 5):
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": 1.0},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.1  # only a tenth of the forecast, every time
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+
+    assert coord.pv_correction("pv1") == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_reset(hass):
+    coord = _make_cal_coordinator(hass)
+    coord._pv_cal_correction["pv1"] = 0.8
+    coord._pv_cal_samples["pv1"] = deque([(1.0, 1.25)], maxlen=10)
+    coord._pv_cal_store.async_save = AsyncMock()
+
+    await coord.async_reset_pv_calibration()
+
+    assert coord.pv_correction("pv1") == pytest.approx(1.0)
+    assert coord.pv_sample_count("pv1") == 0
+
+
+# ---------------------------------------------------------------------------
+# Reporting the calibration state
+#
+# A correction of 1.0 has two very different meanings — "measured and on
+# target" and "never measured anything" — and the second is by far the more
+# common. The reported state has to separate them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pv_report_names_an_array_with_no_production_meter(hass):
+    """Without a meter the array can never be calibrated; that must be visible."""
+    coord = _make_cal_coordinator(hass, pv_arrays=[_pv_array(measured=None)])
+
+    assert coord.pv_last_result("pv1") == PV_CAL_NO_MEASURED_SENSOR
+    assert coord.pv_correction_applied("pv1") is False
+
+
+@pytest.mark.asyncio
+async def test_pv_report_covers_arrays_that_are_not_being_calibrated(hass):
+    """An uncalibrated array must still appear, or its absence explains nothing."""
+    coord = _make_cal_coordinator(
+        hass,
+        pv_arrays=[
+            _pv_array(sid="pv1", measured="sensor.pv1_energy"),
+            _pv_array(sid="pv2", measured=None),
+        ],
+    )
+
+    assert coord.pv_calibrated_array_ids == ["pv1", "pv2"]
+
+
+@pytest.mark.asyncio
+async def test_pv_report_includes_dc_coupled_arrays(hass):
+    """DC arrays are calibrated the same way and belong in the same report."""
+    coord = _make_cal_coordinator(
+        hass, pv_arrays=[_pv_array(sid="pv_dc", dc=True, measured="sensor.dc_energy")]
+    )
+
+    assert coord.pv_calibrated_array_ids == ["pv_dc"]
+
+
+@pytest.mark.asyncio
+async def test_pv_report_distinguishes_learning_from_applied(hass):
+    """Samples are collected long before a correction is derived from them."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    meter = 100.0
+    for _ in range(3):
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": 0.5},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.4
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+
+    assert coord.pv_sample_count("pv1") == 3
+    assert coord.pv_correction_applied("pv1") is False
+    assert coord.pv_last_result("pv1") == PV_CAL_SAMPLED
+
+
+@pytest.mark.asyncio
+async def test_pv_correction_below_the_floor_survives_a_reload_unapplied(hass):
+    """An array still filling its window must not come back as corrected.
+
+    Every array with samples is persisted, including the ones below the floor.
+    Reading those back unconditionally handed each a correction of 1.0, and
+    membership of that mapping was what ``applied`` reported — so a restart
+    turned "never measured anything" into "being corrected".
+    """
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    meter = 100.0
+    for _ in range(3):
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "forecast_kwh": {"pv1": 0.5},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.4
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+    await coord._async_save_pv_calibration()
+
+    reloaded = _make_cal_coordinator(hass)
+    await reloaded._async_load_pv_calibration()
+
+    assert reloaded.pv_sample_count("pv1") == 3
+    assert reloaded.pv_correction("pv1") == pytest.approx(1.0)
+    assert reloaded.pv_correction_applied("pv1") is False
+
+
+@pytest.mark.asyncio
+async def test_pv_array_on_target_is_not_reported_as_corrected(hass):
+    """A derived correction of exactly nominal changes nothing, and says so."""
+    coord = _make_cal_coordinator(hass)
+    coord._pv_cal_correction["pv1"] = 1.002
+
+    assert coord.pv_correction_applied("pv1") is False
+
+    coord._pv_cal_correction["pv1"] = 0.9
+
+    assert coord.pv_correction_applied("pv1") is True
+
+
+@pytest.mark.asyncio
+async def test_pv_report_names_curtailment_as_the_reason(hass):
+    """Curtailed production is skipped on purpose; the report must say which."""
+    coord = _make_cal_coordinator(hass)
+    coord.pv_curtailed = True
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "100.0", {"unit_of_measurement": "kWh"})
+
+    coord._update_pv_calibration(now + timedelta(minutes=15))
+
+    assert coord.pv_last_result("pv1") == PV_CAL_CURTAILED
+
+
+@pytest.mark.asyncio
+async def test_pv_report_names_a_meter_reset_as_the_reason(hass):
+    """A counter that went backwards is a meter event, not a forecast error."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    coord._pv_cal_snapshot = {
+        "taken_at": now,
+        "forecast_kwh": {"pv1": 0.5},
+        "meter_kwh": {"pv1": 100.0},
+    }
+    hass.states.async_set("sensor.pv1_energy", "3.0", {"unit_of_measurement": "kWh"})
+
+    coord._update_pv_calibration(now + timedelta(minutes=15))
+
+    assert coord.pv_sample_count("pv1") == 0
+    assert coord.pv_last_result("pv1") == PV_CAL_METER_RESET
+
+
+@pytest.mark.asyncio
+async def test_pv_calibration_is_published_for_every_array(hass):
+    """The coordinator's own data carries the report, so entities can read it."""
+    coord = _make_cal_coordinator(
+        hass,
+        pv_arrays=[
+            _pv_array(sid="pv1", measured="sensor.pv1_energy"),
+            _pv_array(sid="pv2", measured=None),
+        ],
+    )
+    coord.net_load_model = MagicMock()
+    coord.net_load_model.forecast = MagicMock(return_value=(None, [0.5] * 48, None))
+
+    result = await coord._async_update_data()
+
+    report = result["pv_calibration"]
+    assert set(report) == {"pv1", "pv2"}
+    assert report["pv2"]["last_result"] == PV_CAL_NO_MEASURED_SENSOR
+    assert report["pv1"]["applied"] is False
+    assert report["pv1"]["correction"] == pytest.approx(1.0)

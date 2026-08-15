@@ -4,9 +4,7 @@ import pytest
 
 from custom_components.battery_controller.battery_model import (
     BatteryConfig,
-    BatteryState,
     aggregate_battery_configs,
-    calculate_degradation_cost_per_kwh,
 )
 
 
@@ -58,32 +56,6 @@ class TestBatteryConfig:
         assert config.pv_dc_coupled is True
         assert config.pv_dc_peak_power_kwp == 3.0
         assert config.pv_dc_efficiency == 0.96
-
-    def test_from_config(self):
-        ha_config = {
-            "capacity_kwh": 15.0,
-            "max_charge_power_kw": 7.5,
-            "max_discharge_power_kw": 7.5,
-            "round_trip_efficiency": 0.92,
-            "min_soc_percent": 5.0,
-            "max_soc_percent": 95.0,
-            "pv_dc_coupled": True,
-            "pv_dc_peak_power_kwp": 4.0,
-            "pv_dc_efficiency": 0.97,
-        }
-        config = BatteryConfig.from_config(ha_config)
-        assert config.capacity_kwh == 15.0
-        assert config.max_charge_power_kw == 7.5
-        assert config.round_trip_efficiency == pytest.approx(0.92, abs=1e-4)
-        assert config.min_soc_kwh == pytest.approx(0.75)
-        assert config.max_soc_kwh == pytest.approx(14.25)
-        assert config.pv_dc_coupled is True
-        assert config.pv_dc_peak_power_kwp == 4.0
-
-    def test_from_config_defaults(self):
-        config = BatteryConfig.from_config({})
-        assert config.capacity_kwh == 10.0
-        assert config.round_trip_efficiency == pytest.approx(0.90, abs=1e-4)
 
     def test_derating_defaults_disabled(self):
         """Default config has no derating (thresholds at 100% / 0%)."""
@@ -184,7 +156,22 @@ class TestAggregateBatteryConfigs:
     def test_single_config_passthrough(self):
         config = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
         result = aggregate_battery_configs([config])
-        assert result is config
+        assert result == config
+
+    def test_single_config_is_a_copy(self):
+        """The aggregate must not alias the single input config.
+
+        The coordinator overlays entry-level settings (DC coupling, grid cap)
+        onto the aggregate; sharing the object would write them straight into
+        the individual battery's own config.
+        """
+        config = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        result = aggregate_battery_configs([config])
+        assert result is not config
+        result.pv_dc_coupled = True
+        result.max_grid_power_kw = 17.0
+        assert config.pv_dc_coupled is False
+        assert config.max_grid_power_kw == 0.0
 
     def test_empty_returns_default(self):
         result = aggregate_battery_configs([])
@@ -242,40 +229,3 @@ class TestAggregateBatteryConfigs:
 
 class TestBatteryState:
     """Tests for BatteryState dataclass."""
-
-    def test_from_soc_kwh(self):
-        state = BatteryState.from_soc_kwh(5.0, 10.0)
-        assert state.soc_kwh == 5.0
-        assert state.soc_percent == 50.0
-
-    def test_from_soc_percent(self):
-        state = BatteryState.from_soc_percent(75.0, 10.0)
-        assert state.soc_kwh == 7.5
-        assert state.soc_percent == 75.0
-
-    def test_from_soc_kwh_zero_capacity(self):
-        state = BatteryState.from_soc_kwh(0.0, 0.0)
-        assert state.soc_percent == 0.0
-
-
-class TestDegradationCost:
-    """Tests for calculate_degradation_cost_per_kwh function."""
-
-    def test_default_values(self):
-        cost = calculate_degradation_cost_per_kwh()
-        # 500 / 6000 / (2 * 0.8) = 0.052
-        assert cost == pytest.approx(0.052, abs=0.001)
-
-    def test_cheap_battery(self):
-        cost = calculate_degradation_cost_per_kwh(
-            replacement_cost_per_kwh=200.0,
-            lifecycle_cycles=10000,
-        )
-        assert cost < 0.02
-
-    def test_expensive_battery(self):
-        cost = calculate_degradation_cost_per_kwh(
-            replacement_cost_per_kwh=800.0,
-            lifecycle_cycles=3000,
-        )
-        assert cost > 0.10

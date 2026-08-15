@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from homeassistant.const import EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -75,6 +75,10 @@ async def async_setup_entry(
             BatteryControlModeSensor(optimization_coordinator, device, entry),
             # Diagnostics
             OptimizationStatusSensor(optimization_coordinator, device, entry),
+            ChargeEfficiencyCalibrationSensor(optimization_coordinator, device, entry),
+            DischargeEfficiencyCalibrationSensor(
+                optimization_coordinator, device, entry
+            ),
         ]
     )
 
@@ -98,11 +102,30 @@ async def async_setup_entry(
                         subentry.subentry_id,
                         subentry.title,
                     ),
+                    # Per-battery calibration: the fleet sensors average the
+                    # packs together, which describes neither when they differ.
+                    BatterySubentryChargeCalibrationSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
+                    BatterySubentryDischargeCalibrationSensor(
+                        optimization_coordinator,
+                        batt_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
                 ],
                 config_subentry_id=subentry.subentry_id,
             )
 
-    # Per-PV-array subentry sensors — diagnostic, disabled by default
+    # Per-PV-array subentry sensors. The forecast series is disabled by default
+    # (large list attributes); the calibration sensor is not — it is a single
+    # number, and it is the only place a user can see whether the array's
+    # forecast is being corrected and why.
     for subentry in entry.subentries.values():
         if subentry.subentry_type == PV_SUBENTRY_TYPE:
             pv_device = pv_devices.get(subentry.subentry_id, device)
@@ -114,7 +137,14 @@ async def async_setup_entry(
                         entry,
                         subentry.subentry_id,
                         subentry.title,
-                    )
+                    ),
+                    PVArrayCalibrationSensor(
+                        forecast_coordinator,
+                        pv_device,
+                        entry,
+                        subentry.subentry_id,
+                        subentry.title,
+                    ),
                 ],
                 config_subentry_id=subentry.subentry_id,
             )
@@ -136,23 +166,29 @@ async def async_setup_entry(
 
 
 class BatteryControllerSensor(CoordinatorEntity[OptimizationCoordinator], SensorEntity):
-    """Base class for Battery Controller sensors backed by OptimizationCoordinator."""
+    """Base class for Battery Controller sensors backed by OptimizationCoordinator.
+
+    Subclasses set ``_key``, the entity's suffix in the unique ID. Per-subentry
+    sensors, whose key depends on the subentry, pass it to ``__init__`` instead.
+    """
 
     _attr_has_entity_name = True
     coordinator: OptimizationCoordinator
+    _key: str = ""
 
     def __init__(
         self,
         coordinator: OptimizationCoordinator,
         device: DeviceInfo,
         entry: ConfigEntry,
-        key: str,
+        key: str | None = None,
     ):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device
-        self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._key = key
+        if key is not None:
+            self._key = key
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
 
     def _get_optimization_result(self) -> Any:
         """Get the latest optimization result from the optimization coordinator."""
@@ -166,19 +202,21 @@ class BatteryForecastSensor(CoordinatorEntity[ForecastCoordinator], SensorEntity
 
     _attr_has_entity_name = True
     coordinator: ForecastCoordinator
+    _key: str = ""
 
     def __init__(
         self,
         coordinator: ForecastCoordinator,
         device: DeviceInfo,
         entry: ConfigEntry,
-        key: str,
+        key: str | None = None,
     ):
         """Initialize the forecast sensor."""
         super().__init__(coordinator)
         self._attr_device_info = device
-        self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._key = key
+        if key is not None:
+            self._key = key
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
 
 
 class BatteryOptimalPowerSensor(BatteryControllerSensor):
@@ -192,14 +230,7 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "optimal_power")
+    _key = "optimal_power"
 
     @property
     def native_value(self) -> float | None:
@@ -226,14 +257,7 @@ class BatteryOptimalModeSensor(BatteryControllerSensor):
 
     _attr_translation_key = "optimal_mode"
     _attr_name = "Optimal Mode"
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "optimal_mode")
+    _key = "optimal_mode"
 
     @property
     def native_value(self) -> str | None:
@@ -250,14 +274,7 @@ class BatteryScheduleSensor(BatteryControllerSensor):
     # Large list attributes (96-step schedules); disable by default to reduce
     # recorder load. Users who need these can enable them explicitly.
     _attr_entity_registry_enabled_default = False
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "schedule")
+    _key = "schedule"
 
     @property
     def native_value(self) -> str | None:
@@ -313,14 +330,7 @@ class BatterySoCSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "soc")
+    _key = "soc"
 
     @property
     def native_value(self) -> float | None:
@@ -353,14 +363,7 @@ class BatteryPowerSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "battery_power")
+    _key = "battery_power"
 
     @property
     def native_value(self) -> float | None:
@@ -391,11 +394,7 @@ class PVForecastSensor(BatteryForecastSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self, coordinator: ForecastCoordinator, device: DeviceInfo, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, device, entry, "pv_forecast")
+    _key = "pv_forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -441,11 +440,7 @@ class ConsumptionForecastSensor(BatteryForecastSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self, coordinator: ForecastCoordinator, device: DeviceInfo, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, device, entry, "consumption_forecast")
+    _key = "consumption_forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -475,11 +470,7 @@ class NetGridForecastSensor(BatteryForecastSensor):
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self, coordinator: ForecastCoordinator, device: DeviceInfo, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, device, entry, "net_grid_forecast")
+    _key = "net_grid_forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -508,11 +499,7 @@ class SolarIrradianceSensor(BatteryForecastSensor):
     _attr_device_class = SensorDeviceClass.IRRADIANCE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(
-        self, coordinator: ForecastCoordinator, device: DeviceInfo, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, device, entry, "ghi")
+    _key = "ghi"
 
     @property
     def native_value(self) -> float | None:
@@ -530,11 +517,7 @@ class WindSpeedSensor(BatteryForecastSensor):
     _attr_device_class = SensorDeviceClass.WIND_SPEED
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(
-        self, coordinator: ForecastCoordinator, device: DeviceInfo, entry: ConfigEntry
-    ) -> None:
-        super().__init__(coordinator, device, entry, "wind_speed_ms")
+    _key = "wind_speed_ms"
 
     @property
     def native_value(self) -> float | None:
@@ -544,21 +527,24 @@ class WindSpeedSensor(BatteryForecastSensor):
 
 
 class BatteryDailySavingsSensor(BatteryControllerSensor):
-    """Sensor for daily savings from battery optimization."""
+    """Estimated savings of the CURRENT plan over the optimization horizon.
+
+    Not a running total. The value is a forward-looking estimate for the horizon
+    the optimizer just solved (up to 36 h), recomputed from scratch on every run,
+    so it moves both up and down as prices and forecasts change.
+
+    That is why the state class is MEASUREMENT rather than TOTAL: TOTAL makes the
+    recorder accumulate the difference between consecutive states into a
+    long-term sum, which for a fluctuating forecast produces a meaningless
+    running figure and an incorrect cost in the energy dashboard.
+    """
 
     _attr_translation_key = "daily_savings"
     _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "daily_savings")
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _key = "daily_savings"
 
     @property
     def native_value(self) -> float | None:
@@ -593,14 +579,7 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
     _attr_name = "Shadow Price of Storage"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "shadow_price")
+    _key = "shadow_price"
 
     @property
     def native_value(self) -> float | None:
@@ -639,14 +618,7 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "current_grid_power")
+    _key = "current_grid_power"
 
     @property
     def native_value(self) -> float | None:
@@ -689,14 +661,7 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "battery_setpoint")
+    _key = "battery_setpoint"
 
     @property
     def native_value(self) -> float | None:
@@ -856,14 +821,7 @@ class BatteryControlModeSensor(BatteryControllerSensor):
     _attr_name = "Control Mode"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "control_mode")
+    _key = "control_mode"
 
     @property
     def native_value(self) -> str | None:
@@ -879,14 +837,7 @@ class OptimizationStatusSensor(BatteryControllerSensor):
     _attr_name = "Optimization Status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
-
-    def __init__(
-        self,
-        coordinator: OptimizationCoordinator,
-        device: DeviceInfo,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, device, entry, "optimization_status")
+    _key = "optimization_status"
 
     @property
     def native_value(self) -> str:
@@ -941,3 +892,205 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             }
         )
         return attrs
+
+
+class BatteryEfficiencyCalibrationSensor(BatteryControllerSensor):
+    """Base class for the learned battery efficiency corrections.
+
+    The correction is reported as a percentage of nominal: 100% means the
+    battery moves exactly as much energy within a step as the model assumes,
+    96% means it manages 4% less and the DP plans accordingly.
+
+    The number on its own is ambiguous — an untouched 100% looks identical to
+    a measured 100% — so ``samples`` and ``last_result`` are published
+    alongside it. Several values of ``last_result`` are permanent for a given
+    setup rather than a passing condition: a DC-coupled system never samples
+    at all, and a control mode that does not execute the DP schedule verbatim
+    (zero_grid, manual) never will either.
+    """
+
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 1
+
+    def _calibration(self) -> tuple[float, int, bool, str]:
+        """Return (correction, samples, applied, last_result) for this direction."""
+        raise NotImplementedError
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        """Return (measured/commanded throughput, samples) for this direction."""
+        raise NotImplementedError
+
+    @property
+    def native_value(self) -> float:
+        correction, _samples, _applied, _result = self._calibration()
+        return round(correction * 100, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        correction, samples, applied, last_result = self._calibration()
+        fidelity, fidelity_samples = self._dispatch()
+        return {
+            "correction_factor": round(correction, 4),
+            "samples": samples,
+            "applied": applied,
+            "last_result": last_result,
+            # Measured over commanded throughput from the energy counters.
+            # Never applied to the curve: it sits on the same side of the
+            # inverter as the setpoint, so it shows whether the device followed
+            # its instruction, not what it lost carrying it out.
+            "dispatch_fidelity": (round(fidelity, 4) if fidelity is not None else None),
+            "dispatch_samples": fidelity_samples,
+        }
+
+
+class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
+    """Learned correction on the charge-side SoC transition, fleet-wide.
+
+    The capacity-weighted aggregate of the per-battery corrections — what the
+    DP is actually handed, since it plans one SoC for the whole fleet. The
+    per-battery sensors say which pack the number came from.
+    """
+
+    _attr_translation_key = "charge_eff_correction"
+    _attr_name = "Charge Efficiency Correction"
+    _key = "charge_eff_correction"
+
+    def _calibration(self) -> tuple[float, int, bool, str]:
+        return (
+            self.coordinator.charge_eff_correction,
+            self.coordinator.charge_eff_sample_count,
+            self.coordinator.charge_eff_applied,
+            self.coordinator.charge_eff_last_result,
+        )
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.dispatch_fidelity(ACTION_CHARGING)
+
+
+class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
+    """Learned correction on the discharge-side SoC transition, fleet-wide."""
+
+    _attr_translation_key = "discharge_eff_correction"
+    _attr_name = "Discharge Efficiency Correction"
+    _key = "discharge_eff_correction"
+
+    def _calibration(self) -> tuple[float, int, bool, str]:
+        return (
+            self.coordinator.discharge_eff_correction,
+            self.coordinator.discharge_eff_sample_count,
+            self.coordinator.discharge_eff_applied,
+            self.coordinator.discharge_eff_last_result,
+        )
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.dispatch_fidelity(ACTION_DISCHARGING)
+
+
+class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
+    """One battery's own learned efficiency correction.
+
+    Reported per battery because the causes are per battery: the dispatcher
+    concentrates a setpoint on one pack at a time, so a single fleet number
+    describes whichever machine happened to be picked. A pack that is losing
+    capacity shows up here as a correction below 100% while its sibling stays
+    at nominal — on the fleet sensor the two are averaged into something that
+    describes neither.
+
+    ``last_result`` says why a pack is not learning; ``battery_not_dispatched``
+    is the common one and is not a fault — it means the other battery has been
+    doing the work.
+    """
+
+    _action: str = ACTION_CHARGING
+
+    def __init__(
+        self,
+        coordinator: OptimizationCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        battery_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"{self._title} {battery_title}"
+
+    _title = ""
+
+    def _calibration(self) -> tuple[float, int, bool, str]:
+        return self.coordinator.battery_calibration_state(
+            self._subentry_id, self._action
+        )
+
+    def _dispatch(self) -> tuple[float | None, int]:
+        return self.coordinator.battery_dispatch_fidelity(
+            self._subentry_id, self._action
+        )
+
+
+class BatterySubentryChargeCalibrationSensor(BatterySubentryCalibrationSensor):
+    """One battery's learned charge-side correction."""
+
+    _attr_translation_key = "battery_charge_eff_correction"
+    _action = ACTION_CHARGING
+    _key = "charge_eff_correction"
+    _title = "Charge Efficiency Correction"
+
+
+class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor):
+    """One battery's learned discharge-side correction."""
+
+    _attr_translation_key = "battery_discharge_eff_correction"
+    _action = ACTION_DISCHARGING
+    _key = "discharge_eff_correction"
+    _title = "Discharge Efficiency Correction"
+
+
+class PVArrayCalibrationSensor(BatteryForecastSensor):
+    """Learned correction on one PV array's forecast.
+
+    100% means the array produces what the model predicts. Below that the
+    forecast is optimistic (soiling, a dead string, a wrong tilt or
+    orientation entry); above it the array outperforms the model. Shading is
+    a function of sun position rather than a constant gain, so it is not
+    something this can capture.
+
+    Reported per array because the causes are per array. ``applied`` stays
+    False until the sample window has filled, and ``last_result`` says why an
+    array is not learning — most often that it has no measured production
+    sensor configured.
+    """
+
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 1
+
+    def __init__(
+        self,
+        coordinator: ForecastCoordinator,
+        device: DeviceInfo,
+        entry: ConfigEntry,
+        subentry_id: str,
+        array_title: str,
+    ):
+        super().__init__(coordinator, device, entry, f"pv_calibration_{subentry_id}")
+        self._subentry_id = subentry_id
+        self._attr_name = f"PV Forecast Correction {array_title}"
+
+    @property
+    def native_value(self) -> float:
+        return round(self.coordinator.pv_correction(self._subentry_id) * 100, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "correction_factor": round(
+                self.coordinator.pv_correction(self._subentry_id), 4
+            ),
+            "samples": self.coordinator.pv_sample_count(self._subentry_id),
+            "applied": self.coordinator.pv_correction_applied(self._subentry_id),
+            "last_result": self.coordinator.pv_last_result(self._subentry_id),
+        }

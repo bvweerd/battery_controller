@@ -21,6 +21,9 @@ from custom_components.battery_controller.const import (
     CONF_MIN_PRICE_SPREAD,
     CONF_ZERO_GRID_DEADBAND_W,
 )
+from custom_components.battery_controller import async_setup_entry
+from custom_components.battery_controller import async_unload_entry
+from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
 
 
 def _make_entry(entry_id="test", data=None, options=None):
@@ -32,9 +35,12 @@ def _make_entry(entry_id="test", data=None, options=None):
     return entry
 
 
-def _make_runtime_data(config=None):
+def _make_runtime_data(config=None, options=None):
     runtime_data = MagicMock(spec=BatteryControllerData)
     runtime_data.config = config or {}
+    # Options snapshot; defaults to the config so the existing cases, where the
+    # two are the same thing, keep reading naturally.
+    runtime_data.options = options if options is not None else (config or {})
     runtime_data.forecast_coordinator = MagicMock()
     runtime_data.forecast_coordinator.async_shutdown = AsyncMock()
     runtime_data.optimization_coordinator = MagicMock()
@@ -119,6 +125,52 @@ async def test_update_listener_reloads_on_structural_change():
 
 
 @pytest.mark.asyncio
+async def test_update_listener_reloads_when_structural_key_removed():
+    """Clearing a structural option must reload, not just changing one.
+
+    The listener used to iterate the new options only, so a key that vanished
+    was never compared: the coordinator kept running on the sensor it was set
+    up with while the UI showed the selection cleared.
+    """
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data(options={"price_sensor": "sensor.old"})
+    entry.options = {}
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_update_listener_ignores_derived_config_keys():
+    """Derived keys in `config` are not options and must not force a reload.
+
+    `config` is entry.data | entry.options plus derived entries (pv_arrays,
+    battery_subentries, entry_id, ...). Comparing options against it would read
+    every one of those as a removed key and reload on every runtime-only change.
+    """
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data(
+        config={
+            "entry_id": "abc",
+            "pv_arrays": [{"peak_power_kwp": 4.0}],
+            "battery_subentries": [("sub1", {})],
+            CONF_CONTROL_MODE: "hybrid",
+        },
+        options={CONF_CONTROL_MODE: "hybrid"},
+    )
+    entry.options = {CONF_CONTROL_MODE: "zero_grid"}  # runtime-only key
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_update_listener_no_reload_when_value_unchanged():
     """No reload if structural key value is unchanged from snapshot."""
     entry = _make_entry()
@@ -140,7 +192,6 @@ async def test_update_listener_no_reload_when_value_unchanged():
 @pytest.mark.asyncio
 async def test_async_unload_entry_with_runtime_data():
     """async_unload_entry shuts down coordinators and unloads platforms."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = _make_runtime_data()
@@ -157,15 +208,17 @@ async def test_async_unload_entry_with_runtime_data():
     entry.runtime_data.forecast_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.optimization_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.weather_coordinator.async_shutdown.assert_called_once()
-    mock_hass.services.async_remove.assert_called_once_with(
-        DOMAIN, "reset_charge_efficiency_calibration"
-    )
+    removed = {call.args for call in mock_hass.services.async_remove.call_args_list}
+    assert removed == {
+        (DOMAIN, "reset_charge_efficiency_calibration"),
+        (DOMAIN, "reset_discharge_efficiency_calibration"),
+        (DOMAIN, "reset_pv_calibration"),
+    }
 
 
 @pytest.mark.asyncio
 async def test_async_unload_entry_no_runtime_data():
     """async_unload_entry with no runtime_data still calls unload_platforms."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = None
@@ -180,15 +233,13 @@ async def test_async_unload_entry_no_runtime_data():
 
 
 # ---------------------------------------------------------------------------
-# async_setup_entry — covers lines 80-202
+# async_setup_entry — covers
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_no_subentries():
     """async_setup_entry with no subentries sets up coordinators and runtime_data."""
-
-    from custom_components.battery_controller import async_setup_entry
 
     mock_weather_coord = AsyncMock()
     mock_weather_coord.async_config_entry_first_refresh = AsyncMock()
@@ -237,14 +288,13 @@ async def test_async_setup_entry_no_subentries():
     assert entry.runtime_data.optimization_coordinator is mock_opt_coord
     assert entry.runtime_data.battery_devices == {}
     assert entry.runtime_data.pv_devices == {}
-    mock_hass.services.async_register.assert_called_once()
+    assert mock_hass.services.async_register.call_count == 3
 
 
 @pytest.mark.asyncio
 async def test_async_setup_entry_with_battery_and_pv_subentries():
     """async_setup_entry with battery and PV subentries creates per-device DeviceInfo."""
 
-    from custom_components.battery_controller import async_setup_entry
     from custom_components.battery_controller.const import (
         BATTERY_SUBENTRY_TYPE,
         PV_SUBENTRY_TYPE,
@@ -310,9 +360,6 @@ async def test_async_setup_entry_with_battery_and_pv_subentries():
 async def test_async_setup_entry_battery_subentry_without_title():
     """Battery subentry without matching entry.subentries uses CONF_NAME fallback."""
 
-    from custom_components.battery_controller import async_setup_entry
-    from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
-
     mock_weather_coord = AsyncMock()
     mock_weather_coord.async_config_entry_first_refresh = AsyncMock()
     mock_forecast_coord = AsyncMock()
@@ -370,9 +417,18 @@ def test_register_services_only_once():
     _async_register_services(mock_hass)
     _async_register_services(mock_hass)
 
-    mock_hass.services.async_register.assert_called_once()
-    handler = mock_hass.services.async_register.call_args.args[2]
-    assert inspect.iscoroutinefunction(handler)
+    # All services registered by the first call; the second call is a no-op.
+    assert mock_hass.services.async_register.call_count == 3
+    registered = {
+        call.args[1] for call in mock_hass.services.async_register.call_args_list
+    }
+    assert registered == {
+        "reset_charge_efficiency_calibration",
+        "reset_discharge_efficiency_calibration",
+        "reset_pv_calibration",
+    }
+    for call in mock_hass.services.async_register.call_args_list:
+        assert inspect.iscoroutinefunction(call.args[2])
 
 
 @pytest.mark.asyncio
@@ -402,7 +458,6 @@ async def test_reset_charge_efficiency_service_targets_requested_entry():
 @pytest.mark.asyncio
 async def test_async_unload_entry_coordinator_shutdown_exception():
     """M2: if one coordinator raises during shutdown, the others still run."""
-    from custom_components.battery_controller import async_unload_entry
 
     entry = _make_entry()
     entry.runtime_data = _make_runtime_data()

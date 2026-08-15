@@ -132,6 +132,17 @@
     </div>
   </div>
 
+  <!-- Learned calibration -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5">
+    <h3 class="font-semibold text-gray-700 mb-3 text-sm">🎯 Learned Calibration</h3>
+    <div id="cfg-calibration"></div>
+    <div class="text-xs text-gray-400 mt-2">
+      Corrections the integration learned by comparing its own plan against what
+      actually happened. 100% means "as modelled". A correction only applies once
+      enough samples exist; until then the reason column says what is holding it up.
+    </div>
+  </div>
+
   <!-- Coordinator health + current values -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="bg-white rounded-xl border border-gray-200 p-5">
@@ -684,8 +695,10 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
   const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
-  const breakeven = (terminalPrice + degrad) / sqrtRte;
-  const breakevenChg = (terminalPrice - degrad) * sqrtRte;
+  const arbCost      = Math.max(0, opts.min_price_spread ?? 0) / 2;
+  const decisionCost = degrad + arbCost;
+  const breakeven    = (terminalPrice + decisionCost) / sqrtRte;
+  const breakevenChg = (terminalPrice - decisionCost) * sqrtRte;
 
   document.getElementById('terminal-price-label').textContent    = terminalPrice.toFixed(4);
   document.getElementById('breakeven-discharge-label').textContent= breakeven.toFixed(4);
@@ -701,8 +714,8 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
     const cons   = consumFc && consumFc[t] !== undefined ? consumFc[t] : 0;
     const pvSurplus = pv - cons;
     const effChargePrice = pvSurplus > MIN_PV_SURPLUS_KW ? feedIn : price;
-    const chgProfit  = terminalPrice - effChargePrice / sqrtRte - degrad;
-    const discProfit = price * sqrtRte - terminalPrice - degrad;
+    const chgProfit  = terminalPrice - effChargePrice / sqrtRte - decisionCost;
+    const discProfit = price * sqrtRte - terminalPrice - decisionCost;
     const mode = modes[t] || 'idle';
     const soc  = socKwh[t] || 0;
     const pw   = powerKw[t] || 0;
@@ -789,16 +802,22 @@ function renderDiagnostics(raw) {
     : null;
   const chgEffCorr = opt.charge_eff_correction ?? lastRun?.charge_eff_correction;
   const chgEffSamples = opt.charge_eff_samples ?? lastRun?.charge_eff_samples;
-  const chgEffCorrStr = chgEffCorr !== undefined
-    ? `${(chgEffCorr * 100).toFixed(1)}%` + (chgEffSamples !== undefined ? ` (n=${chgEffSamples})` : '')
-    : '—';
+  // A correction of 1.0 with no samples behind it has never been measured;
+  // rendering it as "100.0%" reads as a clean bill of health it has not earned.
+  const chgEffCorrStr = chgEffSamples === 0
+    ? 'not learned yet'
+    : chgEffCorr !== undefined
+      ? `${(chgEffCorr * 100).toFixed(1)}%` + (chgEffSamples !== undefined ? ` (n=${chgEffSamples})` : '')
+      : '—';
   const chgEffCorrClass = chgEffCorr !== undefined && chgEffCorr < 0.95 ? 'badge badge-fail'
     : chgEffCorr !== undefined && chgEffCorr < 0.995 ? 'badge badge-idle' : '';
   const disEffCorr = opt.discharge_eff_correction ?? lastRun?.discharge_eff_correction;
   const disEffSamples = opt.discharge_eff_samples ?? lastRun?.discharge_eff_samples;
-  const disEffCorrStr = disEffCorr !== undefined
-    ? `${(disEffCorr * 100).toFixed(1)}%` + (disEffSamples !== undefined ? ` (n=${disEffSamples})` : '')
-    : '—';
+  const disEffCorrStr = disEffSamples === 0
+    ? 'not learned yet'
+    : disEffCorr !== undefined
+      ? `${(disEffCorr * 100).toFixed(1)}%` + (disEffSamples !== undefined ? ` (n=${disEffSamples})` : '')
+      : '—';
   const disEffCorrClass = disEffCorr !== undefined && disEffCorr < 0.95 ? 'badge badge-fail'
     : disEffCorr !== undefined && disEffCorr < 0.995 ? 'badge badge-idle' : '';
   document.getElementById('cfg-eff').innerHTML =
@@ -810,6 +829,47 @@ function renderDiagnostics(raw) {
     kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
     kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
+
+  // ── Learned calibration (battery efficiency + per-PV-array forecast gain)
+  const calRow = (label, entry) => {
+    if (!entry) return kv(label, '—');
+    const pct = entry.correction !== undefined && entry.correction !== null
+      ? `${(entry.correction * 100).toFixed(1)}%` : '—';
+    const n = entry.samples ?? 0;
+    // n=0 at 100% is "never measured", not "measured and on target". Saying
+    // that plainly is the whole point of this card.
+    const state = n === 0
+      ? '<span class="badge badge-idle">not learned</span>'
+      : entry.applied
+        ? '<span class="badge badge-ok">applied</span>'
+        : '<span class="badge badge-idle">learning</span>';
+    const why = entry.last_result && entry.last_result !== 'sampled'
+      ? ` <span class="text-gray-400">· ${entry.last_result.replace(/_/g, ' ')}</span>` : '';
+    return kv(label, `${pct} <span class="text-gray-400">(n=${n})</span> ${state}${why}`);
+  };
+  const pvCal = fc.pv_calibration || {};
+  // The two battery rows above are the fleet aggregate the DP plans with. With
+  // more than one pack that average describes neither of them — the dispatcher
+  // concentrates on one battery at a time — so each pack's own measurement is
+  // listed underneath it.
+  const batCal = opt.battery_calibration || {};
+  const batteryRows = Object.entries(batCal).flatMap(([name, e]) => [
+    calRow(`&nbsp;&nbsp;↳ ${name} · charge`, e.charge),
+    calRow(`&nbsp;&nbsp;↳ ${name} · discharge`, e.discharge),
+  ]).join('');
+  document.getElementById('cfg-calibration').innerHTML =
+    calRow('Battery charge efficiency', {
+      correction: chgEffCorr, samples: chgEffSamples,
+      applied: opt.charge_eff_applied, last_result: opt.charge_eff_last_result,
+    }) +
+    calRow('Battery discharge efficiency', {
+      correction: disEffCorr, samples: disEffSamples,
+      applied: opt.discharge_eff_applied, last_result: opt.discharge_eff_last_result,
+    }) +
+    batteryRows +
+    (Object.keys(pvCal).length
+      ? Object.entries(pvCal).map(([name, e]) => calRow(`PV forecast · ${name}`, e)).join('')
+      : kv('PV forecast', '<span class="text-gray-400">no PV arrays reported</span>'));
 
   const srcBadge = opt.price_forecast_source
     ? `<span class="badge ${opt.price_forecast_source==='live'?'badge-ok':opt.price_forecast_source==='current_only'?'badge-fail':'badge-idle'}">${opt.price_forecast_source}</span>`
@@ -1151,13 +1211,22 @@ function getSimParams() {
   const minSocPct = g('sp-min-soc');
   const maxSocPct = g('sp-max-soc');
   const rte       = g('sp-rte');
+  const maxChargeKw    = g('sp-charge-kw');
+  const maxDischargeKw = g('sp-discharge-kw');
+  // Flat per-direction curves at sqrt(RTE), the same derivation BatteryConfig
+  // uses for a scalar RTE. Without them runOptimizer read undefined curves,
+  // interpolateEfficiency returned 1.0 for every power, and the simulator
+  // silently ignored the round-trip efficiency the user entered.
+  const perDirEff = Math.sqrt(Math.max(1e-6, rte));
   return {
     rte,
+    chargeCurve:    [[0, perDirEff], [maxChargeKw, perDirEff]],
+    dischargeCurve: [[0, perDirEff], [maxDischargeKw, perDirEff]],
     capacityKwh:   capacity,
     minSocKwh:     capacity * minSocPct / 100,
     maxSocKwh:     capacity * maxSocPct / 100,
-    maxChargeKw:   g('sp-charge-kw'),
-    maxDischargeKw:g('sp-discharge-kw'),
+    maxChargeKw,
+    maxDischargeKw,
     pvDcCoupled:   false,
     pvDcEfficiency:0.97,
     maxGridPowerKw:0,
@@ -1291,16 +1360,23 @@ function runSimulator() {
       tbody.innerHTML = '';
       const sqrtRte = Math.sqrt(p.rte);
       const degrad  = degradPerKwhSim;
+      // The DP charges min_price_spread / 2 per kWh of commanded throughput, so
+      // the break-even columns must include it or they claim actions are
+      // profitable that the optimizer correctly refused.
+      const arbCostSim    = Math.max(0, p.minPriceSpread || 0) / 2;
+      const decisionCost  = degrad + arbCostSim;
       for (let t = 0; t < res.powerKw.length; t++) {
         const feedIn2 = feedIn[t] || price[t];
         const pvSurp  = (pv[t]||0) - (consump[t]||0);
         const effCp   = pvSurp > MIN_PV_SURPLUS_KW ? feedIn2 : price[t];
-        const discP   = price[t] * sqrtRte - res.terminalPrice - degrad;
-        const chgP    = res.terminalPrice - effCp / sqrtRte - degrad;
+        const discP   = price[t] * sqrtRte - res.terminalPrice - decisionCost;
+        const chgP    = res.terminalPrice - effCp / sqrtRte - decisionCost;
         const stepCost= calculateStepCost(
           stepH, res.socKwh[t]*1000, -res.powerKw[t]*1000, price[t], feedIn2,
-          (pv[t]||0)*1000, (consump[t]||0)*1000, p.rte, degrad,
-          false, 0, 0.97, 0, p.maxSocKwh * 1000
+          (pv[t]||0)*1000, (consump[t]||0)*1000,
+          p.chargeCurve, p.dischargeCurve, degrad,
+          p.pvDcCoupled, 0, p.pvDcEfficiency, p.maxGridPowerKw, p.maxSocKwh * 1000,
+          null, null, arbCostSim, p.maxChargeKw
         );
         const mode = res.modes[t];
         const tr = document.createElement('tr');

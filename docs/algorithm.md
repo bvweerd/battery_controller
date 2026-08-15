@@ -72,7 +72,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `consumption_forecast[t]` | kW | Expected household consumption for each step |
 | `step_durations_hours[t]` | h | Duration of each time step (typically 0.25 h = 15 min) |
 | `degradation_cost_per_cycle` | EUR/cycle | Battery wear cost per full charge+discharge cycle (converted to EUR/kWh by coordinator: `÷ (2 × usable_kwh)` — one cycle is charge + discharge throughput) |
-| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage |
+| `min_price_spread` | EUR/kWh | Minimum buy/sell spread to trigger arbitrage. Enters the DP objective as `min_price_spread / 2` per kWh of commanded throughput (see §4.5), so a full cycle must clear `2 × degradation + min_price_spread` |
 
 **Battery configuration:**
 
@@ -85,7 +85,7 @@ The optimizer must respect physical constraints: SoC must stay within `[min_soc,
 | `discharge_efficiency_curve` | Discharge efficiency as a function of power (see §4.1) |
 | `pv_dc_coupled` | Whether DC-coupled PV is present |
 | `pv_dc_efficiency` | DC MPPT + DC-DC conversion efficiency (~0.97) |
-| `max_grid_power_kw` | Grid connection cap (0 = unlimited) |
+| `max_grid_power_kw` | Grid connection cap, applied to the action set on import and as curtailment on export (0 = unlimited) — see §4.5 |
 | `high_soc_charge_threshold_pct` | Above this SoC (%), charge is limited to `high_soc_max_charge_kw` |
 | `high_soc_max_charge_kw` | Derated charge limit above threshold (0 = no derating) |
 | `low_soc_discharge_threshold_pct` | Below this SoC (%), discharge is limited to `low_soc_max_discharge_kw` |
@@ -102,9 +102,10 @@ The DP operates on a discrete grid of SoC states and power actions. Continuous S
 The SoC range `[min_soc_kwh, max_soc_kwh]` is divided into evenly spaced states:
 
 ```
-soc_resolution_wh = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
-n_soc_states = round((max_soc_wh - min_soc_wh) / soc_resolution_wh) + 1
-soc_states[i] = min_soc_wh + i × soc_resolution_wh
+soc_res_target   = max(SOC_RESOLUTION_WH, (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
+n_soc_states     = round((max_soc_wh - min_soc_wh) / soc_res_target) + 1
+soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)   # exact fit
+soc_states[i]    = min_soc_wh + i × soc_resolution_wh
 ```
 
 - **`SOC_RESOLUTION_WH`** (default: 10 Wh) is the base grid constant; the power step is derived from it.
@@ -112,6 +113,7 @@ soc_states[i] = min_soc_wh + i × soc_resolution_wh
 - The cap engages only above 10 kWh of usable range (`MAX_SOC_STATES × SOC_RESOLUTION_WH`). Typical home batteries keep the exact 10 Wh grid and are unaffected.
 - At the cap the resolution is 0.1% of usable capacity (e.g. 44 Wh on a 44 kWh range), well below SoC sensor accuracy (~1%). Changing the grid does shift which SoC levels are representable, so realized savings move by a few percent in either direction — this is discretization jitter, not a systematic loss, and is inherent to any grid choice.
 - Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
+- The resolution is shrunk so the grid divides the usable range exactly, making the top state exactly `max_soc_wh`. With a fixed resolution a range that is not a whole multiple of it left the last few Wh unreachable, and the fill-to-max boundary action then charged to a SoC that the state it was credited to did not represent. Shrinking the step rather than adding a state keeps the `MAX_SOC_STATES` budget intact.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
 
 ### 3.2 Power Action Grid
@@ -157,7 +159,7 @@ Two physical effects act in opposite directions. Cell I²R (resistive) losses gr
 
 **Measured curves for real hardware**: see [`efficiency-curves.md`](efficiency-curves.md) for ready-to-paste curves for named home battery systems, based on the HTW Berlin "Stromspeicher-Inspektion 2026" lab measurements, plus guidance on deriving a curve for hardware that is not listed.
 
-**Representative scalar efficiency**: some consumers need one number instead of the full curve — the oscillation filter threshold, the hybrid-mode shadow price thresholds and diagnostics. That scalar is the arithmetic mean of the curve sampled at 10 points from 5 % to 95 % of nominal power (the sampling used by the HTW Berlin efficiency guideline, so it is comparable to published mean path efficiencies), and `round_trip_efficiency = charge_eff_repr × discharge_eff_repr`. For a symmetric flat curve at 0.9487: RTE ≈ 0.90, identical to the pre-curve implementation.
+**Representative scalar efficiency**: some consumers need one number instead of the full curve — the oscillation filter threshold, the displayed thresholds on the shadow price sensor and diagnostics. (The hybrid-mode decisions are *not* among them: they interpolate the curve at the power actually under consideration, so they compare against λ on the same terms the DP priced that action with. The scalar is only their fallback at zero power.) That scalar is the arithmetic mean of the curve sampled at 10 points from 5 % to 95 % of nominal power (the sampling used by the HTW Berlin efficiency guideline, so it is comparable to published mean path efficiencies), and `round_trip_efficiency = charge_eff_repr × discharge_eff_repr`. For a symmetric flat curve at 0.9487: RTE ≈ 0.90, identical to the pre-curve implementation.
 
 Sampling at zero power instead would take the single worst point of a realistic curve — for a measured curve it yields RTE 0.64 where the true operating value is 0.93, inflating every threshold derived from it by ~20 % and effectively suppressing arbitrage and PV capture.
 
@@ -211,12 +213,16 @@ When charging at AC setpoint `P` (W):
    that remains after the AC-charged energy:
    ```
    headroom_wh       = max(0, max_soc_wh - soc_wh - ac_stored_wh)
-   passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh)
+   charge_budget_wh  = max_charge_power_kw × 1000 × dt − ac_stored_wh
+   passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh, charge_budget_wh)
    ```
 
 3. **Remaining DC PV** not absorbed by the battery flows to AC through the inverter at 96% efficiency.
 
-4. **Throughput**: `(ac_stored_wh + passive_charge_wh) / 1000` kWh (for degradation).
+4. **Throughput**: tracked in two buckets — `ac_stored_wh / 1000` kWh commanded
+   by the setpoint and `passive_charge_wh / 1000` kWh absorbed passively by the
+   MPPT. Degradation applies to both; the arbitrage hurdle (§4.5) only to the
+   commanded part.
 
 ### 4.3 Discharging (`action_w < 0`)
 
@@ -236,7 +242,8 @@ No explicit grid power, but DC-coupled PV still passively charges the battery up
 
 ```
 headroom_wh      = max_soc_wh - soc_wh
-passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh)
+charge_budget_wh  = max_charge_power_kw × 1000 × dt
+passive_charge_wh = min(pv_dc_production_w × dc_eff × dt, headroom_wh, charge_budget_wh)
 throughput_kwh    = passive_charge_wh / 1000
 ```
 
@@ -247,7 +254,29 @@ total_ac_pv_w = pv_production_w + dc_pv_excess_w × DC_TO_AC_INVERTER_EFF
 net_grid_w    = consumption_w - total_ac_pv_w + grid_to_battery_w
 ```
 
-If `max_grid_power_kw > 0`, `net_grid_w` is clamped to `[-cap, +cap]`.
+If `max_grid_power_kw > 0`, only the **export** side is clamped: `net_grid_w = max(-cap, net_grid_w)`.
+PV that cannot be exported is curtailed, and zero revenue is what curtailment
+costs, so discharging past the cap is self-limiting — it earns nothing and still
+pays degradation.
+
+**Import is deliberately not clamped here.** Capping the *price* of over-cap
+import makes that import free: the SoC keeps rising while the cost stops
+growing, so the DP charges at full power whenever the cap is binding. A 4 kW cap
+produced plans with 7.1 kW of grid flow. The connection limit is a constraint on
+what the battery may *do*, so it bounds the action set instead:
+
+```
+charge_limit_w = max(0, max_grid_power_kw × 1000 − consumption_w + ac_pv_w)
+```
+
+applied alongside the SoC-dependent battery limit in both DP passes
+(`max_chg_w = min(soc_max_charge_w, charge_limit_w)`). `ac_pv_w` is AC-side PV
+only: how much DC-coupled PV reaches the AC bus depends on how much the battery
+absorbs, and assuming none of it does is the bound that cannot be violated.
+
+When household load alone exceeds the cap the headroom is zero, so no charging
+is scheduled — and the resulting over-cap import is still priced in full, in the
+schedule and in the baseline alike.
 
 ```
 energy_kwh = |net_grid_w| × dt / 1000
@@ -256,10 +285,35 @@ grid_cost = energy_kwh × grid_price      (if net_grid_w > 0: buying)
           = -energy_kwh × feed_in_price  (if net_grid_w < 0: selling)
 
 degradation_cost_per_kwh = degradation_cost_per_cycle / (2 × usable_kwh)  (conversion in coordinator; a full cycle = 2 × usable_kwh throughput)
-degradation_cost = throughput_kwh × degradation_cost_per_kwh
+degradation_cost = (ac_throughput_kwh + passive_throughput_kwh) × degradation_cost_per_kwh
 
-step_cost = grid_cost + degradation_cost
+arbitrage_cost_per_kwh = min_price_spread / 2
+arbitrage_cost = ac_throughput_kwh × arbitrage_cost_per_kwh
+
+step_cost = grid_cost + degradation_cost + arbitrage_cost
 ```
+
+**Arbitrage hurdle.** `min_price_spread` is the user's "do not bother below this"
+threshold. Charging half of it per kWh of **commanded** throughput in each
+direction makes one full cycle carry `2 × degradation + min_price_spread` — the
+same threshold the oscillation filter (§8.1) applies, but now inside the
+objective the DP minimises.
+
+Passive DC-PV charging is exempt: the MPPT absorbs it whatever the AC setpoint
+is, so it is not an arbitrage decision and must not be discouraged. That is why
+throughput is tracked in two buckets.
+
+The hurdle steers decisions but is not money: `total_cost`, `raw_total_cost` and
+`savings` are all recomputed over the resulting schedule with
+`arbitrage_cost_per_kwh = 0`, so reported figures stay comparable to the
+battery-free baseline.
+
+Applying the hurdle only afterwards, as the filter used to do on its own, meant
+the DP solved a different problem than the one configured and a window
+heuristic then thinned out the answer. On quarter-hourly prices that cost 12 %
+to 61 % of the achievable savings in measured scenarios; with the hurdle in the
+objective the same filter removes 0.1 % to 1 %, because there is little left for
+it to find.
 
 ---
 
@@ -296,7 +350,7 @@ V[t][s] = min over all actions a of:
 
 where `s'` is the SoC state after applying action `a`:
 
-- **Charging**: `s' = s + a × dt × charge_eff(|a|/1000)` plus passive DC PV charging up to the remaining headroom (if DC-coupled)
+- **Charging**: `s' = s + a × dt × charge_eff(|a|/1000)` plus passive DC PV charging up to the remaining headroom **and the remaining charge-power budget** (if DC-coupled). The AC setpoint and the MPPT share one battery-side budget of `max_charge_power_kw × dt`, so an array larger than the inverter cannot charge the pack faster than its rating, and an AC command cannot be stacked on top of a full-rate passive charge
 - **Discharging**: `s' = s - |a| × dt / dis_eff(|a|/1000)` (energy drawn from battery, with losses)
 - **Idle**: `s' = s` (or passive DC PV charging if DC-coupled)
 
@@ -377,7 +431,22 @@ After the forward pass, two filters clean up the schedule.
 
 ### 8.1 Oscillation Filter
 
-The DP sometimes schedules rapid charge↔discharge switches that are technically cost-optimal within the discrete state space but produce excessive battery cycling with little financial benefit.
+Since `min_price_spread` moved into the DP objective (§4.5), the schedule
+reaching this filter already respects the arbitrage threshold. The filter is now
+a safety net for discretisation artefacts rather than the mechanism that
+enforces the threshold, and it typically changes nothing.
+
+**Cost guard.** Its verdict is accepted only when it does not cost money: both
+the raw and the filtered schedule are priced with `_calculate_schedule_total_cost`
+(real money, no arbitrage hurdle) and the cheaper one is returned. The DP
+evaluates the exact cost model, while this filter works from a much cruder
+proxy — it prices every discharged watt above the instantaneous residual load at
+the feed-in price, ignores the terminal value of stored energy, and pairs steps
+by a fixed lookahead window instead of by the SoC trajectory that actually links
+them. Where the two disagree, the DP is right. Measured over simulated days the
+guard was worth ~3 % of achievable savings on quarter-hourly prices and ~0.1 %
+on hourly ones: the finer the price resolution, the more the window heuristic
+misfires.
 
 **Minimum profitable spread**: For arbitrage to be worthwhile, the discharge price must exceed the charge price by at least:
 
@@ -434,7 +503,13 @@ This flag is a manual override, intended to be toggled by a Home Assistant autom
 
 ### 8.2 Micro-Cycle Filter
 
-Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that degradation cost per kWh becomes disproportionately high. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
+Very short charge or discharge segments (e.g. a single 15-minute slot) move so little energy that wear per kWh of useful storage becomes disproportionately high — the part of ageing that a per-kWh degradation price cannot express, because it is per cycle rather than per throughput. Any contiguous block of charging or discharging that moves less than `MIN_CYCLE_KWH` (default: 0.2 kWh) is replaced with idle. If no micro-cycles are found, the filter returns the schedule unchanged without rebuilding.
+
+Block energy is measured on the **battery** side — `P × charge_eff × dt` when charging, `P / discharge_eff × dt` when discharging — which is the quantity that actually wears the cells and the same one degradation is priced on. Measuring the AC setpoint instead misjudged blocks near the threshold by the efficiency factor, in opposite directions for the two directions.
+
+Unlike the oscillation filter this is deliberately **not** gated on cost: the wear it avoids is real but unpriced, so a cost guard would disable it entirely. It is not free either — over simulated quarter-hourly days it suppresses a handful of steps per day and costs on the order of 2 % of achievable savings. `MIN_CYCLE_KWH` is the knob: raise it to trade more savings for less wear, lower it for the reverse.
+
+Step 0 is sized on the reference (full) interval rather than its own, shortened duration. It covers only the remainder of the current price period and can be as little as a minute, so measuring it on that duration judged an action by when the optimizer happened to run rather than by its economics — the same correction the oscillation filter applies to its lookahead window.
 
 ---
 
@@ -456,13 +531,31 @@ Let `chg_r = chg_eff_repr` and `dis_r = dis_eff_repr` (representative scalars, �
 
 Charge-speed correction: when runtime calibration detects that the battery gains less SoC per time step than modelled, the optimizer reduces the charge-side efficiency curve for the planned SoC transitions. Economic quantities (step costs, the oscillation-filter threshold) keep using the nominal curves.
 
+**The correction is an efficiency factor: measured efficiency over modelled efficiency.** Below 1.0 means "slower than the curve says" in both directions, and the curve handed to the DP is `eff × factor` on both sides. That single definition is what makes one apply rule and one clamp correct for both.
+
+It used to be stored as the raw `measured / planned` ratio, which means opposite things per direction — the planned SoC change is `AC × eff` when charging and `AC / eff` when discharging, so a slow pack moves *less* SoC than planned while charging and *more* while discharging. The module's rule is to only ever plan a battery as slower than its curve (a measurement may confirm the user's entry, not make the DP bolder), and on the discharge side that rule was therefore inverted: a genuinely derating pack produced a ratio above 1.0 and was discarded, while the optimistic direction was applied. The `[0.5, 1.05]` clamp truncated the same signal from the other end. Both are gone with the factor definition; stored payloads from before it are converted on load and re-clamped, which sends a history of the energy-counter artefact below to the clamp, where it is stored and never applied.
+
+**The correction may exceed 1.0; the resulting curve may not.** A pessimistic entry has to be correctable upwards, so the factor itself is unbounded above (before clamping). The efficiencies built from it are physical quantities — `charge_eff` is pack energy stored over AC drawn, `discharge_eff` is AC delivered over pack energy drawn — so both override curves are capped at 1.0. Leaving the discharge side uncapped was defended as harmless because the curve never enters the cost model: true of the accounting and false of the decisions, since the DP selects its actions against exactly this transition. An over-unity discharge point lifts the modelled round trip towards 1.0, which makes price spreads far below the real break-even look profitable and produces charge/discharge churn on a nearly flat price curve.
+
+**The observation comes from the SoC delta.** The per-battery cumulative kWh counters cannot supply it: a battery energy counter sits on the same side of the inverter as the setpoint that drove it — for an AC-coupled pack there is no other side to put it on — so measured-over-commanded is dispatch fidelity, not efficiency. Scored against a plan denominated in SoC it returns the conversion loss a second time, and the correction then cancels out the very efficiency the curve describes: a healthy pack acquires a discharge correction near its nominal efficiency and a charge correction pinned to the `1.05` clamp, whose product is ≈ 1. Only the SoC delta spans the conversion and can price it. The counters are still read, and their measured-over-commanded ratio is published as `dispatch_fidelity` on the calibration sensors — a device that stops following its setpoint is worth seeing — but it never reaches the curve. A SoC sensor reporting whole percent quantises at `capacity / 100` — 0.1 kWh on a 10 kWh pack — so the minimum planned change worth sampling scales with the observed sensor resolution rather than a fixed 0.1 kWh. Factors outside `[0.5, 1.5]` are dropped rather than folded into the mean: an asymmetric clip (capped at 1.05, allowed down to 0.5) let symmetric measurement noise bias the correction below 1.0 for a healthy battery. Only the resulting mean is clamped, to `[0.5, 1.05]`, before it is applied — both bounds acting on the factor, so they mean the same thing in both directions. A pack with counters but no usable SoC reading reports `no_soc_measurement` and takes no sample.
+
+**One calibration per battery.** Each pack keeps its own window, its own storage key and its own pair of diagnostic sensors, and is scored against the setpoint *it* was given (`battery_setpoints`) rather than against the fleet plan. The dispatcher concentrates a setpoint on one battery at a time (see [Section 12](#12-multi-battery-dispatch)), so a single fleet-wide ratio measures whichever pack happened to be picked and then attributes it to all of them: a pack that is losing capacity is invisible, dragging the shared number down and having its healthy sibling planned pessimistically. A pack that was not dispatched in this direction reports `battery_not_dispatched` and takes no sample.
+
+The planned SoC change per pack is `|setpoint| × step_hours × charge_eff(|setpoint|)` for charging and `|setpoint| × step_hours / discharge_eff(|setpoint|)` for discharging, using that battery's own curve at its own power — the curves are power-dependent, so a pack running at 1.2 kW is not described by the fleet's 2.4 kW point. The derating guard likewise uses the pack's own threshold and its own SoC.
+
+The DP plans one SoC for the whole fleet, so it is handed the **capacity-weighted aggregate** of the per-battery corrections, taken over the packs that have actually measured something. A pack the dispatcher has never used carries no evidence, and averaging its nominal 1.0 in would report half the derating that was observed — an unmeasured pack is therefore assumed to behave like the measured ones rather than like the datasheet. The fleet sensors publish that aggregate; the per-battery sensors publish the individual measurements. On upgrade, a battery with nothing of its own seeds from the old fleet-wide store: that value is no longer the answer, but it is a better prior than nominal and each new sample replaces more of it.
+
 The shadow price is always the raw DP value — there is no separate "post-processed" shadow price. Post-processing filters affect `total_cost` and `savings` (where the difference between raw and processed values shows the impact of filtered actions), but the shadow price is a DP concept that is not modified by post-processing.
 
 **Use by hybrid mode**: λ is used by the coordinator as the charge/discharge switching threshold in hybrid mode. It is deliberately not fed back into the next run's terminal condition (see [Section 5](#5-terminal-condition)).
 
-**Use by hybrid+ mode**: hybrid+ additionally uses λ to gate PV-surplus capture. Plain hybrid stores any surplus as soon as it appears; hybrid+ only stores it when `λ × sqrt(RTE)` exceeds the current feed-in price. Because λ already prices in upcoming cheap-surplus hours (e.g. a midday PV peak coinciding with low prices), a low λ means the battery can be filled more cheaply later — so the current surplus is exported at the (higher) feed-in price instead, with a ±5% hysteresis band around the threshold to prevent oscillation.
+A planned discharge is executed when `feed_in × discharge_eff(P_plan) ≥ λ` (±5 % hysteresis) — the sale is priced at the curve efficiency for the power the DP planned, so the test uses the same economics that made the DP choose the action. Comparing a curve-derived λ against a sale priced at the representative scalar would veto the DP's own decision on batteries whose curve rises well above that mean.
 
-Conversely, when little future surplus is forecast, λ stays high: every kWh not captured now would have to be bought from the grid later, or is missing during expensive evening hours. The threshold `λ × sqrt(RTE) ≥ feed-in` is then met and hybrid+ captures the surplus immediately — identical to plain hybrid. No separate rule is needed; the shadow price encodes "how cheaply can the battery still be filled later" by construction. Exporting only wins when the battery would fill up anyway (little headroom relative to the forecast surplus) or when stored energy has little future value (flat prices, no discharge opportunity).
+When the test fails, the energy is worth more later than selling it now pays. That is a decision to hold, so the fallback is `idle` unless capturing the surplus is *itself* worthwhile by the same yardstick (`λ × charge_eff(P_surplus) ≥ feed_in`); zero-grid would otherwise buy PV surplus at exactly the feed-in price the veto just refused. This test applies in plain hybrid too — see [control-modes.md](control-modes.md#hybrid-recommended).
+
+**Use by hybrid+ mode**: hybrid+ additionally uses λ to gate PV-surplus capture when the DP itself plans `idle`. Plain hybrid stores any surplus as soon as it appears; hybrid+ only stores it when `λ × charge_eff(P_surplus)` exceeds the current feed-in price. Because λ already prices in upcoming cheap-surplus hours (e.g. a midday PV peak coinciding with low prices), a low λ means the battery can be filled more cheaply later — so the current surplus is exported at the (higher) feed-in price instead, with a ±5% hysteresis band around the threshold to prevent oscillation.
+
+Conversely, when little future surplus is forecast, λ stays high: every kWh not captured now would have to be bought from the grid later, or is missing during expensive evening hours. The threshold `λ × charge_eff ≥ feed-in` is then met and hybrid+ captures the surplus immediately — identical to plain hybrid. No separate rule is needed; the shadow price encodes "how cheaply can the battery still be filled later" by construction. Exporting only wins when the battery would fill up anyway (little headroom relative to the forecast surplus) or when stored energy has little future value (flat prices, no discharge opportunity).
 
 ---
 
@@ -502,6 +595,8 @@ Several implementation details prevent subtle correctness bugs:
 | Feed-in price `None` | Coordinator always falls back to `CONF_FIXED_FEED_IN_PRICE`; returning `None` would cause the DP to use the grid buy price, making PV arbitrage always unprofitable |
 | Efficiency curve scalar | `round_trip_efficiency = chg_eff_repr × dis_eff_repr`, each the mean of its curve over 5..95 % of nominal power — never the zero-power value, which is the worst point of a realistic curve |
 | Derating precomputed outside `t`-loop | `soc_max_charge_w[s]` and `soc_max_discharge_w[s]` are arrays computed once from `soc_states` before the backward pass, avoiding repeated method calls in the tight inner loop |
+| Step cost recomputed per SoC state | The step cost only depends on SoC through the DC-PV headroom term. Each step precomputes one cost per action plus the SoC below which it is valid: unbounded without DC PV and for every discharge action, the headroom threshold for charge/idle under DC PV. Roughly a 3.4x solve-time reduction; results are unchanged, which `tests/test_cross_impl.py` proves because `simulate_diagnostics.py` has no such cache |
+| Forecast series anchored elsewhere | PV, consumption and feed-in are projected onto the DP's own step windows with `resample_to_steps` rather than resampled by interval length, which assumed both series started at the same instant and shifted them by up to 45 minutes on hourly prices |
 
 ## 12. Variable Price Intervals (15-min / 30-min / hourly)
 
@@ -548,8 +643,19 @@ PV production and household consumption forecasts are emitted by the forecast co
 
 The optimization coordinator resamples from the pipeline's native interval (published as `forecast_interval_minutes` in the coordinator data; 60 is assumed for data from older versions) to the price interval:
 
-- `resample_forecast(pv_forecast_kw, forecast_interval_minutes, price_interval)` — repetition when upsampling, weighted-average when downsampling
-- Because the forecast series starts at the current quarter-hour (not the current hour), step k of the forecast aligns with price period k for 15-minute price intervals — previously hourly-based series could be misaligned by up to 45 minutes at hour boundaries
+- `resample_to_steps(pv_forecast_kw, forecast_start_utc, forecast_interval_minutes, step_starts, step_durations_hours)` — each DP step takes the duration-weighted average of the source intervals its own window overlaps
+- The projection is by timestamp, not by interval length, because the two series have different anchors: the forecast series starts at the current quarter-hour, while step k starts at a price-period boundary and step 0 is the shortened remainder of the current period. Resampling by interval length alone shifted the whole series by up to 45 minutes at hour boundaries
+
+### Historical-model alignment
+
+The historical price model predicts **per local hour** (its lookup key is hour-of-day × weekday × GHI bin × wind bin). Both places its output is used are anchored on real timestamps rather than on a step count:
+
+- **Horizon extension** — the model starts at the first step the live forecast does not cover (`last live period start + price_interval`), and its hourly output is projected onto those step windows with `resample_to_steps`.
+- **Reference series** (`price_forecast_predicted` / `feed_in_price_forecast_predicted`, published for prediction-vs-actual comparison; never an optimizer input) — the model starts at the local hour containing step 0 and is projected onto the DP's own step grid.
+
+The weather features are sliced from the weather coordinator's own `forecast_start_utc`, so the GHI/wind values handed to the model belong to the hours it is predicting even when the weather series was fetched in an earlier hour.
+
+Anchoring on a step count instead breaks this whenever the live prices do not cover a whole number of hours from the top of the current hour — the normal case for a 15-minute price sensor publishing through midnight — and shifts the entire modelled tail up to a full hour, which moves the next day's charge and discharge windows with it.
 
 ### Past-entry exclusion for timestamp-bearing sensors
 
@@ -610,9 +716,60 @@ Output: power_schedule_kw, mode_schedule, soc_schedule_kwh,
 
 ---
 
+### Per-array PV forecast calibration
+
+Each PV array can carry a measured production counter. The forecast for that
+array is then scored against what it actually produced and multiplied by a
+learned gain factor.
+
+The factor is an energy-weighted ratio over the last `PV_CALIBRATION_WINDOW`
+sampled steps — `sum(measured) / sum(forecast)`, not a mean of per-step ratios.
+A quarter hour under cloud has a large relative error on a tiny amount of
+energy, and weighting by energy stops those steps dominating an estimate that
+is meant to describe a gain error.
+
+Samples are only taken in the middle of the array's rating (10–90 % of kWp):
+below the floor the signal is smaller than the noise, above the ceiling
+inverter clipping dominates and is not a forecast error. The ceiling has to sit
+above what an array genuinely reaches — a well-oriented array peaks near 85 %
+of its rating on a clear summer day, and a lower ceiling excludes exactly the
+steps with the best signal-to-noise ratio, leaving a south array learning only
+from its oblique, diffuse-dominated hours and then applying that error all day.
+Typical DC/AC ratios of 1.1–1.2 put real clipping at 83–91 %.
+
+Steps are skipped entirely while PV curtailment is active, when the elapsed
+window is not the window the forecast described, and when the counter jumps
+backwards. Within the accepted window the planned energy is stretched to the
+time that actually elapsed: this coordinator also refreshes when new weather
+arrives, so a meter delta covering 20 minutes is regularly scored against a
+snapshot describing 15, and a late run alone would read as a 33 % better array.
+
+The applied factor is clamped and only used once `PV_CALIBRATION_MIN_SAMPLES`
+observations exist. That floor is what separates a gain error from the weather:
+an array only ever samples in its own part of the day, so it picks up the
+radiation forecast's bias for those hours, and at a couple of dozen samples —
+one afternoon of production — that bias *is* the correction. A correction is
+reported as applied only when it has been derived *and* differs from nominal by
+more than `PV_CALIBRATION_APPLY_EPSILON`, the same gate the forecast itself
+uses, so "being corrected" cannot mean something different on the sensor than
+it does in the model.
+
+**What it can and cannot fix.** A wrong tilt or orientation entry, soiling and
+a string that is down are gain errors: the array produces a roughly constant
+fraction of what the model expects, and the factor captures that. Shading is
+not — it is a function of sun position, so a single scalar smears a
+morning-only obstruction across the whole day. Modelling that needs a horizon
+profile, which this does not attempt.
+
+---
+
 ## 12. Multi-Battery Dispatch
 
 The DP optimizer treats all configured batteries as a single aggregated virtual battery (`aggregate_battery_configs`). After the optimizer produces a combined setpoint, `_split_setpoint` distributes it across the individual inverters.
+
+**Aggregating SoC-dependent derating.** The fleet is assumed to sit at a common relative SoC, so above the fleet threshold the combined limit is the sum of what each pack can still do there: its own derated limit if it derates, its full rating if it does not. The threshold is the first one reached — the lowest of the packs that actually derate for charging, the highest for discharging — not a capacity-weighted average, which would mix real thresholds with the 100 %/0 % sentinels of packs that do not derate and, paired with a sum of only the derated powers, cap the whole fleet at one pack's reduced rating.
+
+Entry-level settings (the grid capacity cap, DC coupling) are not battery properties and are overlaid onto the aggregate by the coordinator's `_apply_entry_level_config`.
 
 ### SoC-gap triggered concentration
 

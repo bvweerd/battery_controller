@@ -47,7 +47,7 @@
               "fixed_feed_in_price": "Fallback sell price when no feed-in price sensor is configured. Also used as the minimum value for arbitrage calculations.",
               "zero_grid_enabled": "Enables real-time battery control to minimize grid exchange. Requires power consumption and production sensors.",
               "zero_grid_response_time_s": "Expected delay from setpoint change to battery response. Limits how frequently setpoints are updated to avoid oscillation.",
-              "max_grid_power_kw": "Caps grid import and export power in the optimizer. Set to 0 for no limit."
+              "max_grid_power_kw": "The optimizer keeps planned charging within this limit, and treats export beyond it as curtailed (no feed-in revenue). Set to 0 for no limit."
             }
           }
         }
@@ -155,7 +155,7 @@
               "fixed_feed_in_price": "Fallback sell price when no feed-in price sensor is configured. Also used as the minimum value for arbitrage calculations.",
               "zero_grid_enabled": "Enables real-time battery control to minimize grid exchange. Requires power consumption and production sensors.",
               "zero_grid_response_time_s": "Expected delay from setpoint change to battery response. Limits how frequently setpoints are updated to avoid oscillation.",
-              "max_grid_power_kw": "Caps grid import and export power in the optimizer. Set to 0 for no limit."
+              "max_grid_power_kw": "The optimizer keeps planned charging within this limit, and treats export beyond it as curtailed (no feed-in revenue). Set to 0 for no limit."
             }
           }
         }
@@ -276,12 +276,14 @@
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1, accounts for shading, wiring, soiling)",
             "dc_coupled": "DC-coupled (directly on battery inverter)",
-            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)",
+            "pv_measured_production_sensor": "Measured production sensor (kWh, optional)"
           },
           "data_description": {
             "peak_power_kwp": "Total rated peak power of all panels in this array",
             "efficiency_factor": "Ignored for DC-coupled arrays (uses DC coupling efficiency from main config)",
-            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback.",
+            "pv_measured_production_sensor": "Cumulative kWh produced by THIS array. Used to learn a per-array correction on the forecast — a wrong tilt or orientation entry, soiling or a dead string show up as a systematic gain error. Also feeds the gross-load reconstruction, alongside any sensors already configured there. If one inverter reports a single counter for several arrays, set it on one of them."
           }
         },
         "reconfigure": {
@@ -294,10 +296,12 @@
             "tilt": "Tilt angle (degrees, 0=flat, 90=vertical)",
             "efficiency_factor": "System efficiency (0-1)",
             "dc_coupled": "DC-coupled (directly on battery inverter)",
-            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)"
+            "pv_forecast_sensors": "PV forecast sensors (optional, e.g. Solcast)",
+            "pv_measured_production_sensor": "Measured production sensor (kWh, optional)"
           },
           "data_description": {
-            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback."
+            "pv_forecast_sensors": "Forecast sensors from a PV forecast integration such as Solcast (select both the 'Forecast Today' and 'Forecast Tomorrow' sensors). When set, their data replaces the internal radiation-based model for the periods they cover; the internal model remains the fallback.",
+            "pv_measured_production_sensor": "Cumulative kWh produced by THIS array. Used to learn a per-array correction on the forecast — a wrong tilt or orientation entry, soiling or a dead string show up as a systematic gain error. Also feeds the gross-load reconstruction, alongside any sensors already configured there. If one inverter reports a single counter for several arrays, set it on one of them."
           }
         }
       },
@@ -367,6 +371,18 @@
       },
       "pv_array_forecast": {
         "name": "PV Forecast"
+      },
+      "charge_eff_correction": {
+        "name": "Charge Efficiency Correction"
+      },
+      "discharge_eff_correction": {
+        "name": "Discharge Efficiency Correction"
+      },
+      "battery_charge_eff_correction": {
+        "name": "Charge Efficiency Correction"
+      },
+      "battery_discharge_eff_correction": {
+        "name": "Discharge Efficiency Correction"
       }
     },
     "number": {

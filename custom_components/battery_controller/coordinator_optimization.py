@@ -18,14 +18,39 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .battery_dispatch import BatteryDispatcher
 from .battery_model import BatteryConfig, BatteryState, aggregate_battery_configs
-from .efficiency_curve import EfficiencyCurve
+from .efficiency_calibration import (
+    CALIBRATION_APPLY_THRESHOLD,
+    CALIBRATION_DC_COUPLED,
+    CALIBRATION_DELTA_TOO_SMALL,
+    CALIBRATION_DERATING,
+    CALIBRATION_NO_PLAN,
+    CALIBRATION_NO_RESULT,
+    CALIBRATION_NO_SOC_SOURCE,
+    CALIBRATION_NOT_DISPATCHED,
+    CALIBRATION_PLAN_NOT_EXECUTED,
+    CALIBRATION_STEP_INCOMPLETE,
+    CHARGE_CALIBRATION,
+    DISCHARGE_CALIBRATION,
+    BatteryCalibration,
+    CalibrationSpec,
+    DirectionCalibration,
+    aggregate_correction,
+    aggregate_last_result,
+    counter_delta_kwh,
+    curve_override,
+    min_planned_delta_kwh,
+)
+from .efficiency_curve import interpolate_efficiency
 from .const import (
     DOMAIN,
     ACTION_CHARGING,
     ACTION_DISCHARGING,
     ACTION_IDLE,
     DC_TO_AC_INVERTER_EFFICIENCY,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_SOC_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_CONTROL_MODE,
@@ -34,6 +59,9 @@ from .const import (
     CONF_FIXED_FEED_IN_PRICE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MIN_PRICE_SPREAD,
+    CONF_NAME,
+    CONF_TIME_STEP_MINUTES,
+    DEFAULT_TIME_STEP_MINUTES,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
     CONF_PRICE_SENSOR,
@@ -42,12 +70,12 @@ from .const import (
     DEFAULT_FIXED_FEED_IN_PRICE,
     DEFAULT_MANUAL_POWER_SETPOINT_W,
     DEFAULT_MIN_PRICE_SPREAD,
+    CONF_MAX_GRID_POWER_KW,
+    DEFAULT_MAX_GRID_POWER_KW,
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
-    CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_ZERO_GRID_DEADBAND_W,
-    DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_HYBRID_PLUS,
@@ -64,35 +92,35 @@ from .coordinator_forecast import ForecastCoordinator
 from .coordinator_weather import WeatherDataCoordinator
 from .forecast_models import PriceForecastModel
 from .helpers import (
+    battery_energy_sensor_ids,
     synthesize_timestamps,
     compute_step_durations_hours,
-    extract_price_forecast_with_interval,
     extract_price_forecast_with_timestamps,
     get_sensor_value,
-    resample_forecast,
+    resample_to_steps,
+    state_has_value,
+    usable_state,
 )
 from .optimizer import optimize_battery_schedule, OptimizationResult
 from .zero_grid_controller import create_zero_grid_controller
 
 _LOGGER = logging.getLogger(__name__)
 
-# Multi-battery dispatch: SoC-gap thresholds
-# When the relative-SoC gap between batteries is below _SOC_SPLIT_THRESHOLD,
-# concentrate the full setpoint on one battery (better tracking, avoids
-# low-power inefficiency). Above the threshold, split proportionally to
-# rebalance diverging SoC levels.
-_SOC_SPLIT_THRESHOLD = 0.10
-# Minimum rel-SoC advantage for a challenger battery to displace the current
-# active battery within concentration mode. Must be < _SOC_SPLIT_THRESHOLD so
-# there is a middle zone [_SOC_HYSTERESIS, _SOC_SPLIT_THRESHOLD) where a switch
-# to a clearly better battery happens before proportional splitting kicks in.
-_SOC_HYSTERESIS = 0.05
-
 # Hybrid mode: when the DP plans charging while the grid is exporting, switch
 # to zero_grid (surplus-following) only if the export surplus covers at least
 # this fraction of the planned charge power. Below it, the DP evidently wants
 # grid charging beyond the surplus and the schedule is followed instead.
 _SURPLUS_COVERS_PLAN_FRACTION = 0.8
+
+
+def _mode_from_power_kw(power_kw: float) -> str:
+    """Classify a measured battery power as charging, discharging or idle."""
+    power_w = power_kw * 1000
+    if power_w > BATTERY_MODE_THRESHOLD_W:
+        return ACTION_CHARGING
+    if power_w < -BATTERY_MODE_THRESHOLD_W:
+        return ACTION_DISCHARGING
+    return ACTION_IDLE
 
 
 class OptimizationCoordinator(DataUpdateCoordinator):
@@ -126,23 +154,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "battery_subentries", []
         )
 
-        # Build per-battery configs and aggregate for optimizer
-        self._individual_battery_configs: list[tuple[str, BatteryConfig]] = [
-            (sid, BatteryConfig.from_subentry(d)) for sid, d in self._battery_subentries
-        ]
+        # Build per-battery configs and aggregate for optimizer. The dispatcher
+        # owns the per-battery configs and states; the coordinator reaches them
+        # through the properties below.
+        self._dispatcher = BatteryDispatcher(
+            [
+                (sid, BatteryConfig.from_subentry(d))
+                for sid, d in self._battery_subentries
+            ]
+        )
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
-
-        # Per-battery state cache (updated by get_current_battery_state)
-        self._per_battery_states: dict[str, BatteryState] = {}
-
-        # Active battery for concentration dispatch (None = select fresh next call)
-        # zero_grid: one battery for both charge and discharge (stable across direction changes)
-        # scheduled: separate tracker; direction determines selection criterion
-        self._zero_grid_active_battery: str | None = None
-        self._scheduled_active_battery: str | None = None
+        self._apply_entry_level_config()
 
         # Zero-grid controller
         self.zero_grid_controller = create_zero_grid_controller(
@@ -265,17 +289,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # flip the mode every realtime-update tick.
         self._last_hybrid_charge_decision: str = ACTION_CHARGING
 
-        # Hysteresis state for the hybrid+ surplus-capture decision: tracks
-        # whether the last decision was to store PV surplus ("zero_grid") or
-        # export it ("idle") so a shadow price hovering near the feed-in price
-        # doesn't flip the mode every optimization run.
-        self._last_hybrid_plus_capture_decision: str = "zero_grid"
+        # Hysteresis state for the surplus-capture decision: tracks whether the
+        # last decision was to store PV surplus ("zero_grid") or export it
+        # ("idle") so a shadow price hovering near the feed-in price doesn't
+        # flip the mode every optimization run.
+        self._last_surplus_capture_decision: str = "zero_grid"
 
-        # Whether hybrid+ currently blocks PV-surplus capture (exporting at the
-        # current feed-in price is worth more than storing). Gates the
-        # realtime idle→zero_grid upgrade in _resolve_controller_mode so a
-        # surplus appearing between optimizer runs isn't captured anyway.
-        self._hybrid_plus_capture_blocked: bool = False
+        # Whether the last optimizer run found PV-surplus capture uneconomical
+        # (exporting at the current feed-in price is worth more than storing).
+        # Gates the realtime idle→zero_grid upgrade in _resolve_controller_mode
+        # so a surplus appearing between optimizer runs isn't captured anyway.
+        self._surplus_capture_blocked: bool = False
 
         # Diagnostic history ring buffers (not persisted across restarts).
         # optimizer_run_log: one entry per 15-min optimizer run (24 h @ 15 min = 96).
@@ -283,34 +307,170 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._optimizer_run_log: deque[dict[str, Any]] = deque(maxlen=96)
         self._setpoint_log: deque[dict[str, Any]] = deque(maxlen=576)
 
-        # Charge efficiency calibration: rolling window of (actual_delta / planned_delta)
-        # samples collected during active charging steps. The smoothed correction
-        # is applied as a multiplier on the DP's charge-side SoC transition only,
-        # to account for systematic over-estimation of how much SoC can be added
-        # within one step (e.g. CV-phase derating near full SoC). It does not
-        # change the economic cost model. Only non-DC-coupled systems are sampled
-        # to avoid confounding with passive PV.
-        self._charge_eff_samples: deque[float] = deque(maxlen=20)
-        self._charge_eff_correction: float = 1.0
+        # Efficiency calibration, one per direction per battery: a rolling
+        # window of (actual_delta / planned_delta) samples collected on steps
+        # that planned that direction for that pack. The smoothed correction
+        # scales the DP's SoC transition for that direction only — never the
+        # economic cost model — so a charging-speed problem is not
+        # double-counted as extra energy cost. Only non-DC-coupled systems are
+        # sampled, to avoid confounding with passive PV. The DP plans one fleet
+        # SoC, so it is handed the capacity-weighted aggregate of these.
+        # See efficiency_calibration.py.
+        self._battery_calibrations: dict[str, BatteryCalibration] = {
+            sid: self._build_battery_calibration(sid, data)
+            for sid, data in self._battery_subentries
+        }
 
-        # Persistent storage for charge efficiency calibration (survives reboots).
-        entry_id = config.get("entry_id", "unknown")
-        self._charge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
-            hass, 1, f"battery_controller_{entry_id}_charge_eff"
+        # Cumulative throughput counters per battery as they stood when
+        # _last_result was planned, and the SoC each pack held at that moment.
+        # The difference against the next read is the energy that battery
+        # actually moved over the step — a far finer measurement than the SoC
+        # delta, which on a whole-percent sensor quantises at capacity/100
+        # (0.1 kWh on a 10 kWh pack).
+        self._energy_counter_snapshot: dict[str, dict[str, float | None]] = {}
+        self._soc_snapshot_kwh: dict[str, float] = {}
+        # The setpoint each battery was given for the step being scored. The
+        # dispatcher concentrates on one pack at a time, so this is what says
+        # whose plan the measured throughput belongs to.
+        self._last_battery_setpoints: dict[str, float] = {}
+
+    def _build_battery_calibration(
+        self, subentry_id: str, data: dict[str, Any]
+    ) -> BatteryCalibration:
+        """Create one battery's two calibrations, with their own storage keys.
+
+        ``legacy_store`` points at the fleet-wide key these used to share, so a
+        system that has already learned something keeps it as a starting point
+        instead of restarting from nominal. See DirectionCalibration.async_load.
+        """
+        entry_id = self.config.get("entry_id", "unknown")
+        label = str(data.get(CONF_NAME) or subentry_id)
+
+        def _for(spec: CalibrationSpec) -> DirectionCalibration:
+            return DirectionCalibration(
+                spec=spec,
+                store=storage.Store(
+                    self.hass,
+                    1,
+                    f"battery_controller_{entry_id}_{subentry_id}_{spec.name}_eff",
+                ),
+                label=label,
+                legacy_store=storage.Store(
+                    self.hass, 1, f"battery_controller_{entry_id}_{spec.name}_eff"
+                ),
+            )
+
+        return BatteryCalibration(
+            subentry_id=subentry_id,
+            charge=_for(CHARGE_CALIBRATION),
+            discharge=_for(DISCHARGE_CALIBRATION),
         )
 
-        # Discharge efficiency calibration: rolling window of (actual_delta / planned_delta)
-        # samples collected during active discharging steps. The smoothed correction
-        # is applied as a multiplier on the DP's discharge-side SoC transition only,
-        # to account for systematic over-estimation of how much SoC can be removed
-        # within one step. It does not change the economic cost model.
-        self._discharge_eff_samples: deque[float] = deque(maxlen=20)
-        self._discharge_eff_correction: float = 1.0
+    @property
+    def battery_calibrations(self) -> dict[str, BatteryCalibration]:
+        """Per-battery efficiency calibration, keyed by subentry id."""
+        return self._battery_calibrations
 
-        # Persistent storage for discharge efficiency calibration (survives reboots).
-        self._discharge_eff_store: storage.Store[dict[str, Any]] = storage.Store(
-            hass, 1, f"battery_controller_{entry_id}_discharge_eff"
+    def battery_calibration_state(
+        self, subentry_id: str, action: str
+    ) -> tuple[float, int, bool, str]:
+        """One battery's (correction, samples, applied, last_result).
+
+        The entity-facing view. ``applied`` is per battery here — whether this
+        pack's own measurement is far enough from nominal to matter — while the
+        fleet sensors report whether the aggregate changes the DP's plan.
+        """
+        calibration = self._battery_calibrations.get(subentry_id)
+        if calibration is None:
+            return (1.0, 0, False, CALIBRATION_NO_RESULT)
+        direction = calibration.for_action(action)
+        return (
+            direction.correction,
+            direction.sample_count,
+            direction.applied,
+            direction.last_result,
         )
+
+    def battery_dispatch_fidelity(
+        self, subentry_id: str, action: str
+    ) -> tuple[float | None, int]:
+        """One battery's (measured/commanded throughput, samples) for a direction.
+
+        None until the energy counters have measured a dispatched step. Reported
+        rather than applied: it says whether the device followed its setpoint,
+        which the correction cannot — see DirectionCalibration.record_dispatch.
+        """
+        calibration = self._battery_calibrations.get(subentry_id)
+        if calibration is None:
+            return (None, 0)
+        direction = calibration.for_action(action)
+        return (direction.dispatch_fidelity, direction.dispatch_sample_count)
+
+    def dispatch_fidelity(self, action: str) -> tuple[float | None, int]:
+        """The fleet's dispatch fidelity for one direction.
+
+        A plain mean over the batteries that have measured something: unlike the
+        correction this never reaches the DP, so there is no single figure it has
+        to be faithful to — it only has to make a device that stopped following
+        its setpoint visible.
+        """
+        measured = [
+            (cal.dispatch_fidelity, cal.dispatch_sample_count)
+            for cal in self._direction_calibrations(action)
+            if cal.dispatch_fidelity is not None
+        ]
+        if not measured:
+            return (None, 0)
+        total = sum(value for value, _n in measured if value is not None)
+        return (total / len(measured), sum(n for _v, n in measured))
+
+    def battery_calibration_report(self) -> dict[str, dict[str, Any]]:
+        """Every battery's calibration, for diagnostics."""
+        report: dict[str, dict[str, Any]] = {}
+        for sid, data in self._battery_subentries:
+            calibration = self._battery_calibrations.get(sid)
+            if calibration is None:
+                continue
+            entry: dict[str, Any] = {"name": data.get(CONF_NAME) or sid}
+            for direction in calibration.both():
+                fidelity = direction.dispatch_fidelity
+                entry[direction.spec.name] = {
+                    "correction": round(direction.correction, 4),
+                    "samples": direction.sample_count,
+                    "applied": direction.applied,
+                    "last_result": direction.last_result,
+                    "dispatch_fidelity": (
+                        round(fidelity, 4) if fidelity is not None else None
+                    ),
+                    "dispatch_samples": direction.dispatch_sample_count,
+                }
+            report[sid] = entry
+        return report
+
+    def _direction_calibrations(self, action: str) -> list[DirectionCalibration]:
+        """One direction's calibration for every battery, in configured order."""
+        return [
+            self._battery_calibrations[sid].for_action(action)
+            for sid, _ in self._battery_subentries
+            if sid in self._battery_calibrations
+        ]
+
+    def _aggregate_correction(self, action: str) -> float:
+        """The fleet correction the DP plans with, for one direction."""
+        capacity = {
+            sid: cfg.capacity_kwh for sid, cfg in self._individual_battery_configs
+        }
+        weighted: list[tuple[float, float]] = []
+        for sid, _ in self._battery_subentries:
+            calibration = self._battery_calibrations.get(sid)
+            if calibration is None:
+                continue
+            direction = calibration.for_action(action)
+            # A pack that has never sampled carries no evidence, so it gets no
+            # weight rather than a nominal 1.0 that would dilute its sibling.
+            weight = capacity.get(sid, 0.0) if direction.sample_count else 0.0
+            weighted.append((direction.correction, weight))
+        return aggregate_correction(weighted)
 
     @property
     def control_mode(self) -> str:
@@ -331,8 +491,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._committed_price = 0.0
         self._committed_power = 0.0
         self._committed_step_start = None
-        self._last_hybrid_plus_capture_decision = "zero_grid"
-        self._hybrid_plus_capture_blocked = False
+        self._last_surplus_capture_decision = "zero_grid"
+        self._surplus_capture_blocked = False
         # Reset cached setpoint so the real-time loop uses idle immediately
         # instead of applying stale setpoints from the previous mode while the
         # re-optimization triggered by the mode change is still running.
@@ -367,8 +527,95 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     @pv_curtailed.setter
     def pv_curtailed(self, value: bool) -> None:
-        """Enable or disable PV curtailment mode."""
+        """Enable or disable PV curtailment mode.
+
+        Propagated to the forecast coordinator: while production is
+        deliberately suppressed, the shortfall against the PV forecast is not a
+        forecast error and must not be learned as a per-array correction.
+        """
         self._pv_curtailed = value
+        self.forecast_coordinator.pv_curtailed = value
+
+    @property
+    def charge_eff_correction(self) -> float:
+        """Learned multiplier on the charge-side SoC transition (1.0 = nominal).
+
+        The fleet figure the DP plans with: the capacity-weighted aggregate of
+        the per-battery corrections. Already published in ``data`` and in
+        diagnostics; exposed here so the current value can be read without a
+        completed run, the same way control_mode and optimization_enabled are.
+        """
+        return self._aggregate_correction(ACTION_CHARGING)
+
+    @property
+    def charge_eff_sample_count(self) -> int:
+        """Observations behind charge_eff_correction, across all batteries."""
+        return sum(
+            cal.sample_count for cal in self._direction_calibrations(ACTION_CHARGING)
+        )
+
+    @property
+    def discharge_eff_correction(self) -> float:
+        """Learned multiplier on the discharge-side SoC transition."""
+        return self._aggregate_correction(ACTION_DISCHARGING)
+
+    @property
+    def discharge_eff_sample_count(self) -> int:
+        """Observations behind discharge_eff_correction, across all batteries."""
+        return sum(
+            cal.sample_count for cal in self._direction_calibrations(ACTION_DISCHARGING)
+        )
+
+    @property
+    def charge_eff_applied(self) -> bool:
+        """Whether the charge correction currently changes the DP's plan.
+
+        The aggregate is only handed to the optimizer below 0.995: a value at or
+        above that is within measurement noise of nominal and is stored but
+        never applied. Same gate as curve_override(). Judged on the
+        aggregate, because that is what the DP is given — a single derated pack
+        can be applied on its own sensor and still leave the fleet at nominal.
+        """
+        return self.charge_eff_correction < CALIBRATION_APPLY_THRESHOLD
+
+    @property
+    def discharge_eff_applied(self) -> bool:
+        """Whether the discharge correction currently changes the DP's plan."""
+        return self.discharge_eff_correction < CALIBRATION_APPLY_THRESHOLD
+
+    @property
+    def charge_eff_last_result(self) -> str:
+        """What the last charge-calibration attempt did, and why."""
+        return aggregate_last_result(
+            cal.last_result for cal in self._direction_calibrations(ACTION_CHARGING)
+        )
+
+    @property
+    def discharge_eff_last_result(self) -> str:
+        """What the last discharge-calibration attempt did, and why."""
+        return aggregate_last_result(
+            cal.last_result for cal in self._direction_calibrations(ACTION_DISCHARGING)
+        )
+
+    @property
+    def _individual_battery_configs(self) -> list[tuple[str, BatteryConfig]]:
+        """Per-battery configs, owned by the dispatcher."""
+        return self._dispatcher.configs
+
+    @_individual_battery_configs.setter
+    def _individual_battery_configs(
+        self, value: list[tuple[str, BatteryConfig]]
+    ) -> None:
+        self._dispatcher.configs = value
+
+    @property
+    def _per_battery_states(self) -> dict[str, BatteryState]:
+        """Per-battery state cache, owned by the dispatcher."""
+        return self._dispatcher.states
+
+    @_per_battery_states.setter
+    def _per_battery_states(self, value: dict[str, BatteryState]) -> None:
+        self._dispatcher.states = value
 
     async def _handle_price_model_refresh(self, now: datetime) -> None:
         """Refresh historical price model from HA recorder (daily timer)."""
@@ -445,11 +692,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             self._power_consumption_sensors or self._power_production_sensors
         )
         if has_power_sensors:
-            interval_s = float(
-                self.config.get(
-                    CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-                )
-            )
+            # Single source: create_zero_grid_controller already parsed this
+            # from the config, so re-reading it here could drift.
+            interval_s = self.zero_grid_controller.config.response_time_s
             self._unsub_realtime = async_track_time_interval(
                 self.hass,
                 self._handle_realtime_update,
@@ -479,11 +724,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             return  # Sensor is unavailable/unknown, ignore
 
         old_state = event.data.get("old_state")
-        was_unavailable = (
-            self._last_price is None
-            or old_state is None
-            or old_state.state in ("unknown", "unavailable")
-        )
+        was_unavailable = self._last_price is None or not state_has_value(old_state)
 
         # Try to read the current period start from sensor timestamps.
         try:
@@ -561,9 +802,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         old_state = event.data.get("old_state")
         was_unavailable = (
-            self._last_feed_in_period_start is None
-            or old_state is None
-            or old_state.state in ("unknown", "unavailable")
+            self._last_feed_in_period_start is None or not state_has_value(old_state)
         )
 
         try:
@@ -628,15 +867,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Trigger refresh when SoC sensor transitions from unavailable to available."""
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
-        was_unavailable = old_state is None or old_state.state in (
-            "unknown",
-            "unavailable",
-        )
-        is_available = new_state is not None and new_state.state not in (
-            "unknown",
-            "unavailable",
-        )
-        if was_unavailable and is_available:
+        if not state_has_value(old_state) and state_has_value(new_state):
             _LOGGER.debug(
                 "SoC sensor '%s' became available, triggering optimization",
                 self._battery_soc_sensor,
@@ -674,10 +905,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # controller in an over-committed setpoint (e.g. the battery left
         # discharging after a Quooker/kettle spike), which only the next full
         # optimizer run would clear. Instead the flag is handled per-mode below.
-        stale_limit_s = STALE_SENSOR_MULTIPLIER * float(
-            self.config.get(
-                CONF_ZERO_GRID_RESPONSE_TIME_S, DEFAULT_ZERO_GRID_RESPONSE_TIME_S
-            )
+        stale_limit_s = (
+            STALE_SENSOR_MULTIPLIER * self.zero_grid_controller.config.response_time_s
         )
         grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
 
@@ -812,7 +1041,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         battery_setpoints = self._split_setpoint(
-            control_action["target_power_kw"], control_action["mode"]
+            control_action["target_power_kw"], self._control_mode
         )
         self.async_set_updated_data(
             {
@@ -833,37 +1062,91 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             }
         )
 
+    def _live_option(self, key: str, default: float) -> float:
+        """Read a runtime-tunable option from the live config entry.
+
+        Number entities write straight into entry.options, so reading them from
+        the live entry (rather than the snapshot taken at setup) is what lets
+        them take effect without an integration reload. Falls back to the setup
+        snapshot, then to the default.
+        """
+        entry = self.hass.config_entries.async_get_entry(
+            self.config.get("entry_id", "")
+        )
+        options = entry.options if entry is not None else {}
+        return float(options.get(key, self.config.get(key, default)))
+
     def _get_manual_setpoint_w(self) -> float:
         """Read the live manual power setpoint from entry options.
 
-        Reads from the live config entry so changes made via the number entity
-        take effect immediately without waiting for the next optimizer run.
-
-        The number entity uses the sensor convention (positive = discharge, negative =
-        charge). We negate here to match the internal controller convention
-        (positive = charge, negative = discharge).
+        The number entity uses the sensor convention (positive = discharge,
+        negative = charge). We negate here to match the internal controller
+        convention (positive = charge, negative = discharge).
         """
-        entry_id = self.config.get("entry_id", "")
-        entry = self.hass.config_entries.async_get_entry(entry_id)
-        if entry is None:
-            return DEFAULT_MANUAL_POWER_SETPOINT_W
-        stored = float(
-            entry.options.get(
-                CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
-            )
-        )
         # Negate: user enters positive=discharge, controller expects positive=charge
-        return -stored
+        return -self._live_option(
+            CONF_MANUAL_POWER_SETPOINT_W, DEFAULT_MANUAL_POWER_SETPOINT_W
+        )
 
-    def _hybrid_plus_should_capture_surplus(
-        self, shadow_price_eur_kwh: float, current_feed_in: float
+    def _fixed_feed_in_price(self) -> float:
+        """Configured fallback feed-in price, in EUR/kWh."""
+        return float(
+            self.config.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)
+        )
+
+    def _current_feed_in_price(self, feed_in_forecast: list[float] | None) -> float:
+        """Feed-in price for the step being executed.
+
+        Never None: an empty forecast falls back to the configured fixed price,
+        because a missing feed-in price makes the optimizer treat exports at the
+        grid buy price and PV arbitrage stops looking profitable.
+        """
+        if feed_in_forecast:
+            return feed_in_forecast[0]
+        return self._fixed_feed_in_price()
+
+    def _charge_efficiency_at(self, power_kw: float) -> float:
+        """Charge efficiency for a specific AC power, from the curve.
+
+        The DP values every action at its curve efficiency, so the thresholds
+        that arbitrate between the DP plan and zero-grid must use the same
+        number. The representative scalar (``charge_efficiency``) is a mean over
+        5..95 % of nominal power and sits well below the curve at the powers a
+        real decision is taken at, which biases those comparisons against the
+        DP's own decision. It is only the fallback for a power of zero, where
+        the curve's idle-loss point says nothing useful.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.charge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.charge_efficiency_curve_parsed, power_kw
+        )
+
+    def _discharge_efficiency_at(self, power_kw: float) -> float:
+        """Discharge efficiency for a specific AC power, from the curve.
+
+        Mirrors _charge_efficiency_at for the discharge direction.
+        """
+        power_kw = abs(power_kw)
+        if power_kw <= 0:
+            return float(self.battery_config.discharge_efficiency)
+        return interpolate_efficiency(
+            self.battery_config.discharge_efficiency_curve_parsed, power_kw
+        )
+
+    def _should_capture_surplus(
+        self,
+        shadow_price_eur_kwh: float,
+        current_feed_in: float,
+        surplus_kw: float,
     ) -> bool:
-        """Return whether hybrid+ should store PV surplus rather than export it.
+        """Return whether PV surplus is worth storing rather than exporting.
 
-        Storing 1 kWh of AC surplus puts sqrt(RTE) kWh in the battery, each
+        Storing 1 kWh of AC surplus puts ``charge_eff`` kWh in the battery, each
         worth the DP shadow price λ — the marginal value of stored energy given
         the full price and PV forecast. Exporting the same kWh yields the
-        current feed-in price. When λ × sqrt(RTE) is below the feed-in price,
+        current feed-in price. When λ × charge_eff is below the feed-in price,
         the forecast says the battery can be filled more cheaply later (e.g.
         the midday PV peak at low prices), so exporting now is worth more than
         storing.
@@ -871,18 +1154,23 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Applies a ±5% hysteresis band around the feed-in threshold (same
         pattern as the hybrid discharge decision) so a shadow price hovering
         near the feed-in price doesn't flip the decision every run.
+
+        Args:
+            shadow_price_eur_kwh: DP shadow price λ (value per stored kWh).
+            current_feed_in: Feed-in price for the step being executed.
+            surplus_kw: AC surplus that would be stored, in kW. Prices the
+                charge at its curve efficiency instead of a nominal scalar.
         """
         if current_feed_in <= 0:
             # Exporting earns nothing (or costs money): always capture.
-            self._last_hybrid_plus_capture_decision = "zero_grid"
+            self._last_surplus_capture_decision = "zero_grid"
             return True
-        sqrt_rte = float(self.battery_config.round_trip_efficiency) ** 0.5
-        store_value = shadow_price_eur_kwh * sqrt_rte
-        if self._last_hybrid_plus_capture_decision == "zero_grid":
+        store_value = shadow_price_eur_kwh * self._charge_efficiency_at(surplus_kw)
+        if self._last_surplus_capture_decision == "zero_grid":
             should_capture = bool(store_value >= current_feed_in * 0.95)
         else:
             should_capture = bool(store_value >= current_feed_in * 1.05)
-        self._last_hybrid_plus_capture_decision = (
+        self._last_surplus_capture_decision = (
             "zero_grid" if should_capture else ACTION_IDLE
         )
         return should_capture
@@ -895,16 +1183,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         problem the deadband already exists to solve. Read from the live entry
         options so the number entity takes effect without a reload.
         """
-        entry_id = self.config.get("entry_id", "")
-        live_entry = self.hass.config_entries.async_get_entry(entry_id)
-        live_options = live_entry.options if live_entry is not None else {}
-        return float(
-            live_options.get(
-                CONF_ZERO_GRID_DEADBAND_W,
-                self.config.get(
-                    CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
-                ),
-            )
+        return self._live_option(
+            CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
         )
 
     def _resolve_controller_mode(
@@ -925,9 +1205,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         deadband does not damp it, because the swing between the zero_grid
         setpoint and idle's 0 W is far larger than the deadband.
 
-        In hybrid+ mode the upgrade is suppressed while surplus capture is
-        blocked (exporting is worth more than storing per the shadow price),
-        so idle genuinely means "export the surplus".
+        The upgrade is suppressed while the last optimizer run found surplus
+        capture uneconomical (exporting is worth more than storing per the
+        shadow price), so idle genuinely means "export the surplus" — otherwise
+        the realtime loop would re-capture the surplus the run just refused.
 
         Args:
             effective_mode: The resolved mode from optimization logic.
@@ -943,16 +1224,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if effective_mode == "zero_grid":
             return "zero_grid"
         # Upgrade idle → zero_grid only in zero_grid/hybrid/hybrid+ modes (not
-        # follow_schedule or manual, where idle must mean truly stop). Hybrid+
-        # additionally requires that surplus capture is economical per the last
-        # optimizer run.
+        # follow_schedule or manual, where idle must mean truly stop), and only
+        # while the last optimizer run found surplus capture economical.
         if effective_mode == ACTION_IDLE:
             upgrade_allowed = (
                 self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
-                and not (
-                    self._control_mode == MODE_HYBRID_PLUS
-                    and self._hybrid_plus_capture_blocked
-                )
+                and not self._surplus_capture_blocked
                 and has_power_sensors
             )
             if not upgrade_allowed:
@@ -999,8 +1276,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             *self._power_consumption_sensors,
             *self._power_production_sensors,
         ):
-            state = self.hass.states.get(sensor_id)
-            if state is None or state.state in ("unknown", "unavailable"):
+            state = usable_state(self.hass, sensor_id)
+            if state is None:
                 continue
             reported = state.last_reported or state.last_updated
             age_s = (now - reported).total_seconds()
@@ -1058,8 +1335,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         an unrecognized power unit are skipped (with a one-time warning):
         silently assuming W would be off by orders of magnitude for e.g. MW.
         """
-        state = self.hass.states.get(sensor_id)
-        if not state or state.state in ("unknown", "unavailable"):
+        state = usable_state(self.hass, sensor_id)
+        if state is None:
             return None
         try:
             value = float(state.state)
@@ -1084,27 +1361,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Clean up event tracking."""
-        if self._unsub_price:
-            self._unsub_price()
-            self._unsub_price = None
-        if self._unsub_feed_in_price:
-            self._unsub_feed_in_price()
-            self._unsub_feed_in_price = None
-        if self._unsub_soc:
-            self._unsub_soc()
-            self._unsub_soc = None
-        if self._unsub_forecast:
-            self._unsub_forecast()
-            self._unsub_forecast = None
-        if self._unsub_mid_period_timer:
-            self._unsub_mid_period_timer()
-            self._unsub_mid_period_timer = None
-        if self._unsub_price_model_refresh:
-            self._unsub_price_model_refresh()
-            self._unsub_price_model_refresh = None
-        if self._unsub_realtime:
-            self._unsub_realtime()
-            self._unsub_realtime = None
+        for attr in (
+            "_unsub_price",
+            "_unsub_feed_in_price",
+            "_unsub_soc",
+            "_unsub_forecast",
+            "_unsub_mid_period_timer",
+            "_unsub_price_model_refresh",
+            "_unsub_realtime",
+        ):
+            unsub = getattr(self, attr)
+            if unsub:
+                unsub()
+                setattr(self, attr, None)
         await super().async_shutdown()
 
     def _read_battery_state(
@@ -1121,8 +1390,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         power_value = get_sensor_value(self.hass, power_sensor, 0.0)
 
         if soc_sensor:
-            state = self.hass.states.get(soc_sensor)
-            if state and state.state not in ("unknown", "unavailable"):
+            state = usable_state(self.hass, soc_sensor)
+            if state is not None:
                 unit = state.attributes.get("unit_of_measurement", "")
                 if unit in ("kWh", "Wh"):
                     soc_kwh = soc_value / 1000 if unit == "Wh" else soc_value
@@ -1157,16 +1426,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else:
                     self._warn_unit_once(power_sensor, unit, "treating value as kW")
 
-        power_w = power_kw * 1000
-        if power_w > BATTERY_MODE_THRESHOLD_W:
-            mode = ACTION_CHARGING
-        elif power_w < -BATTERY_MODE_THRESHOLD_W:
-            mode = ACTION_DISCHARGING
-        else:
-            mode = ACTION_IDLE
-
         return BatteryState(
-            soc_kwh=soc_kwh, soc_percent=soc_percent, power_kw=power_kw, mode=mode
+            soc_kwh=soc_kwh,
+            soc_percent=soc_percent,
+            power_kw=power_kw,
+            mode=_mode_from_power_kw(power_kw),
         )
 
     def get_current_battery_state(self) -> BatteryState:
@@ -1205,232 +1469,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if total_capacity_kwh > 0
             else 50.0
         )
-        power_w = total_power_kw * 1000
-        if power_w > BATTERY_MODE_THRESHOLD_W:
-            mode = ACTION_CHARGING
-        elif power_w < -BATTERY_MODE_THRESHOLD_W:
-            mode = ACTION_DISCHARGING
-        else:
-            mode = ACTION_IDLE
-
         return BatteryState(
             soc_kwh=total_soc_kwh,
             soc_percent=combined_soc_percent,
             power_kw=total_power_kw,
-            mode=mode,
+            mode=_mode_from_power_kw(total_power_kw),
         )
 
     def _split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
-        """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
-
-        Uses SoC-gap triggered concentration:
-        - Gap < _SOC_SPLIT_THRESHOLD: concentrate on one battery. Avoids
-          splitting tiny setpoints across inverters and provides stable
-          single-inverter tracking for zero-grid corrections.
-        - Gap >= _SOC_SPLIT_THRESHOLD: proportional split with iterative
-          power-overflow redistribution to rebalance diverging SoC levels.
-
-        Battery selection for concentration (with _SOC_HYSTERESIS to prevent
-        rapid switching):
-        - zero_grid / hybrid / hybrid+: battery closest to 50% rel_soc — handles both
-          charge and discharge direction changes without switching inverters.
-        - scheduled charge: battery with lowest rel_soc (most headroom).
-        - scheduled discharge: battery with highest rel_soc (most energy).
-        """
-        if not self._individual_battery_configs:
-            return {}
-        if abs(total_kw) < 1e-6:
-            return {sid: 0.0 for sid, _ in self._individual_battery_configs}
-
-        rel_socs = self._compute_rel_socs()
-        soc_gap = max(rel_socs.values()) - min(rel_socs.values())
-
-        if soc_gap >= _SOC_SPLIT_THRESHOLD:
-            # SoC has diverged — proportional split to rebalance; reset active batteries
-            self._zero_grid_active_battery = None
-            self._scheduled_active_battery = None
-            return self._proportional_split(total_kw, self._individual_battery_configs)
-
-        winner = self._select_active_battery(total_kw, rel_socs, mode)
-        return self._concentrate(total_kw, winner)
-
-    def _compute_rel_socs(self) -> dict[str, float]:
-        """Compute relative SoC position [0, 1] per battery within its usable range."""
-        result: dict[str, float] = {}
-        for sid, cfg in self._individual_battery_configs:
-            usable = cfg.max_soc_kwh - cfg.min_soc_kwh
-            if usable > 0 and sid in self._per_battery_states:
-                soc = self._per_battery_states[sid].soc_kwh
-                result[sid] = (soc - cfg.min_soc_kwh) / usable
-            else:
-                result[sid] = 0.5
-        return result
-
-    def _select_active_battery(
-        self, total_kw: float, rel_socs: dict[str, float], mode: str
-    ) -> str:
-        """Select which battery to concentrate the setpoint on.
-
-        Applies hysteresis: only displaces the current active battery when the
-        best candidate's score exceeds the current battery's by _SOC_HYSTERESIS.
-        """
-        sids = [sid for sid, _ in self._individual_battery_configs]
-
-        if mode in (MODE_ZERO_GRID, MODE_HYBRID, MODE_HYBRID_PLUS):
-            # Prefer battery closest to 50% rel_soc: stays within limits longest
-            # regardless of whether the next setpoint is charge or discharge.
-            def score(sid: str) -> float:
-                return -abs(rel_socs[sid] - 0.5)
-
-            active_attr = "_zero_grid_active_battery"
-        elif total_kw > 0:
-            # Scheduled charge: prefer lowest rel_soc (most room)
-            def score(sid: str) -> float:
-                return -rel_socs[sid]
-
-            active_attr = "_scheduled_active_battery"
-        else:
-            # Scheduled discharge: prefer highest rel_soc (most energy)
-            def score(sid: str) -> float:
-                return rel_socs[sid]
-
-            active_attr = "_scheduled_active_battery"
-
-        best = max(sids, key=score)
-        current: str | None = getattr(self, active_attr)
-
-        if current is not None and current in rel_socs:
-            if score(best) - score(current) <= _SOC_HYSTERESIS:
-                best = current  # stay with current battery
-
-        setattr(self, active_attr, best)
-        return best
-
-    def _concentrate(self, total_kw: float, winner: str) -> dict[str, float]:
-        """Send full setpoint to winner; redistribute overflow above max_power to others."""
-        result: dict[str, float] = {
-            sid: 0.0 for sid, _ in self._individual_battery_configs
-        }
-        winner_cfg = next(
-            cfg for sid, cfg in self._individual_battery_configs if sid == winner
-        )
-        winner_state = self._per_battery_states.get(winner)
-        winner_soc_kwh = (
-            winner_state.soc_kwh
-            if winner_state is not None
-            else (winner_cfg.min_soc_kwh + winner_cfg.max_soc_kwh) / 2
-        )
-
-        others = [
-            (sid, cfg) for sid, cfg in self._individual_battery_configs if sid != winner
-        ]
-        if total_kw > 0:
-            headroom = max(0.0, winner_cfg.max_soc_kwh - winner_soc_kwh)
-            if headroom <= 0:
-                # Winner is full (can happen via selection hysteresis): hand
-                # the whole setpoint to the remaining batteries instead of
-                # dropping it.
-                if others:
-                    for sid, val in self._proportional_split(total_kw, others).items():
-                        result[sid] = val
-                return result
-            clamped = min(total_kw, winner_cfg.max_charge_at_soc(winner_soc_kwh))
-        else:
-            available = max(0.0, winner_soc_kwh - winner_cfg.min_soc_kwh)
-            if available <= 0:
-                # Winner is empty: redistribute the discharge to the others.
-                if others:
-                    for sid, val in self._proportional_split(total_kw, others).items():
-                        result[sid] = val
-                return result
-            clamped = max(total_kw, -winner_cfg.max_discharge_at_soc(winner_soc_kwh))
-
-        result[winner] = clamped
-        overflow = total_kw - clamped
-        if abs(overflow) > 1e-6:
-            if others:
-                for sid, val in self._proportional_split(overflow, others).items():
-                    result[sid] = val
-        return result
-
-    def _proportional_split(
-        self,
-        total_kw: float,
-        configs: list[tuple[str, BatteryConfig]],
-    ) -> dict[str, float]:
-        """Proportional split with iterative overflow redistribution.
-
-        Splits total_kw proportionally to available headroom (charging) or
-        available energy (discharging). Batteries that hit their max_power
-        limit have the overflow redistributed to the remaining batteries.
-        Iterates at most len(configs) rounds until all overflow is absorbed
-        or no capacity remains.
-        """
-        result: dict[str, float] = {}
-        remaining_kw = total_kw
-        remaining = list(configs)
-
-        for _ in range(len(configs)):
-            if not remaining or abs(remaining_kw) < 1e-6:
-                break
-
-            if remaining_kw > 0:
-                weights = {
-                    sid: max(
-                        0.0,
-                        cfg.max_soc_kwh - self._per_battery_states[sid].soc_kwh,
-                    )
-                    if sid in self._per_battery_states
-                    else cfg.max_soc_kwh * 0.5
-                    for sid, cfg in remaining
-                }
-            else:
-                weights = {
-                    sid: max(
-                        0.0,
-                        self._per_battery_states[sid].soc_kwh - cfg.min_soc_kwh,
-                    )
-                    if sid in self._per_battery_states
-                    else cfg.capacity_kwh * 0.4
-                    for sid, cfg in remaining
-                }
-
-            total_weight = sum(weights.values())
-            overflow = 0.0
-            next_remaining: list[tuple[str, BatteryConfig]] = []
-
-            for sid, cfg in remaining:
-                raw = (
-                    remaining_kw * weights[sid] / total_weight
-                    if total_weight > 0
-                    else remaining_kw / len(remaining)
-                )
-                state = self._per_battery_states.get(sid)
-                soc_kwh = (
-                    state.soc_kwh
-                    if state is not None
-                    else (cfg.min_soc_kwh + cfg.max_soc_kwh) / 2
-                )
-                if remaining_kw > 0:
-                    max_chg = cfg.max_charge_at_soc(soc_kwh)
-                    clamped = min(raw, max_chg)
-                    at_limit = clamped >= max_chg - 1e-6
-                else:
-                    max_dchg = cfg.max_discharge_at_soc(soc_kwh)
-                    clamped = max(raw, -max_dchg)
-                    at_limit = clamped <= -max_dchg + 1e-6
-
-                result[sid] = result.get(sid, 0.0) + clamped
-                overflow += raw - clamped
-                if not at_limit:
-                    next_remaining.append((sid, cfg))
-
-            remaining_kw = overflow
-            remaining = next_remaining
-
-        for sid, _ in configs:
-            result.setdefault(sid, 0.0)
-        return result
+        """Split the combined setpoint across batteries (see BatteryDispatcher)."""
+        return self._dispatcher.split_setpoint(total_kw, mode)
 
     def _refresh_battery_config(self) -> None:
         """Re-read BatteryConfigs from live battery subentry data.
@@ -1454,16 +1502,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
         )
-        self._apply_dc_pv_config()
+        self._apply_entry_level_config()
+        # The zero-grid controller clamps every real-time setpoint with these
+        # limits. It holds its own reference, so rebinding self.battery_config
+        # above would otherwise leave it clamping on the configuration captured
+        # at integration setup — SoC limits and power ratings changed in a
+        # battery subentry would reach the DP but not the ~5 s control loop.
+        self.zero_grid_controller.battery_config = self.battery_config
 
-    def _apply_dc_pv_config(self) -> None:
-        """Overlay entry-level DC-PV configuration onto the aggregated battery config.
+    def _apply_entry_level_config(self) -> None:
+        """Overlay entry-level settings onto the aggregated battery config.
 
-        DC coupling is configured on the PV-array subentries, not on the battery
-        subentries, so BatteryConfig.from_subentry can never set pv_dc_coupled.
-        Without this overlay the optimizer always sees pv_dc_coupled=False and
-        never models passive DC MPPT charging.
+        Two groups of settings live on the config entry rather than on a
+        battery subentry, so ``BatteryConfig.from_subentry`` (the only factory
+        the coordinator uses) can never populate them:
+
+        - **DC coupling** is configured on the PV-array subentries. Without
+          this overlay the optimizer always sees ``pv_dc_coupled=False`` and
+          never models passive DC MPPT charging.
+        - **The grid capacity cap** is a property of the house connection, not
+          of any single battery. ``aggregate_battery_configs`` treats an
+          unset per-battery cap as "unlimited", so without this overlay the
+          configured cap silently never reaches ``calculate_step_cost`` and the
+          optimizer plans (and the baseline credits) grid flows beyond the
+          physical connection.
         """
+        self.battery_config.max_grid_power_kw = float(
+            self.config.get(CONF_MAX_GRID_POWER_KW, DEFAULT_MAX_GRID_POWER_KW)
+        )
         if not self.config.get(CONF_PV_DC_COUPLED):
             return
         self.battery_config.pv_dc_coupled = True
@@ -1513,43 +1579,152 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_load_charge_eff_calibration(self) -> None:
-        """Load persisted charge efficiency calibration from storage."""
-        stored = await self._charge_eff_store.async_load()
-        if stored is None:
-            return
-        samples = stored.get("samples", [])
-        correction = stored.get("correction", 1.0)
-        self._charge_eff_samples = deque(samples, maxlen=20)
-        self._charge_eff_correction = float(correction)
-        if self._charge_eff_correction < 0.995:
-            _LOGGER.info(
-                "Restored charge efficiency calibration: correction=%.3f, n=%d samples",
-                self._charge_eff_correction,
-                len(self._charge_eff_samples),
-            )
+        """Load every battery's persisted charge calibration from storage."""
+        await asyncio.gather(
+            *(cal.async_load() for cal in self._direction_calibrations(ACTION_CHARGING))
+        )
 
     async def _async_save_charge_eff_calibration(self) -> None:
-        """Persist current charge efficiency calibration to storage."""
-        await self._charge_eff_store.async_save(
-            {
-                "samples": list(self._charge_eff_samples),
-                "correction": self._charge_eff_correction,
-            }
+        """Persist every battery's charge calibration to storage."""
+        await asyncio.gather(
+            *(cal.async_save() for cal in self._direction_calibrations(ACTION_CHARGING))
         )
 
     async def async_reset_charge_eff_calibration(self) -> None:
-        """Reset charge-efficiency calibration to the nominal uncorrected state."""
-        if self._charge_eff_samples or abs(self._charge_eff_correction - 1.0) > 1e-9:
-            _LOGGER.info(
-                "Resetting charge efficiency calibration: %.3f (%d samples) -> 1.000",
-                self._charge_eff_correction,
-                len(self._charge_eff_samples),
+        """Reset every battery's charge calibration to the nominal state."""
+        await asyncio.gather(
+            *(
+                cal.async_reset()
+                for cal in self._direction_calibrations(ACTION_CHARGING)
             )
-        self._charge_eff_samples.clear()
-        self._charge_eff_correction = 1.0
-        await self._async_save_charge_eff_calibration()
+        )
 
-    def _previous_charge_step_complete(self) -> bool:
+    async def _async_load_discharge_eff_calibration(self) -> None:
+        """Load every battery's persisted discharge calibration from storage."""
+        await asyncio.gather(
+            *(
+                cal.async_load()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
+
+    async def _async_save_discharge_eff_calibration(self) -> None:
+        """Persist every battery's discharge calibration to storage."""
+        await asyncio.gather(
+            *(
+                cal.async_save()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
+
+    async def async_reset_discharge_eff_calibration(self) -> None:
+        """Reset every battery's discharge calibration to the nominal state."""
+        await asyncio.gather(
+            *(
+                cal.async_reset()
+                for cal in self._direction_calibrations(ACTION_DISCHARGING)
+            )
+        )
+
+    def _read_counter_kwh(self, sensor_id: str) -> float | None:
+        """Read one cumulative energy counter, in kWh."""
+        state = usable_state(self.hass, sensor_id)
+        if state is None:
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        unit = str(state.attributes.get("unit_of_measurement") or "kWh")
+        if unit == "Wh":
+            return value / 1000.0
+        if unit == "MWh":
+            return value * 1000.0
+        if unit != "kWh":
+            self._warn_unit_once(sensor_id, unit, "treating value as kWh")
+        return value
+
+    def _read_energy_total_kwh(self, conf_key: str) -> float | None:
+        """Sum the configured cumulative energy counters, in kWh.
+
+        Returns None when no counter is configured or any of them is
+        unavailable: a partial sum would look like a jump backwards on the next
+        read and poison the delta.
+        """
+        sensor_ids = battery_energy_sensor_ids(self._battery_subentries, conf_key)
+        if not sensor_ids:
+            return None
+        total = 0.0
+        for sensor_id in sensor_ids:
+            value = self._read_counter_kwh(sensor_id)
+            if value is None:
+                return None
+            total += value
+        return total
+
+    def _read_energy_totals(self) -> dict[str, dict[str, float | None]]:
+        """Read every battery's throughput counters at one instant.
+
+        Keyed by subentry, because a fleet sum cannot say which pack moved the
+        energy — and with the dispatcher concentrating on one battery at a time,
+        that is exactly the question the calibration asks.
+        """
+        return {
+            sid: {
+                "charged": self._read_counter_kwh(
+                    data.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR) or ""
+                )
+                if data.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR)
+                else None,
+                "discharged": self._read_counter_kwh(
+                    data.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR) or ""
+                )
+                if data.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR)
+                else None,
+            }
+            for sid, data in self._battery_subentries
+        }
+
+    def _battery_soc_quantum_kwh(
+        self, data: dict[str, Any], cfg: BatteryConfig
+    ) -> float:
+        """Resolution of one battery's SoC measurement, in kWh.
+
+        Derived from the decimals the SoC sensor actually reports: a state of
+        "47" is whole-percent, "47.3" is ten times finer. Returns 0.0 when
+        nothing can be determined, which leaves the caller on its fixed floor.
+        """
+        sensor_id = data.get(CONF_BATTERY_SOC_SENSOR)
+        if not sensor_id:
+            return 0.0
+        state = usable_state(self.hass, sensor_id)
+        if state is None:
+            return 0.0
+        raw = state.state.strip()
+        decimals = len(raw.split(".", 1)[1]) if "." in raw else 0
+        step = 10.0**-decimals
+        unit = str(state.attributes.get("unit_of_measurement") or "%")
+        if unit == "kWh":
+            return step
+        if unit == "Wh":
+            return step / 1000.0
+        # percent (or unitless, which is treated as percent elsewhere)
+        return step / 100.0 * cfg.capacity_kwh
+
+    def _soc_quantum_kwh(self) -> float:
+        """Estimate the resolution of the aggregated SoC measurement, in kWh.
+
+        Summed across packs because the aggregate SoC is a sum and the
+        individual quantisation errors can align.
+        """
+        return sum(
+            self._battery_soc_quantum_kwh(data, cfg)
+            for (_sid, cfg), (_sid2, data) in zip(
+                self._individual_battery_configs, self._battery_subentries
+            )
+        )
+
+    def _previous_step_complete(self) -> bool:
         """Return whether the previously planned first step has elapsed.
 
         Charge-efficiency calibration compares the current SoC against the
@@ -1608,244 +1783,630 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         tolerance_kw = max(0.05, 0.1 * abs(planned_kw))
         return abs(executed_kw - planned_kw) <= tolerance_kw
 
-    def _update_charge_eff_calibration(self, battery_state: BatteryState) -> None:
-        """Compare previous planned SoC to actual SoC and update charge efficiency correction.
+    def _fleet_calibration_block(self, action: str) -> str | None:
+        """Why no battery can be sampled for ``action`` this run, if any.
 
-        Samples are only collected when:
-        - The previous optimizer step planned active charging (mode == 'charging')
-        - The planned step was actually commanded unchanged (no hybrid/zero_grid
-          override, no commitment-filter power lock)
-        - The full planned step has elapsed
-        - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
-        - DC-coupled PV is not active (passive PV charging would inflate actual delta)
-        - The step does not cross the high-SoC charge derating threshold (the DP
-          plans at full power for the whole step, but the inverter throttles
-          mid-step once the threshold is reached, making actual < planned even
-          with perfect efficiency)
-
-        The correction is the mean of the last 20 ratios (actual/planned), clipped to
-        [0.5, 1.05]. It is applied as a multiplier on the DP's charge-side SoC
-        transition so the optimizer plans less charge within one time step when
-        the battery charges slower than modelled. It does not alter the economic
-        cost calculation or degradation model.
+        These conditions are properties of the plan and of the system as a
+        whole, so they are answered once rather than per battery.
         """
-        if self._last_result is None:
-            return
-        if (
-            len(self._last_result.mode_schedule) < 1
-            or len(self._last_result.soc_schedule_kwh) < 2
-        ):
-            return
-
-        if self._last_result.mode_schedule[0] != ACTION_CHARGING:
-            return
-
+        result = self._last_result
+        if result is None:
+            return CALIBRATION_NO_RESULT
+        if len(result.mode_schedule) < 1 or len(result.soc_schedule_kwh) < 2:
+            return CALIBRATION_NO_RESULT
+        if result.mode_schedule[0] != action:
+            return CALIBRATION_NO_PLAN
         # Only sample when the plan was actually commanded; mode resolution
         # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
         # would otherwise drag the correction towards the 0.5 clip floor.
-        if not self._planned_first_step_was_executed(ACTION_CHARGING):
-            return
-
-        if not self._previous_charge_step_complete():
-            return
-
-        # Skip DC-coupled systems: passive PV charging during the step would
-        # inflate actual_delta relative to the grid-only planned_delta.
+        if not self._planned_first_step_was_executed(action):
+            return CALIBRATION_PLAN_NOT_EXECUTED
+        if not self._previous_step_complete():
+            return CALIBRATION_STEP_INCOMPLETE
         if self.config.get(CONF_PV_DC_COUPLED, False):
-            return
+            return CALIBRATION_DC_COUPLED
+        return None
 
-        prev_soc = self._last_result.soc_schedule_kwh[0]
-        planned_next_soc = self._last_result.soc_schedule_kwh[1]
-        planned_delta = planned_next_soc - prev_soc
+    def _previous_step_hours(self) -> float:
+        """Length of the step being scored, in hours.
 
-        if planned_delta < 0.1:
-            # Too small to measure reliably; skip.
-            return
-
-        # Skip if the step crosses the high-SoC charge derating threshold.
-        # The DP plans at the start-SoC limit for the whole step, but the
-        # inverter throttles once the threshold is reached mid-step.  The
-        # resulting actual/planned ratio reflects the derating, not real
-        # efficiency losses, so including it would corrupt the calibration.
-        bc = self.battery_config
-        if bc.high_soc_max_charge_kw > 0:
-            threshold_kwh = bc.high_soc_charge_threshold_pct / 100 * bc.capacity_kwh
-            if prev_soc < threshold_kwh <= planned_next_soc:
-                _LOGGER.debug(
-                    "Charge efficiency calibration: skipping sample — step crosses "
-                    "high-SoC derating threshold (%.1f%% / %.2f kWh)",
-                    bc.high_soc_charge_threshold_pct,
-                    threshold_kwh,
-                )
-                return
-
-        actual_delta = battery_state.soc_kwh - prev_soc
-        # Cap upward to 1.2× planned to filter out unexpected external charge
-        # sources (e.g. brief grid export reversed, SoC sensor noise).
-        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
-        ratio = actual_delta / planned_delta
-        # Clip to a physically reasonable range; the correction should never
-        # indicate the battery charged *more* than modelled by more than 5%.
-        ratio = max(0.5, min(1.05, ratio))
-
-        self._charge_eff_samples.append(ratio)
-        new_correction = sum(self._charge_eff_samples) / len(self._charge_eff_samples)
-
-        changed = abs(new_correction - self._charge_eff_correction) > 0.005
-        if changed:
-            _LOGGER.info(
-                "Charge efficiency correction updated: %.3f → %.3f "
-                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self._charge_eff_correction,
-                new_correction,
-                ratio,
-                len(self._charge_eff_samples),
-                planned_delta,
-                actual_delta,
-            )
-        self._charge_eff_correction = new_correction
-        if changed:
-            self.hass.async_create_task(self._async_save_charge_eff_calibration())
-
-    async def _async_load_discharge_eff_calibration(self) -> None:
-        """Load persisted discharge efficiency calibration from storage."""
-        stored = await self._discharge_eff_store.async_load()
-        if stored is None:
-            return
-        samples = stored.get("samples", [])
-        correction = stored.get("correction", 1.0)
-        self._discharge_eff_samples = deque(samples, maxlen=20)
-        self._discharge_eff_correction = float(correction)
-        if self._discharge_eff_correction < 0.995:
-            _LOGGER.info(
-                "Restored discharge efficiency calibration: correction=%.3f, n=%d samples",
-                self._discharge_eff_correction,
-                len(self._discharge_eff_samples),
-            )
-
-    async def _async_save_discharge_eff_calibration(self) -> None:
-        """Persist current discharge efficiency calibration to storage."""
-        await self._discharge_eff_store.async_save(
-            {
-                "samples": list(self._discharge_eff_samples),
-                "correction": self._discharge_eff_correction,
-            }
+        Falls back to the coordinator's own interval when the plan carried no
+        timing metadata — the same fallback _previous_step_complete makes.
+        """
+        if isinstance(self.data, dict):
+            durations = self.data.get("step_durations_hours")
+            if durations:
+                try:
+                    return float(durations[0])
+                except (TypeError, ValueError, IndexError):
+                    pass
+        return (
+            float(self.config.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES))
+            / 60.0
         )
 
-    async def async_reset_discharge_eff_calibration(self) -> None:
-        """Reset discharge-efficiency calibration to the nominal uncorrected state."""
-        if (
-            self._discharge_eff_samples
-            or abs(self._discharge_eff_correction - 1.0) > 1e-9
-        ):
-            _LOGGER.info(
-                "Resetting discharge efficiency calibration: %.3f (%d samples) -> 1.000",
-                self._discharge_eff_correction,
-                len(self._discharge_eff_samples),
-            )
-        self._discharge_eff_samples.clear()
-        self._discharge_eff_correction = 1.0
-        await self._async_save_discharge_eff_calibration()
+    def _planned_battery_delta_kwh(
+        self, spec: CalibrationSpec, setpoint_kw: float, cfg: BatteryConfig
+    ) -> float:
+        """SoC change this battery was expected to make over the step, in kWh.
 
-    def _update_discharge_eff_calibration(self, battery_state: BatteryState) -> None:
-        """Compare previous planned SoC to actual SoC and update discharge efficiency correction.
+        Derived from the setpoint the dispatcher actually gave this pack and
+        this pack's own efficiency curve at that power — not from the fleet SoC
+        schedule. The dispatcher concentrates a setpoint on one battery at a
+        time, so the fleet plan says nothing about what any single pack was
+        asked to do, and the curves are power-dependent, so a battery running at
+        1.2 kW is not modelled by the fleet's 2.4 kW point.
+        """
+        energy_kwh = abs(setpoint_kw) * self._previous_step_hours()
+        curve = (
+            cfg.charge_efficiency_curve_parsed
+            if spec.action == ACTION_CHARGING
+            else cfg.discharge_efficiency_curve_parsed
+        )
+        scalar = (
+            cfg.charge_efficiency
+            if spec.action == ACTION_CHARGING
+            else cfg.discharge_efficiency
+        )
+        efficiency = (
+            interpolate_efficiency(curve, abs(setpoint_kw)) if curve else float(scalar)
+        )
+        if efficiency <= 0:
+            return 0.0
+        # Charging puts less into the pack than it draws; discharging takes more
+        # out of the pack than it delivers.
+        return (
+            energy_kwh * efficiency
+            if spec.action == ACTION_CHARGING
+            else energy_kwh / efficiency
+        )
 
-        Samples are only collected when:
-        - The previous optimizer step planned active discharging (mode == 'discharging')
+    def _update_eff_calibration(
+        self,
+        spec: CalibrationSpec,
+        energy_totals_now: dict[str, dict[str, float | None]] | None,
+    ) -> None:
+        """Score the previous plan against reality, per battery, and fold it in.
+
+        This method decides *eligibility* and records why on each battery's
+        calibration; DirectionCalibration.record does the arithmetic and the
+        persistence.
+
+        Both directions ask the same question: did this battery move as much
+        energy within the step as the plan assumed? A sample is only taken when:
+        - The previous optimizer step planned this direction actively
         - The planned step was actually commanded unchanged (no hybrid/zero_grid
           override, no commitment-filter power lock)
         - The full planned step has elapsed
-        - The planned SoC delta is large enough to be reliable (>= 0.1 kWh)
-        - DC-coupled PV is not active (passive PV charging during a discharge step
-          partially offsets the SoC reduction, making actual_delta smaller than
-          planned_delta and producing a spuriously low efficiency reading)
+        - DC-coupled PV is not active: passive PV charging inflates the measured
+          charge delta and offsets the measured discharge delta
+        - The dispatcher gave *this* battery a setpoint in this direction. A
+          pack that sat idle while its sibling did the work has nothing to say
+          about its own efficiency, and attributing the sibling's throughput to
+          it is what a single fleet-wide ratio used to do.
+        - The planned delta is large enough to be measurable at the resolution
+          of whatever measured it (energy counter or SoC sensor)
+        - The step does not cross that battery's derating threshold. The plan
+          holds full power for the whole step while the inverter throttles once
+          the threshold is passed mid-step, so the ratio would reflect the
+          derating rather than an efficiency loss.
 
-        The correction is the mean of the last 20 ratios (actual/planned), clipped to
-        [0.5, 1.05]. It is applied as a multiplier on the DP's discharge-side SoC
-        transition so the optimizer plans less discharge within one time step when
-        the battery discharges slower than modelled. It does not alter the economic
-        cost calculation or degradation model.
+        Each battery's correction is the mean of its last CALIBRATION_WINDOW
+        ratios, clamped for use; the DP is handed their capacity-weighted
+        aggregate. It scales the SoC transition for this direction only; the
+        economic cost model is untouched.
+
+        When no sample is taken, ``last_result`` names the reason. Several of
+        those reasons are permanent for a given setup (a DC-coupled system never
+        samples at all, and a control mode that does not execute the DP plan
+        never will either), so the reason is published rather than leaving the
+        user with a sample count stuck at zero.
         """
-        if self._last_result is None:
+        blocked = self._fleet_calibration_block(spec.action)
+        if blocked is not None:
+            for calibration in self._direction_calibrations(spec.action):
+                calibration.last_result = blocked
             return
-        if (
-            len(self._last_result.mode_schedule) < 1
-            or len(self._last_result.soc_schedule_kwh) < 2
+
+        for (sid, cfg), (_sid, data) in zip(
+            self._individual_battery_configs, self._battery_subentries
         ):
+            battery = self._battery_calibrations.get(sid)
+            if battery is None:
+                continue
+            self._update_battery_eff_calibration(
+                battery.for_action(spec.action),
+                sid,
+                cfg,
+                data,
+                (energy_totals_now or {}).get(sid),
+            )
+
+    def _update_battery_eff_calibration(
+        self,
+        calibration: DirectionCalibration,
+        subentry_id: str,
+        cfg: BatteryConfig,
+        data: dict[str, Any],
+        counters_now: dict[str, float | None] | None,
+    ) -> None:
+        """Fold one battery's outcome for one direction into its correction."""
+        spec = calibration.spec
+        setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
+        # Setpoints are positive for charge, negative for discharge.
+        dispatched = (
+            setpoint_kw > 0 if spec.action == ACTION_CHARGING else setpoint_kw < 0
+        )
+        if not dispatched:
+            calibration.last_result = CALIBRATION_NOT_DISPATCHED
             return
 
-        if self._last_result.mode_schedule[0] != ACTION_DISCHARGING:
+        planned_delta = self._planned_battery_delta_kwh(spec, setpoint_kw, cfg)
+        prev_soc = self._soc_snapshot_kwh.get(subentry_id)
+        planned_next_soc: float | None = None
+        if prev_soc is not None:
+            planned_next_soc = (
+                prev_soc + planned_delta
+                if spec.action == ACTION_CHARGING
+                else prev_soc - planned_delta
+            )
+
+        # The energy counters answer a different question than the SoC sensor.
+        # A counter sits on the same side of the inverter as the setpoint that
+        # drove it, so measured-over-commanded is dispatch fidelity, not
+        # efficiency; the SoC delta is the only measurement that spans the
+        # conversion and can price it. The counter reading is therefore recorded
+        # as a diagnostic and kept out of the correction entirely.
+        snapshot = self._energy_counter_snapshot.get(subentry_id) or {}
+        counter_delta = (
+            counter_delta_kwh(
+                spec.counter_key,
+                snapshot.get(spec.counter_key),
+                counters_now.get(spec.counter_key),
+            )
+            if counters_now is not None
+            else None
+        )
+        if counter_delta is not None:
+            calibration.record_dispatch(
+                abs(setpoint_kw) * self._previous_step_hours(), counter_delta
+            )
+
+        if planned_delta < min_planned_delta_kwh(
+            self._battery_soc_quantum_kwh(data, cfg)
+        ):
+            # Too small to measure reliably at this resolution; skip.
+            calibration.last_result = CALIBRATION_DELTA_TOO_SMALL
             return
 
-        # Only sample when the plan was actually commanded; mode resolution
-        # (hybrid → zero_grid, commitment filter, zero_grid/manual control)
-        # would otherwise drag the correction towards the 0.5 clip floor.
-        if not self._planned_first_step_was_executed(ACTION_DISCHARGING):
-            return
-
-        if not self._previous_charge_step_complete():
-            return
-
-        # Skip DC-coupled systems: passive PV charging during a discharge step partially
-        # offsets SoC reduction, making actual_delta smaller than planned_delta.
-        if self.config.get(CONF_PV_DC_COUPLED, False):
-            return
-
-        prev_soc = self._last_result.soc_schedule_kwh[0]
-        planned_next_soc = self._last_result.soc_schedule_kwh[1]
-        planned_delta = prev_soc - planned_next_soc  # positive: SoC goes down
-
-        if planned_delta < 0.1:
-            # Too small to measure reliably; skip.
-            return
-
-        # Skip if the step crosses the low-SoC discharge derating threshold.
-        # The DP plans at the start-SoC limit for the whole step, but the
-        # inverter throttles once the threshold is reached mid-step.  The
-        # resulting actual/planned ratio reflects the derating, not real
-        # efficiency losses, so including it would corrupt the calibration
-        # (same guard as the high-SoC check in the charge calibration).
-        bc = self.battery_config
-        if bc.low_soc_max_discharge_kw > 0:
-            threshold_kwh = bc.low_soc_discharge_threshold_pct / 100 * bc.capacity_kwh
-            if planned_next_soc < threshold_kwh <= prev_soc:
+        if spec.derate_limit_kw(cfg) > 0 and planned_next_soc is not None:
+            threshold_kwh = spec.derate_threshold_pct(cfg) / 100 * cfg.capacity_kwh
+            if (
+                min(prev_soc or 0.0, planned_next_soc)
+                < threshold_kwh
+                <= max(prev_soc or 0.0, planned_next_soc)
+            ):
                 _LOGGER.debug(
-                    "Discharge efficiency calibration: skipping sample — step crosses "
-                    "low-SoC derating threshold (%.1f%% / %.2f kWh)",
-                    bc.low_soc_discharge_threshold_pct,
+                    "%s efficiency calibration: skipping sample — step crosses "
+                    "%s derating threshold (%.1f%% / %.2f kWh)",
+                    calibration.who,
+                    spec.derate_label,
+                    spec.derate_threshold_pct(cfg),
                     threshold_kwh,
                 )
+                calibration.last_result = CALIBRATION_DERATING
                 return
 
-        actual_delta = prev_soc - battery_state.soc_kwh  # positive: SoC went down
-        # Cap upward to 1.2× planned to filter out unexpected external discharge
-        # (e.g. grid outage, SoC sensor noise causing apparent over-discharge).
-        actual_delta = max(0.0, min(actual_delta, 1.2 * planned_delta))
-        ratio = actual_delta / planned_delta
-        # Clip to a physically reasonable range; the correction should never
-        # indicate the battery discharged *more* than modelled by more than 5%.
-        ratio = max(0.5, min(1.05, ratio))
+        if prev_soc is None:
+            calibration.last_result = CALIBRATION_NO_RESULT
+            return
+        state = self._per_battery_states.get(subentry_id)
+        if state is None:
+            calibration.last_result = (
+                CALIBRATION_NO_SOC_SOURCE
+                if counter_delta is not None
+                else CALIBRATION_NO_RESULT
+            )
+            return
+        measured = (
+            state.soc_kwh - prev_soc
+            if spec.action == ACTION_CHARGING
+            else prev_soc - state.soc_kwh
+        )
+        actual_delta = max(0.0, measured)
 
-        self._discharge_eff_samples.append(ratio)
-        new_correction = sum(self._discharge_eff_samples) / len(
-            self._discharge_eff_samples
+        if calibration.record(planned_delta, actual_delta, "SoC delta"):
+            self.hass.async_create_task(calibration.async_save())
+
+    def _update_charge_eff_calibration(
+        self,
+        energy_totals_now: dict[str, dict[str, float | None]] | None = None,
+    ) -> None:
+        """Fold the previous charging step's outcome into the charge corrections."""
+        self._update_eff_calibration(CHARGE_CALIBRATION, energy_totals_now)
+
+    def _update_discharge_eff_calibration(
+        self,
+        energy_totals_now: dict[str, dict[str, float | None]] | None = None,
+    ) -> None:
+        """Fold the previous discharging step's outcome into the discharge corrections."""
+        self._update_eff_calibration(DISCHARGE_CALIBRATION, energy_totals_now)
+
+    def _weather_hour_offset(self, weather: dict[str, Any], target: datetime) -> int:
+        """Index into the weather series for the hour containing ``target``.
+
+        The weather series is anchored to the hour of its own last fetch, which
+        is up to one refresh interval behind the optimizer run. Deriving the
+        offset from that anchor — rather than assuming element 0 is the current
+        hour — keeps the model's GHI/wind features on the hours they describe.
+        """
+        start = weather.get("forecast_start_utc")
+        if isinstance(start, str):
+            start = dt_util.parse_datetime(start)
+        if not isinstance(start, datetime):
+            # No anchor published: fall back to the current hour, which is what
+            # the weather coordinator writes when it does publish one.
+            start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        offset = int(
+            (dt_util.as_utc(target) - dt_util.as_utc(start)).total_seconds() // 3600
+        )
+        return max(0, offset)
+
+    def _model_series(
+        self,
+        model: PriceForecastModel,
+        step_starts: list[datetime],
+        step_durations_hours: list[float],
+    ) -> list[float]:
+        """Project the historical model's hourly prediction onto step windows.
+
+        The model is asked for the hours the steps actually occupy, its weather
+        features are sliced to the same instant, and its hourly output is
+        projected back onto the step windows. Anchoring on real timestamps is
+        what keeps the prediction on the hours it describes: deriving the anchor
+        from a step count instead placed the series up to a full hour late
+        whenever the steps did not start on the hour — which is every run with a
+        15-minute price sensor, and moved the next day's charge and discharge
+        windows with it.
+        """
+        if not step_starts:
+            return []
+        weather = self.weather_coordinator.data or {}
+        # The model buckets by local hour-of-day and weekday, so the anchor is
+        # the start of the local hour containing the first step.
+        model_start = dt_util.as_local(step_starts[0]).replace(
+            minute=0, second=0, microsecond=0
+        )
+        last_duration = step_durations_hours[-1] if step_durations_hours else 1.0
+        horizon_end = step_starts[-1] + timedelta(hours=last_duration)
+        span_s = (horizon_end - model_start).total_seconds()
+        total_hours = max(1, int(-(-span_s // 3600)))  # ceiling
+        offset = self._weather_hour_offset(weather, model_start)
+        ghi = weather.get("radiation_forecast", [])
+        wind = weather.get("wind_speed_forecast", [])
+        raw = model.forecast(
+            hours=total_hours,
+            start_time=model_start,
+            ghi_forecast=ghi[offset:] if ghi else None,
+            wind_forecast=wind[offset:] if wind else None,
+        )
+        series = resample_to_steps(
+            raw, model_start, 60, step_starts, step_durations_hours
+        )
+        # A step past the end of the model output keeps the last known value:
+        # both callers need one value per step, and the model can only run out
+        # at the very end of the horizon.
+        while len(series) < len(step_starts):
+            series.append(series[-1] if series else 0.0)
+        return series[: len(step_starts)]
+
+    def _model_extension(
+        self,
+        model: PriceForecastModel,
+        extension_start: datetime,
+        steps_needed: int,
+        interval_minutes: int,
+    ) -> list[float]:
+        """Extend a price series past the live forecast with a historical model.
+
+        ``extension_start`` is the start of the first step the extension fills;
+        the steps after it follow at one price period each.
+        """
+        step_starts = [
+            extension_start + timedelta(minutes=i * interval_minutes)
+            for i in range(steps_needed)
+        ]
+        return self._model_series(
+            model, step_starts, [interval_minutes / 60.0] * steps_needed
         )
 
-        changed = abs(new_correction - self._discharge_eff_correction) > 0.005
-        if changed:
-            _LOGGER.info(
-                "Discharge efficiency correction updated: %.3f → %.3f "
-                "(latest ratio=%.3f, n=%d samples, planned Δ=%.2f kWh, actual Δ=%.2f kWh)",
-                self._discharge_eff_correction,
-                new_correction,
-                ratio,
-                len(self._discharge_eff_samples),
-                planned_delta,
-                actual_delta,
+    def _resolve_effective_mode(
+        self,
+        result: OptimizationResult,
+        current_grid: float,
+        resampled_feed_in: list[float] | None,
+        hybrid_deadband_w: float,
+    ) -> tuple[str, float]:
+        """Turn the DP schedule into what the controller should actually do.
+
+        follow_schedule executes the plan verbatim; zero_grid and manual ignore
+        it; hybrid and hybrid+ arbitrate between the plan and surplus-following
+        per step. Every branch is damped with hysteresis so a value hovering at
+        a threshold does not flip the mode on every run.
+
+        Returns:
+            (effective_mode, effective_power_kw)
+        """
+        if self._control_mode == MODE_ZERO_GRID:
+            if self._pv_curtailed:
+                # PV is unavailable: follow the DP schedule so the battery charges
+                # from the grid at negative prices instead of trying to maintain
+                # zero-grid by discharging.
+                effective_mode = result.optimal_mode
+                effective_power = result.optimal_power_kw
+            else:
+                effective_mode = "zero_grid"
+                effective_power = 0.0
+        elif self._control_mode == MODE_MANUAL:
+            manual_w = self._get_manual_setpoint_w()
+            effective_mode = "manual"
+            effective_power = manual_w / 1000  # kW for output sensors
+        elif self._control_mode in (MODE_HYBRID, MODE_HYBRID_PLUS):
+            # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption.
+            # Hybrid+ additionally consults the price forecast (via the shadow
+            # price) before storing PV surplus, so surplus is exported when the
+            # battery can be filled more cheaply later.
+            # Default to allowing capture; the idle and discharge branches
+            # overrule it so a block never outlives the run that decided it.
+            self._surplus_capture_blocked = False
+            if result.optimal_mode == ACTION_IDLE:
+                # Optimizer wants to preserve battery capacity.
+                # This means: don't charge (even with PV surplus) and don't discharge.
+                #
+                # Why? Two common cases:
+                # 1. High feed-in price now → better to export than store
+                # 2. Upcoming expensive periods → preserve capacity for discharge
+                #
+                # Exception: if there's consumption (grid importing), use zero_grid
+                # to reduce import with available PV, without cycling the battery.
+                has_upcoming_discharge = any(
+                    m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
+                )
+                # Hysteresis: use a ±hybrid_deadband_w band (the user-tunable
+                # zero-grid deadband) around the 0 W crossing so grid power
+                # hovering near zero (e.g. consumption ≈ PV production) doesn't
+                # flip idle/zero_grid every realtime tick.
+                if self._last_hybrid_idle_decision == "zero_grid":
+                    # Was capturing surplus; keep doing so until grid climbs
+                    # solidly positive (surplus has genuinely disappeared).
+                    has_pv_surplus = current_grid < hybrid_deadband_w
+                else:
+                    # Was idle; only start capturing once surplus is solid.
+                    has_pv_surplus = current_grid < -hybrid_deadband_w
+                # Hybrid+: check the forecast before capturing surplus. The
+                # shadow price λ already prices in upcoming cheap-surplus hours
+                # (e.g. the midday PV peak at low prices): when λ × sqrt(RTE)
+                # is below the current feed-in price, exporting now is worth
+                # more than storing, so surplus capture is blocked.
+                capture_blocked = False
+                if self._control_mode == MODE_HYBRID_PLUS:
+                    current_feed_in = self._current_feed_in_price(resampled_feed_in)
+                    capture_blocked = not self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
+                    )
+                self._surplus_capture_blocked = capture_blocked
+                if has_upcoming_discharge and not has_pv_surplus:
+                    # Preserve capacity (discharge planned, no PV surplus)
+                    effective_mode = ACTION_IDLE
+                elif capture_blocked and has_pv_surplus:
+                    # Hybrid+: export the surplus at the current feed-in price
+                    # instead of storing it; the DP schedule charges later when
+                    # surplus is cheaper.
+                    effective_mode = ACTION_IDLE
+                else:
+                    # Either no discharge planned, or PV surplus to capture
+                    effective_mode = "zero_grid"
+                self._last_hybrid_idle_decision = effective_mode
+                effective_power = 0.0
+            elif result.optimal_mode == ACTION_DISCHARGING:
+                # Decide: full-rate export vs zero_grid (self-consumption only).
+                # Use shadow price as the threshold: net sell value per kWh
+                # stored = feed_in × discharge_eff at the planned power — the
+                # same efficiency the DP priced this action with. If that
+                # exceeds the shadow price (the value of keeping the energy for
+                # future use), exporting is better.
+                #
+                # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
+                # oscillation when shadow_price ≈ net_sell_value.
+                # • Was discharging → continue unless net_sell_value < threshold × 0.95
+                # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
+                current_feed_in = self._current_feed_in_price(resampled_feed_in)
+                net_sell_value = current_feed_in * self._discharge_efficiency_at(
+                    result.optimal_power_kw
+                )
+                threshold = result.shadow_price_eur_kwh
+                if self._last_hybrid_decision == ACTION_DISCHARGING:
+                    should_discharge = net_sell_value >= threshold * 0.95
+                else:
+                    should_discharge = net_sell_value >= threshold * 1.05
+
+                if should_discharge:
+                    effective_mode = ACTION_DISCHARGING
+                    effective_power = result.optimal_power_kw
+                    self._last_hybrid_decision = ACTION_DISCHARGING
+                    self._surplus_capture_blocked = False
+                else:
+                    # Shadow price > sell value: energy is more valuable later.
+                    # That is a decision to *hold*, so falling back to zero_grid
+                    # unconditionally would be a contradiction: zero_grid buys
+                    # PV surplus that would otherwise be exported, at the cost
+                    # of the feed-in price the veto just refused to sell at.
+                    # Only capture the surplus when storing it actually beats
+                    # exporting it (λ × charge_eff ≥ feed_in); otherwise hold
+                    # and let the surplus go to the grid. Unlike the idle
+                    # branch, this test runs in plain hybrid too — hybrid's
+                    # unconditional surplus capture applies when the DP has no
+                    # opinion, not when it is overruling an explicit plan.
+                    capture = self._should_capture_surplus(
+                        result.shadow_price_eur_kwh,
+                        current_feed_in,
+                        max(0.0, -current_grid) / 1000.0,
+                    )
+                    effective_mode = "zero_grid" if capture else ACTION_IDLE
+                    effective_power = 0.0
+                    self._last_hybrid_decision = effective_mode
+                    self._surplus_capture_blocked = not capture
+            elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
+                current_feed_in = self._current_feed_in_price(resampled_feed_in)
+                if current_feed_in < 0:
+                    # Negative feed-in: exporting costs money. Use follow_schedule
+                    # so curtailing PV (grid → ~0) doesn't cause a zero_grid
+                    # deadlock that stops charging.
+                    effective_mode = result.optimal_mode
+                    effective_power = result.optimal_power_kw
+                    self._last_hybrid_charge_decision = ACTION_CHARGING
+                else:
+                    # Hysteresis: apply a ±5% band around the coverage threshold
+                    # (same pattern as the discharge decision above) so PV surplus
+                    # hovering near _SURPLUS_COVERS_PLAN_FRACTION of the planned
+                    # charge power doesn't flip zero_grid/charging every tick.
+                    # • Was zero_grid → stay unless surplus drops below 95% of threshold
+                    # • Was charging → switch only once surplus reaches 105% of threshold
+                    if self._last_hybrid_charge_decision == "zero_grid":
+                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
+                    else:
+                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
+                    if (
+                        -current_grid
+                        >= result.optimal_power_kw * 1000 * coverage_threshold
+                    ):
+                        # PV surplus covers (most of) the planned charge: use
+                        # zero_grid to dynamically match the actual surplus instead
+                        # of fixed-rate charging. Fixed charging may import from
+                        # grid when clouds pass.
+                        effective_mode = "zero_grid"
+                        effective_power = 0.0
+                        self._last_hybrid_charge_decision = "zero_grid"
+                    else:
+                        # The DP planned substantially more charging than the
+                        # current export surplus — it wants grid charging (e.g. a
+                        # cheap price hour that happens to coincide with a small PV
+                        # surplus). Zero_grid would only charge the surplus and
+                        # forfeit the planned arbitrage, so follow the schedule.
+                        effective_mode = result.optimal_mode
+                        effective_power = result.optimal_power_kw
+                        self._last_hybrid_charge_decision = ACTION_CHARGING
+            else:
+                effective_mode = result.optimal_mode
+                effective_power = result.optimal_power_kw
+        else:
+            # follow_schedule: execute DP schedule exactly
+            effective_mode = result.optimal_mode
+            effective_power = result.optimal_power_kw
+
+        return effective_mode, effective_power
+
+    def _apply_commitment_filter(
+        self,
+        effective_mode: str,
+        effective_power: float,
+        *,
+        battery_state: BatteryState,
+        battery_config: BatteryConfig,
+        current_price: float,
+        current_step_start: datetime | None,
+        degradation_cost_per_kwh: float,
+        min_spread: float,
+    ) -> tuple[str, float, bool, str]:
+        """Hold an active charge/discharge unless the economics really changed.
+
+        Re-optimizing every 15 minutes within one price period would otherwise
+        produce erratic setpoints; the commitment is only released when the
+        price moves past the same spread the post-DP oscillation filter uses,
+        when the SoC hits a limit, or when the plan reverses direction.
+
+        Returns:
+            (effective_mode, effective_power_kw, commitment_locked, reason)
+        """
+        commitment_locked = False
+        commitment_reason = ""
+        if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
+            sqrt_rte = battery_config.round_trip_efficiency**0.5
+            # Same economics as the post-DP oscillation filter in optimizer.py:
+            # min_arbitrage_spread = (2 x degradation + min_spread) / sqrt(RTE).
+            commit_spread = (2.0 * degradation_cost_per_kwh + min_spread) / sqrt_rte
+            soc_at_limit = (
+                battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
+                or battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98
             )
-        self._discharge_eff_correction = new_correction
-        if changed:
-            self.hass.async_create_task(self._async_save_discharge_eff_calibration())
+            same_price_period = (
+                current_step_start is not None
+                and current_step_start == self._committed_step_start
+            )
+            direction_flip = (
+                self._committed_action == ACTION_CHARGING
+                and effective_mode == ACTION_DISCHARGING
+            ) or (
+                self._committed_action == ACTION_DISCHARGING
+                and effective_mode == ACTION_CHARGING
+            )
+            if self._committed_action == ACTION_CHARGING:
+                price_jumped = current_price > self._committed_price + commit_spread
+            elif self._committed_action == ACTION_DISCHARGING:
+                price_jumped = current_price < self._committed_price - commit_spread
+            else:
+                price_jumped = False
+
+            if (
+                self._committed_action in (ACTION_CHARGING, ACTION_DISCHARGING)
+                and same_price_period
+                and not price_jumped
+                and not soc_at_limit
+                and not direction_flip
+            ):
+                if effective_mode == self._committed_action:
+                    # Same direction within the same price period: lock power so
+                    # the 15-min re-optimizations don't produce erratic setpoints.
+                    _LOGGER.debug(
+                        "Commitment filter: locking %s power at %.0fW "
+                        "(price Δ=%.3f < commit_spread=%.3f)",
+                        self._committed_action,
+                        self._committed_power * 1000,
+                        abs(current_price - self._committed_price),
+                        commit_spread,
+                    )
+                    effective_power = self._committed_power
+                    commitment_locked = True
+                    commitment_reason = "power_locked"
+                elif effective_mode == ACTION_IDLE:
+                    # Prevent switching an active charge/discharge to idle.
+                    _LOGGER.debug(
+                        "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
+                        "soc_at_limit=%s)",
+                        self._committed_action,
+                        abs(current_price - self._committed_price),
+                        commit_spread,
+                        soc_at_limit,
+                    )
+                    effective_mode = self._committed_action
+                    effective_power = self._committed_power
+                    commitment_locked = True
+                    commitment_reason = "idle_suppressed"
+                else:
+                    # Direction flip bypassed the guard — update commitment.
+                    self._committed_action = effective_mode
+                    self._committed_price = current_price
+                    self._committed_power = effective_power
+                    self._committed_step_start = current_step_start
+            else:
+                self._committed_action = effective_mode
+                self._committed_price = current_price
+                self._committed_power = effective_power
+                self._committed_step_start = current_step_start
+
+        return effective_mode, effective_power, commitment_locked, commitment_reason
 
     async def _run_optimization(self) -> dict[str, Any]:
         """Inner optimization logic (called only when not already running)."""
@@ -1981,47 +2542,32 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Native interval of the feed-in forecast; may differ from the grid
         # price sensor (e.g. hourly feed-in vs 15-min grid prices).
         feed_in_interval = price_interval
+        # Anchor of feed_in_forecast[0]. A fixed price has no timeline of its
+        # own, so it inherits the run time and lines up with step 0 by
+        # construction; a sensor forecast carries its own period starts.
+        feed_in_start: datetime = dt_util.utcnow()
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
         if feed_in_sensor:
-            feed_in_state = self.hass.states.get(feed_in_sensor)
-            if feed_in_state and feed_in_state.state not in ("unknown", "unavailable"):
-                feed_in_forecast, feed_in_interval = (
-                    extract_price_forecast_with_interval(feed_in_state)
+            feed_in_state = usable_state(self.hass, feed_in_sensor)
+            if feed_in_state is not None:
+                feed_in_forecast, feed_in_starts, feed_in_interval = (
+                    extract_price_forecast_with_timestamps(feed_in_state)
                 )
+                if feed_in_starts:
+                    feed_in_start = feed_in_starts[0]
                 feed_in_is_dynamic = True
             else:
                 # Sensor unavailable - fall back to fixed price
-                fixed_price = float(
-                    self.config.get(
-                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                    )
-                )
-                feed_in_forecast = [fixed_price] * len(price_forecast)
+                feed_in_forecast = [self._fixed_feed_in_price()] * len(price_forecast)
         else:
             # Use fixed feed-in price
-            fixed_price = float(
-                self.config.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE)
-            )
-            feed_in_forecast = [fixed_price] * len(price_forecast)
+            feed_in_forecast = [self._fixed_feed_in_price()] * len(price_forecast)
 
         # Get optimization parameters — read runtime-tunable values from live options
-        entry_id = self.config.get("entry_id", "")
-        live_entry = self.hass.config_entries.async_get_entry(entry_id)
-        live_options = live_entry.options if live_entry is not None else {}
-        degradation_cost = float(
-            live_options.get(
-                CONF_DEGRADATION_COST_PER_CYCLE,
-                self.config.get(
-                    CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
-                ),
-            )
+        degradation_cost = self._live_option(
+            CONF_DEGRADATION_COST_PER_CYCLE, DEFAULT_DEGRADATION_COST_PER_CYCLE
         )
-        min_spread = float(
-            live_options.get(
-                CONF_MIN_PRICE_SPREAD,
-                self.config.get(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD),
-            )
-        )
+        min_spread = self._live_option(CONF_MIN_PRICE_SPREAD, DEFAULT_MIN_PRICE_SPREAD)
         hybrid_deadband_w = self._hybrid_deadband_w()
 
         # Synthesise start_times for fallback paths that have no real timestamps
@@ -2038,26 +2584,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         min_horizon_steps = 36 * 60 // price_interval
         if len(resampled_prices) < min_horizon_steps and self._price_model.has_data():
             steps_needed = min_horizon_steps - len(resampled_prices)
-            hours_already = len(resampled_prices) * price_interval / 60
-            hours_for_model = (steps_needed * price_interval + 59) // 60  # ceiling
-            extension_start = dt_util.now().replace(
-                minute=0, second=0, microsecond=0
-            ) + timedelta(hours=int(hours_already))
-            weather_raw = self.weather_coordinator.data or {}
-            ghi_raw = weather_raw.get("radiation_forecast", [])
-            wind_raw = weather_raw.get("wind_speed_forecast", [])
-            offset = int(hours_already)
-            model_extension = self._price_model.forecast(
-                hours=hours_for_model,
-                start_time=extension_start,
-                ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
-                wind_forecast=wind_raw[offset:] if wind_raw else None,
-            )
-            resampled_extension = resample_forecast(model_extension, 60, price_interval)
             original_steps = len(resampled_prices)
-            resampled_prices = resampled_prices + resampled_extension[:steps_needed]
-            # Synthesise timestamps for the extension steps
+            # The extension starts one price period after the last live step,
+            # and the model must be anchored on that same instant.
             last_ts = price_start_times[-1] if price_start_times else now_utc
+            extension_start = last_ts + timedelta(minutes=price_interval)
+            resampled_prices = resampled_prices + self._model_extension(
+                self._price_model, extension_start, steps_needed, price_interval
+            )
+            # Synthesise timestamps for the extension steps
             for i in range(1, len(resampled_prices) - original_steps + 1):
                 price_start_times.append(
                     last_ts + timedelta(minutes=i * price_interval)
@@ -2069,20 +2604,6 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 original_steps,
                 len(resampled_prices),
             )
-
-        # Generate model forecast for price accuracy comparison.
-        # Always computed when live prices are used, so users can compare prediction vs actual.
-        price_forecast_model: list[float] | None = None
-        if self._price_model.has_data() and price_forecast_source.startswith("live"):
-            _weather = self.weather_coordinator.data or {}
-            total_hours = (len(resampled_prices) * price_interval + 59) // 60
-            _model_raw = self._price_model.forecast(
-                hours=total_hours,
-                ghi_forecast=_weather.get("radiation_forecast"),
-                wind_forecast=_weather.get("wind_speed_forecast"),
-            )
-            _model_resampled = resample_forecast(_model_raw, 60, price_interval)
-            price_forecast_model = _model_resampled[: len(resampled_prices)]
 
         # Compute per-step durations: first step = remaining time in current price period,
         # subsequent steps = full price_interval each.
@@ -2103,40 +2624,74 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         for ts in price_start_times[1 : len(resampled_prices)]:
             step_start_times_iso.append(ts.isoformat())
 
+        # Absolute step windows, used to project every other series onto the
+        # DP's own time grid. Step 0 runs from now to the next price boundary;
+        # each later step spans one full price period.
+        step_starts: list[datetime] = [now_utc] + list(
+            price_start_times[1 : len(resampled_prices)]
+        )
+        while len(step_starts) < len(resampled_prices):
+            step_starts.append(
+                step_starts[-1] + timedelta(minutes=price_interval)
+                if step_starts
+                else now_utc
+            )
+
+        # Generate model forecast for price accuracy comparison. Always computed
+        # when live prices are used, so users can compare prediction vs actual.
+        # Projected onto the DP step windows, which is why it is built here and
+        # not next to the horizon extension above.
+        price_forecast_model: list[float] | None = None
+        if self._price_model.has_data() and price_forecast_source.startswith("live"):
+            price_forecast_model = self._model_series(
+                self._price_model, step_starts, step_durations_hours
+            )
+
         resampled_feed_in = None
         if feed_in_forecast:
-            # Resample from the feed-in sensor's own interval to the grid price
-            # interval. Using price_interval for both would silently misalign
-            # the feed-in series whenever the two sensors publish at different
-            # resolutions (e.g. hourly feed-in with 15-min grid prices).
-            resampled_feed_in = resample_forecast(
-                feed_in_forecast, feed_in_interval, price_interval
+            # Project the feed-in series onto the DP step windows using its own
+            # start time. Resampling by interval alone assumed both series began
+            # at the same instant, which silently shifted the feed-in prices by
+            # up to one grid-price period whenever the two sensors publish at
+            # different resolutions (e.g. hourly feed-in with 15-min prices).
+            resampled_feed_in = resample_to_steps(
+                feed_in_forecast,
+                feed_in_start,
+                feed_in_interval,
+                step_starts,
+                step_durations_hours,
             )
             if not resampled_feed_in:
-                # Downsampling a feed-in series shorter than one grid-price
-                # period yields an empty list. An empty feed-in forecast must
+                # A feed-in series that does not reach the first step window
+                # yields an empty list. An empty feed-in forecast must
                 # never reach the optimizer: each step would fall back to the
                 # grid buy price and the terminal value of stored energy would
                 # become 0, making PV arbitrage look unprofitable. Fall back to
                 # the fixed feed-in price (same as an unavailable sensor).
-                fixed_price = float(
-                    self.config.get(
-                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                    )
+                resampled_feed_in = [self._fixed_feed_in_price()] * len(
+                    resampled_prices
                 )
-                resampled_feed_in = [fixed_price] * len(resampled_prices)
 
-        # Resample PV / consumption forecasts from the forecast pipeline's
-        # native interval (15 min; 60 for data produced by older versions)
-        # to the price sensor's native interval.
+        # Project PV / consumption onto the DP step windows. The forecast
+        # pipeline anchors its series to the current quarter hour, the DP steps
+        # to price-period boundaries; with hourly prices those differ by up to
+        # 45 minutes, so resampling by interval length alone shifted the whole
+        # series (see resample_to_steps).
         fc_interval = int(forecast_data.get("forecast_interval_minutes", 60))
-        pv_forecast = resample_forecast(
-            forecast_data.get("pv_forecast_kw", []), fc_interval, price_interval
-        )
-        consumption_forecast = resample_forecast(
-            forecast_data.get("consumption_forecast_kw", []),
+        fc_start = forecast_data.get("forecast_start_utc") or now_utc
+        pv_forecast = resample_to_steps(
+            forecast_data.get("pv_forecast_kw", []),
+            fc_start,
             fc_interval,
-            price_interval,
+            step_starts,
+            step_durations_hours,
+        )
+        consumption_forecast = resample_to_steps(
+            forecast_data.get("consumption_forecast_kw", []),
+            fc_start,
+            fc_interval,
+            step_starts,
+            step_durations_hours,
         )
 
         # Horizon = length of price forecast (the binding constraint)
@@ -2147,7 +2702,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if forecast_data.get("pv_dc_coupled"):
             raw_dc = forecast_data.get("pv_dc_forecast_kw", [])
             if raw_dc and any(v > 0 for v in raw_dc):
-                pv_dc_forecast = resample_forecast(raw_dc, fc_interval, price_interval)
+                pv_dc_forecast = resample_to_steps(
+                    raw_dc, fc_start, fc_interval, step_starts, step_durations_hours
+                )
 
         # PV curtailment override: zero out all PV when the switch is active.
         # The optimizer then plans charging from the grid instead of relying on
@@ -2165,26 +2722,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Priority: own feed-in model → grid model × ratio → last value.
         if resampled_feed_in and len(resampled_feed_in) < n_steps:
             steps_needed = n_steps - len(resampled_feed_in)
-            hours_already = len(resampled_feed_in) * price_interval / 60
-            hours_for_model = (steps_needed * price_interval + 59) // 60
-            extension_start = dt_util.now().replace(
-                minute=0, second=0, microsecond=0
-            ) + timedelta(hours=int(hours_already))
-            weather_raw = self.weather_coordinator.data or {}
-            ghi_raw = weather_raw.get("radiation_forecast", [])
-            wind_raw = weather_raw.get("wind_speed_forecast", [])
-            offset = int(hours_already)
-
             if feed_in_is_dynamic and self._feed_in_price_model.has_data():
-                # Own feed-in model has historical data — use it directly.
-                model_ext = self._feed_in_price_model.forecast(
-                    hours=hours_for_model,
-                    start_time=extension_start,
-                    ghi_forecast=ghi_raw[offset:] if ghi_raw else None,
-                    wind_forecast=wind_raw[offset:] if wind_raw else None,
+                # Own feed-in model has historical data — use it directly. The
+                # feed-in series is already projected onto the DP step windows,
+                # so the extension picks up at the first step it does not cover.
+                resampled_feed_in.extend(
+                    self._model_series(
+                        self._feed_in_price_model,
+                        step_starts[len(resampled_feed_in) :],
+                        step_durations_hours[len(resampled_feed_in) :],
+                    )
                 )
-                resampled_ext = resample_forecast(model_ext, 60, price_interval)
-                resampled_feed_in.extend(resampled_ext[:steps_needed])
                 _LOGGER.debug(
                     "Extended feed-in horizon by %d steps using own feed-in model",
                     steps_needed,
@@ -2209,63 +2757,51 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             and price_forecast_source.startswith("live")
             and self._feed_in_price_model.has_data()
         ):
-            _weather = self.weather_coordinator.data or {}
-            total_hours = (len(resampled_prices) * price_interval + 59) // 60
-            _fi_raw = self._feed_in_price_model.forecast(
-                hours=total_hours,
-                ghi_forecast=_weather.get("radiation_forecast"),
-                wind_forecast=_weather.get("wind_speed_forecast"),
+            feed_in_price_forecast_model = self._model_series(
+                self._feed_in_price_model, step_starts, step_durations_hours
             )
-            _fi_resampled = resample_forecast(_fi_raw, 60, price_interval)
-            feed_in_price_forecast_model = _fi_resampled[: len(resampled_prices)]
 
         # Get current battery state
         battery_state = self.get_current_battery_state()
 
-        # Charge efficiency calibration: compare previous planned SoC with actual SoC
-        # to detect systematic over-estimation of charge efficiency (e.g. CV-phase).
-        self._update_charge_eff_calibration(battery_state)
+        # Cumulative throughput counters, read once: they close the previous
+        # planned step and open the new one at the same instant.
+        energy_totals_now = self._read_energy_totals()
+
+        # Charge efficiency calibration: compare the previous plan against what
+        # each battery actually moved, to detect systematic over-estimation of
+        # charge efficiency (e.g. CV-phase).
+        self._update_charge_eff_calibration(energy_totals_now)
         # Discharge efficiency calibration: same principle for discharging steps.
-        self._update_discharge_eff_calibration(battery_state)
+        self._update_discharge_eff_calibration(energy_totals_now)
 
         battery_config = self.battery_config
 
-        # Apply charge efficiency correction only to the charge-side SoC
-        # transition: when the battery charges slower than modelled, the DP
-        # should plan less charge within the step. Economic costs still use the
-        # nominal curve so a charging-speed problem is not double-counted as
-        # extra energy cost or degradation.
-        charge_eff_curve_override: EfficiencyCurve | None = None
-        if self._charge_eff_correction < 0.995:
-            charge_eff_curve_override = [
-                (p, min(1.0, eff * self._charge_eff_correction))
-                for p, eff in battery_config.charge_efficiency_curve_parsed
-            ]
+        # Calibration overrides replace the nominal curves for SoC TRANSITIONS
+        # only; economic costs always use the nominal curves so a charging- or
+        # discharging-speed problem is not double-counted as extra energy cost
+        # or degradation. See efficiency_calibration.py for the two directions'
+        # opposite arithmetic, and for the threshold below which a correction is
+        # stored but not applied.
+        charge_eff_correction = self.charge_eff_correction
+        discharge_eff_correction = self.discharge_eff_correction
+        charge_eff_curve_override = curve_override(
+            battery_config.charge_efficiency_curve_parsed,
+            charge_eff_correction,
+        )
+        discharge_eff_curve_override = curve_override(
+            battery_config.discharge_efficiency_curve_parsed,
+            discharge_eff_correction,
+        )
+        if charge_eff_curve_override is not None:
             _LOGGER.debug(
                 "Charge efficiency correction %.3f applied to curve",
-                self._charge_eff_correction,
+                charge_eff_correction,
             )
-
-        # Apply discharge efficiency correction only to the discharge-side SoC
-        # transition: when the battery discharges slower than modelled, the DP
-        # should plan less discharge within the step. Economic costs still use
-        # the nominal curve.
-        #
-        # The SoC transition is: soc -= power * hours / discharge_eff
-        # To reduce planned SoC drop by factor `correction`, we need a LARGER
-        # discharge_eff (dividing by a larger value gives a smaller drop).
-        # Hence we divide each curve point by the correction, not multiply.
-        # Curve points may exceed 1.0 here; that is intentional — the override
-        # only affects SoC state transitions, not the economic cost.
-        discharge_eff_curve_override: EfficiencyCurve | None = None
-        if self._discharge_eff_correction < 0.995:
-            discharge_eff_curve_override = [
-                (p, max(1e-6, eff / self._discharge_eff_correction))
-                for p, eff in battery_config.discharge_efficiency_curve_parsed
-            ]
+        if discharge_eff_curve_override is not None:
             _LOGGER.debug(
                 "Discharge efficiency correction %.3f applied to curve",
-                self._discharge_eff_correction,
+                discharge_eff_correction,
             )
 
         _LOGGER.debug("OptimizationCoordinator: Calling optimize_battery_schedule.")
@@ -2305,6 +2841,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         self._last_result = result
+        # Snapshot the counters and each pack's SoC alongside the plan they
+        # belong to, so the next run can measure the throughput of exactly this
+        # step, per battery. The setpoints themselves are snapshotted further
+        # down, once the split is known.
+        self._energy_counter_snapshot = energy_totals_now
+        self._soc_snapshot_kwh = {
+            sid: state.soc_kwh for sid, state in self._per_battery_states.items()
+        }
 
         # Get current grid power: prefer real sensor, fall back to estimate
         realtime_grid_w = self._get_realtime_grid_w()
@@ -2327,254 +2871,24 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             price_start_times[0] if price_start_times else None
         )
 
-        # Determine effective mode/power based on control mode
-        if self._control_mode == MODE_ZERO_GRID:
-            if self._pv_curtailed:
-                # PV is unavailable: follow the DP schedule so the battery charges
-                # from the grid at negative prices instead of trying to maintain
-                # zero-grid by discharging.
-                effective_mode = result.optimal_mode
-                effective_power = result.optimal_power_kw
-            else:
-                effective_mode = "zero_grid"
-                effective_power = 0.0
-        elif self._control_mode == MODE_MANUAL:
-            manual_w = self._get_manual_setpoint_w()
-            effective_mode = "manual"
-            effective_power = manual_w / 1000  # kW for output sensors
-        elif self._control_mode in (MODE_HYBRID, MODE_HYBRID_PLUS):
-            # Hybrid: DP schedule for arbitrage, zero_grid for self-consumption.
-            # Hybrid+ additionally consults the price forecast (via the shadow
-            # price) before storing PV surplus, so surplus is exported when the
-            # battery can be filled more cheaply later.
-            if result.optimal_mode == ACTION_IDLE:
-                # Optimizer wants to preserve battery capacity.
-                # This means: don't charge (even with PV surplus) and don't discharge.
-                #
-                # Why? Two common cases:
-                # 1. High feed-in price now → better to export than store
-                # 2. Upcoming expensive periods → preserve capacity for discharge
-                #
-                # Exception: if there's consumption (grid importing), use zero_grid
-                # to reduce import with available PV, without cycling the battery.
-                has_upcoming_discharge = any(
-                    m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
-                )
-                # Hysteresis: use a ±hybrid_deadband_w band (the user-tunable
-                # zero-grid deadband) around the 0 W crossing so grid power
-                # hovering near zero (e.g. consumption ≈ PV production) doesn't
-                # flip idle/zero_grid every realtime tick.
-                if self._last_hybrid_idle_decision == "zero_grid":
-                    # Was capturing surplus; keep doing so until grid climbs
-                    # solidly positive (surplus has genuinely disappeared).
-                    has_pv_surplus = current_grid < hybrid_deadband_w
-                else:
-                    # Was idle; only start capturing once surplus is solid.
-                    has_pv_surplus = current_grid < -hybrid_deadband_w
-                # Hybrid+: check the forecast before capturing surplus. The
-                # shadow price λ already prices in upcoming cheap-surplus hours
-                # (e.g. the midday PV peak at low prices): when λ × sqrt(RTE)
-                # is below the current feed-in price, exporting now is worth
-                # more than storing, so surplus capture is blocked.
-                capture_blocked = False
-                if self._control_mode == MODE_HYBRID_PLUS:
-                    current_feed_in = (
-                        resampled_feed_in[0]
-                        if resampled_feed_in
-                        else float(
-                            self.config.get(
-                                CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                            )
-                        )
-                    )
-                    capture_blocked = not self._hybrid_plus_should_capture_surplus(
-                        result.shadow_price_eur_kwh, current_feed_in
-                    )
-                self._hybrid_plus_capture_blocked = capture_blocked
-                if has_upcoming_discharge and not has_pv_surplus:
-                    # Preserve capacity (discharge planned, no PV surplus)
-                    effective_mode = ACTION_IDLE
-                elif capture_blocked and has_pv_surplus:
-                    # Hybrid+: export the surplus at the current feed-in price
-                    # instead of storing it; the DP schedule charges later when
-                    # surplus is cheaper.
-                    effective_mode = ACTION_IDLE
-                else:
-                    # Either no discharge planned, or PV surplus to capture
-                    effective_mode = "zero_grid"
-                self._last_hybrid_idle_decision = effective_mode
-                effective_power = 0.0
-            elif result.optimal_mode == ACTION_DISCHARGING:
-                # Decide: full-rate export vs zero_grid (self-consumption only).
-                # Use shadow price as the threshold: net sell value per kWh stored
-                # = feed_in * sqrt(RTE). If that exceeds the shadow price (the
-                # value of keeping the energy for future use), exporting is better.
-                #
-                # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
-                # oscillation when shadow_price ≈ net_sell_value.
-                # • Was discharging → continue unless net_sell_value < threshold × 0.95
-                # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
-                current_feed_in = (
-                    resampled_feed_in[0]
-                    if resampled_feed_in
-                    else float(
-                        self.config.get(
-                            CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                        )
-                    )
-                )
-                sqrt_rte = self.battery_config.round_trip_efficiency**0.5
-                net_sell_value = current_feed_in * sqrt_rte
-                threshold = result.shadow_price_eur_kwh
-                if self._last_hybrid_decision == ACTION_DISCHARGING:
-                    should_discharge = net_sell_value >= threshold * 0.95
-                else:
-                    should_discharge = net_sell_value >= threshold * 1.05
-
-                if should_discharge:
-                    effective_mode = ACTION_DISCHARGING
-                    effective_power = result.optimal_power_kw
-                    self._last_hybrid_decision = ACTION_DISCHARGING
-                else:
-                    # Shadow price > sell value: energy is more valuable later
-                    effective_mode = "zero_grid"
-                    effective_power = 0.0
-                    self._last_hybrid_decision = "zero_grid"
-            elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
-                current_feed_in = (
-                    resampled_feed_in[0]
-                    if resampled_feed_in
-                    else float(
-                        self.config.get(
-                            CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                        )
-                    )
-                )
-                if current_feed_in < 0:
-                    # Negative feed-in: exporting costs money. Use follow_schedule
-                    # so curtailing PV (grid → ~0) doesn't cause a zero_grid
-                    # deadlock that stops charging.
-                    effective_mode = result.optimal_mode
-                    effective_power = result.optimal_power_kw
-                    self._last_hybrid_charge_decision = ACTION_CHARGING
-                else:
-                    # Hysteresis: apply a ±5% band around the coverage threshold
-                    # (same pattern as the discharge decision above) so PV surplus
-                    # hovering near _SURPLUS_COVERS_PLAN_FRACTION of the planned
-                    # charge power doesn't flip zero_grid/charging every tick.
-                    # • Was zero_grid → stay unless surplus drops below 95% of threshold
-                    # • Was charging → switch only once surplus reaches 105% of threshold
-                    if self._last_hybrid_charge_decision == "zero_grid":
-                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
-                    else:
-                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
-                    if (
-                        -current_grid
-                        >= result.optimal_power_kw * 1000 * coverage_threshold
-                    ):
-                        # PV surplus covers (most of) the planned charge: use
-                        # zero_grid to dynamically match the actual surplus instead
-                        # of fixed-rate charging. Fixed charging may import from
-                        # grid when clouds pass.
-                        effective_mode = "zero_grid"
-                        effective_power = 0.0
-                        self._last_hybrid_charge_decision = "zero_grid"
-                    else:
-                        # The DP planned substantially more charging than the
-                        # current export surplus — it wants grid charging (e.g. a
-                        # cheap price hour that happens to coincide with a small PV
-                        # surplus). Zero_grid would only charge the surplus and
-                        # forfeit the planned arbitrage, so follow the schedule.
-                        effective_mode = result.optimal_mode
-                        effective_power = result.optimal_power_kw
-                        self._last_hybrid_charge_decision = ACTION_CHARGING
-            else:
-                effective_mode = result.optimal_mode
-                effective_power = result.optimal_power_kw
-        else:
-            # follow_schedule: execute DP schedule exactly
-            effective_mode = result.optimal_mode
-            effective_power = result.optimal_power_kw
-
-        # Commitment filter: don't switch an active charge/discharge to idle unless
-        # the price has moved beyond the oscillation-filter threshold (same economics
-        # as the post-DP oscillation filter in optimizer.py).
-        commitment_locked = False
-        commitment_reason = ""
-        if self._control_mode not in (MODE_ZERO_GRID, MODE_MANUAL):
-            sqrt_rte = battery_config.round_trip_efficiency**0.5
-            # Same economics as the post-DP oscillation filter in optimizer.py:
-            # min_arbitrage_spread = (2 x degradation + min_spread) / sqrt(RTE).
-            commit_spread = (2.0 * degradation_cost_per_kwh + min_spread) / sqrt_rte
-            current_price = resampled_prices[0] if resampled_prices else 0.0
-            soc_at_limit = (
-                battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
-                or battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98
-            )
-            same_price_period = (
-                current_step_start is not None
-                and current_step_start == self._committed_step_start
-            )
-            direction_flip = (
-                self._committed_action == ACTION_CHARGING
-                and effective_mode == ACTION_DISCHARGING
-            ) or (
-                self._committed_action == ACTION_DISCHARGING
-                and effective_mode == ACTION_CHARGING
-            )
-            if self._committed_action == ACTION_CHARGING:
-                price_jumped = current_price > self._committed_price + commit_spread
-            elif self._committed_action == ACTION_DISCHARGING:
-                price_jumped = current_price < self._committed_price - commit_spread
-            else:
-                price_jumped = False
-
-            if (
-                self._committed_action in (ACTION_CHARGING, ACTION_DISCHARGING)
-                and same_price_period
-                and not price_jumped
-                and not soc_at_limit
-                and not direction_flip
-            ):
-                if effective_mode == self._committed_action:
-                    # Same direction within the same price period: lock power so
-                    # the 15-min re-optimizations don't produce erratic setpoints.
-                    _LOGGER.debug(
-                        "Commitment filter: locking %s power at %.0fW "
-                        "(price Δ=%.3f < commit_spread=%.3f)",
-                        self._committed_action,
-                        self._committed_power * 1000,
-                        abs(current_price - self._committed_price),
-                        commit_spread,
-                    )
-                    effective_power = self._committed_power
-                    commitment_locked = True
-                    commitment_reason = "power_locked"
-                elif effective_mode == ACTION_IDLE:
-                    # Prevent switching an active charge/discharge to idle.
-                    _LOGGER.debug(
-                        "Commitment filter: keeping %s (price Δ=%.3f < commit_spread=%.3f, "
-                        "soc_at_limit=%s)",
-                        self._committed_action,
-                        abs(current_price - self._committed_price),
-                        commit_spread,
-                        soc_at_limit,
-                    )
-                    effective_mode = self._committed_action
-                    effective_power = self._committed_power
-                    commitment_locked = True
-                    commitment_reason = "idle_suppressed"
-                else:
-                    # Direction flip bypassed the guard — update commitment.
-                    self._committed_action = effective_mode
-                    self._committed_price = current_price
-                    self._committed_power = effective_power
-                    self._committed_step_start = current_step_start
-            else:
-                self._committed_action = effective_mode
-                self._committed_price = current_price
-                self._committed_power = effective_power
-                self._committed_step_start = current_step_start
+        effective_mode, effective_power = self._resolve_effective_mode(
+            result, current_grid, resampled_feed_in, hybrid_deadband_w
+        )
+        (
+            effective_mode,
+            effective_power,
+            commitment_locked,
+            commitment_reason,
+        ) = self._apply_commitment_filter(
+            effective_mode,
+            effective_power,
+            battery_state=battery_state,
+            battery_config=battery_config,
+            current_price=resampled_prices[0] if resampled_prices else 0.0,
+            current_step_start=current_step_start,
+            degradation_cost_per_kwh=degradation_cost_per_kwh,
+            min_spread=min_spread,
+        )
 
         controller_schedule_w = (
             effective_power * 1000 if effective_mode != ACTION_IDLE else 0.0
@@ -2645,10 +2959,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "grid_kw": round(current_grid / 1000, 3),
                 "commitment_locked": commitment_locked,
                 "commitment_reason": commitment_reason,
-                "charge_eff_correction": round(self._charge_eff_correction, 4),
-                "charge_eff_samples": len(self._charge_eff_samples),
-                "discharge_eff_correction": round(self._discharge_eff_correction, 4),
-                "discharge_eff_samples": len(self._discharge_eff_samples),
+                "charge_eff_correction": round(self.charge_eff_correction, 4),
+                "charge_eff_samples": self.charge_eff_sample_count,
+                "charge_eff_last_result": self.charge_eff_last_result,
+                "discharge_eff_correction": round(self.discharge_eff_correction, 4),
+                "discharge_eff_samples": self.discharge_eff_sample_count,
+                "discharge_eff_last_result": self.discharge_eff_last_result,
             }
         )
         self._optimization_trigger_source = "unknown"
@@ -2656,8 +2972,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Split combined setpoint across individual batteries
         combined_setpoint_kw = control_action["target_power_kw"]  # positive=charge
         battery_setpoints = self._split_setpoint(
-            combined_setpoint_kw, control_action["mode"]
+            combined_setpoint_kw, self._control_mode
         )
+        # Which pack was asked to do what, for the calibration that scores this
+        # step on the next run. The dispatcher concentrates on one battery at a
+        # time, so without this the fleet plan would be credited to every pack.
+        self._last_battery_setpoints = dict(battery_setpoints)
 
         return {
             "optimization_result": result,
@@ -2682,23 +3002,20 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "raw_total_cost": result.raw_total_cost,
             "raw_savings": result.raw_savings,
             "current_price": resampled_prices[0] if resampled_prices else 0.0,
-            "current_feed_in_price": (
-                resampled_feed_in[0]
-                if resampled_feed_in
-                else float(
-                    self.config.get(
-                        CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE
-                    )
-                )
-            ),
+            "current_feed_in_price": self._current_feed_in_price(resampled_feed_in),
             "price_forecast_source": price_forecast_source,
             "price_forecast_model": price_forecast_model,
             "feed_in_price_forecast_model": feed_in_price_forecast_model,
             "feed_in_price_forecast": resampled_feed_in,
             "price_interval": price_interval,
-            "charge_eff_correction": round(self._charge_eff_correction, 4),
-            "charge_eff_samples": len(self._charge_eff_samples),
-            "discharge_eff_correction": round(self._discharge_eff_correction, 4),
-            "discharge_eff_samples": len(self._discharge_eff_samples),
+            "charge_eff_correction": round(self.charge_eff_correction, 4),
+            "charge_eff_samples": self.charge_eff_sample_count,
+            "charge_eff_applied": self.charge_eff_applied,
+            "charge_eff_last_result": self.charge_eff_last_result,
+            "discharge_eff_correction": round(self.discharge_eff_correction, 4),
+            "discharge_eff_samples": self.discharge_eff_sample_count,
+            "discharge_eff_applied": self.discharge_eff_applied,
+            "discharge_eff_last_result": self.discharge_eff_last_result,
+            "battery_calibration": self.battery_calibration_report(),
             "timestamp": dt_util.utcnow(),
         }

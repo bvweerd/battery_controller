@@ -5,10 +5,20 @@ import math
 import pytest
 
 from custom_components.battery_controller.battery_model import BatteryConfig
-from custom_components.battery_controller.const import MAX_SOC_STATES
-from custom_components.battery_controller.efficiency_curve import EfficiencyCurve
+from custom_components.battery_controller.const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
+    MAX_SOC_STATES,
+)
+from custom_components.battery_controller.efficiency_curve import (
+    EfficiencyCurve,
+    interpolate_efficiency,
+)
 from custom_components.battery_controller.optimizer import (
     OptimizationResult,
+    charge_budget_wh,
+    passive_dc_charge_wh,
     _filter_micro_cycles,
     _filter_oscillations,
     _find_nearest_soc_idx,
@@ -873,7 +883,6 @@ class TestQuarterHourOscillationFilter:
         covered the entire 96-step horizon, causing charge blocks to be
         paired with distant, low-spread discharges and incorrectly removed.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 16
         # Steps 0-3: cheap (4 ct), steps 4-7: idle, steps 8-15: expensive (25 ct)
@@ -913,7 +922,6 @@ class TestQuarterHourOscillationFilter:
         removed, even though a profitable discharge appeared a few steps later
         within the same lookahead window.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 16
         # Step 0: charge at 4 ct
@@ -952,7 +960,6 @@ class TestQuarterHourOscillationFilter:
 
     def test_true_oscillation_still_removed(self):
         """Rapid charge→discharge with no profitable match must still be suppressed."""
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         n = 8
         # All discharges have very small spread vs the charges → true oscillation
@@ -1098,7 +1105,6 @@ class TestOscillationFilterDcPv:
 
     def test_oscillation_filter_dc_pv_passive_charge(self):
         """Oscillation filter should account for passive DC PV when evaluating charge cost."""
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Scenario: charge at step 0, discharge at step 1. With DC PV,
         # the charge at step 0 is partially free (passive DC PV charging).
@@ -1297,11 +1303,10 @@ class TestSocDependentDerating:
 
 
 class TestCalculateStepCostGridCap:
-    """Cover grid cap clamping in calculate_step_cost (lines 361-362)."""
+    """Cover grid cap clamping in calculate_step_cost."""
 
     def test_grid_cap_clamps_export(self):
         """max_grid_power_kw > 0 triggers grid cap clamp."""
-        from custom_components.battery_controller.battery_model import BatteryConfig
 
         config = BatteryConfig(
             capacity_kwh=10.0,
@@ -1358,7 +1363,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
     """Cover edge cases in optimize_battery_schedule."""
 
     def test_step_durations_shorter_than_n_steps_are_padded(self):
-        """When step_durations_hours is shorter than n_steps, last value is repeated (line 434)."""
+        """When step_durations_hours is shorter than n_steps, last value is repeated."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1382,7 +1387,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
         assert len(result.power_schedule_kw) == 6
 
     def test_empty_feed_in_forecast_uses_zero_terminal_price(self):
-        """Empty feed_in_forecast sets terminal_price = 0.0 (line 503)."""
+        """Empty feed_in_forecast sets terminal_price = 0.0."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1432,7 +1437,7 @@ class TestOptimizeBatteryScheduleEdgeCases:
         assert isinstance(result.shadow_price_eur_kwh, float)
 
     def test_dc_pv_passive_charging_in_forward_pass(self):
-        """DC-coupled PV triggers passive charging in forward pass (lines 663-666)."""
+        """DC-coupled PV triggers passive charging in forward pass."""
         config = BatteryConfig(
             capacity_kwh=10.0,
             max_charge_power_kw=5.0,
@@ -1461,14 +1466,13 @@ class TestOptimizeBatteryScheduleEdgeCases:
 
 
 class TestCalculateScheduleTotalCostNoPvDc:
-    """Cover _calculate_schedule_total_cost with pv_dc_forecast=None (line 178)."""
+    """Cover _calculate_schedule_total_cost with pv_dc_forecast=None."""
 
     def test_pv_dc_forecast_none_uses_zeros(self):
-        """When pv_dc_forecast is None, function uses [0.0]*n (line 178)."""
+        """When pv_dc_forecast is None, function uses [0.0]*n."""
         from custom_components.battery_controller.optimizer import (
             _calculate_schedule_total_cost,
         )
-        from custom_components.battery_controller.battery_model import BatteryConfig
 
         config = BatteryConfig(
             capacity_kwh=10.0,
@@ -1496,10 +1500,10 @@ class TestCalculateScheduleTotalCostNoPvDc:
 
 
 class TestFilterOscillationsEmpty:
-    """Cover _filter_oscillations with empty schedule (line 846)."""
+    """Cover _filter_oscillations with empty schedule."""
 
     def test_empty_schedule_returns_unchanged(self):
-        """Empty schedule returns immediately (line 846)."""
+        """Empty schedule returns immediately."""
         result_power, result_mode, result_soc = _filter_oscillations(
             power_schedule_kw=[],
             mode_schedule=[],
@@ -1534,7 +1538,7 @@ class TestFilterOscillationsGetChargeCostEdges:
         )
 
     def test_get_charge_cost_all_passive_dc(self):
-        """When passive DC PV covers all charging, charge cost = 0 (line 897)."""
+        """When passive DC PV covers all charging, charge cost = 0."""
         power, mode = self._make_schedule(1.0, -1.0)
         # DC PV of 2 kW covers the 1 kW charge → effective_charge_kw <= 0 → cost = 0
         result_power, result_mode, _ = _filter_oscillations(
@@ -1556,10 +1560,14 @@ class TestFilterOscillationsGetChargeCostEdges:
             pv_dc_coupled=True,
             pv_dc_efficiency=0.97,
         )
-        # Doesn't crash; result may or may not filter
+
+        # The filter rebuilds a schedule of the same length and never invents
+        # a mode outside the three it knows.
+        assert len(result_power) == len(power)
+        assert set(result_mode) <= {ACTION_CHARGING, ACTION_DISCHARGING, ACTION_IDLE}
 
     def test_get_discharge_value_negative_power(self):
-        """get_discharge_value with discharge_power_kw <= 0 returns grid price (line 911)."""
+        """get_discharge_value with discharge_power_kw <= 0 returns grid price."""
         from custom_components.battery_controller.optimizer import (
             ACTION_CHARGING,
             ACTION_DISCHARGING,
@@ -1586,10 +1594,10 @@ class TestFilterOscillationsGetChargeCostEdges:
 
 
 class TestFilterMicroCyclesEmpty:
-    """Cover _filter_micro_cycles with empty schedule (line 1040)."""
+    """Cover _filter_micro_cycles with empty schedule."""
 
     def test_empty_schedule_returns_unchanged(self):
-        """Empty power schedule returns immediately (line 1040)."""
+        """Empty power schedule returns immediately."""
         result_power, result_mode, result_soc = _filter_micro_cycles(
             power_schedule_kw=[],
             mode_schedule=[],
@@ -1606,14 +1614,14 @@ class TestFilterMicroCyclesEmpty:
 
 
 class TestFindNearestSocIdxSingleState:
-    """Cover _find_nearest_soc_idx with len(soc_states) <= 1 (line 1112)."""
+    """Cover _find_nearest_soc_idx with len(soc_states) <= 1."""
 
     def test_single_soc_state_returns_zero(self):
-        """Single SoC state always returns index 0 (line 1112)."""
+        """Single SoC state always returns index 0."""
         assert _find_nearest_soc_idx(5000.0, [5000.0]) == 0
 
     def test_empty_soc_states_returns_zero(self):
-        """Empty soc_states returns 0 (line 1112)."""
+        """Empty soc_states returns 0."""
         assert _find_nearest_soc_idx(5000.0, []) == 0
 
 
@@ -1626,7 +1634,7 @@ class TestSubResolutionACSkip:
     """Cover line 600: sub-resolution AC action that doesn't change SoC bin is skipped."""
 
     def test_sub_resolution_action_skipped_does_not_affect_result(self):
-        """A non-zero action that keeps the SoC in the same bin is skipped (line 600).
+        """A non-zero action that keeps the SoC in the same bin is skipped.
 
         The optimizer internally skips actions that don't cross a SoC boundary.
         We can indirectly verify this by running an optimization with very small
@@ -1634,7 +1642,7 @@ class TestSubResolutionACSkip:
         a 15 min step = 25 Wh when resolution is 100 Wh) should be filtered.
         The result must still be valid (no crash, valid schedule).
         """
-        from custom_components.battery_controller.battery_model import BatteryConfig
+
         from custom_components.battery_controller.optimizer import (
             optimize_battery_schedule,
         )
@@ -1662,11 +1670,11 @@ class TestSubResolutionACSkip:
 
 
 class TestForwardPassDCIdlePassiveCharge:
-    """Cover lines 663-666: idle + DC-coupled PV passive charging in forward pass."""
+    """Cover: idle + DC-coupled PV passive charging in forward pass."""
 
     def test_dc_pv_idle_charges_battery_in_forward_pass(self):
-        """When idle with DC PV, forward pass increases SoC (lines 663-666)."""
-        from custom_components.battery_controller.battery_model import BatteryConfig
+        """When idle with DC PV, forward pass increases SoC."""
+
         from custom_components.battery_controller.optimizer import (
             optimize_battery_schedule,
         )
@@ -1714,7 +1722,7 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
     """Cover line 897: get_charge_cost returns price when total_kw == 0."""
 
     def test_charge_cost_zero_total_returns_price(self):
-        """When effective_charge_kw == from_pv + from_grid == 0, returns price (line 897).
+        """When effective_charge_kw == from_pv + from_grid == 0, returns price.
 
         This happens when from_pv == effective_charge_kw and from_grid == 0,
         but total_kw is 0 due to rounding. The function returns price_forecast[timestep].
@@ -1731,7 +1739,6 @@ class TestFilterOscillationsGetChargeCostZeroTotal:
         # if from_pv = 0 and from_grid = 0 — but this requires effective_charge_kw = 0,
         # blocked by line 890 guard. Let's just verify the oscillation filter doesn't crash
         # and returns a valid schedule.
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Use a charging schedule where pv perfectly covers the charge
         result_power, result_mode, result_soc = _filter_oscillations(
@@ -2011,14 +2018,19 @@ class TestOptimizeWithMultiplePacks:
     # ------------------------------------------------------------------
 
     def test_derating_one_pack_only_limits_combined_power(self):
-        """When only one of two packs has high-SoC derating, the combined derated
-        power is the sum of individual derated powers (0 + 0.45 = 0.45 kW).
+        """When only one of two packs derates, the other keeps its full rating.
 
-        The combined threshold is a capacity-weighted average:
-          (100.0 * 5 + 95.0 * 5) / 10 = 97.5 %  →  9.75 kWh of 10 kWh
+        Above the fleet threshold each pack contributes what it can still do
+        there: the derating pack its reduced limit (0.45 kW), the plain pack its
+        nominal rating (1.2 kW) → 1.65 kW combined, not 0.45 kW.
+
+        The threshold is the first one reached, i.e. the lowest of the packs
+        that actually derate (95 %), not a capacity-weighted average that mixes
+        in the disabling 100 % sentinel of the plain pack →  9.5 kWh of 10 kWh.
 
         Starting at 9.8 kWh (98 %) puts us above the combined threshold, so the
-        DP must respect the 0.45 kW derated limit instead of the nominal 2.4 kW.
+        DP must respect the 1.65 kW combined limit instead of the nominal
+        2.4 kW.
         """
         from custom_components.battery_controller.battery_model import (
             aggregate_battery_configs,
@@ -2046,16 +2058,16 @@ class TestOptimizeWithMultiplePacks:
         )
         combined = aggregate_battery_configs([plain, derated])
 
-        # Only the derated pack contributes → combined derated kw = 0 + 0.45 = 0.45
-        assert combined.high_soc_max_charge_kw == pytest.approx(0.45)
-        # Capacity-weighted threshold: (100*5 + 95*5)/10 = 97.5 %
-        assert combined.high_soc_charge_threshold_pct == pytest.approx(97.5)
+        # Plain pack keeps its nominal 1.2 kW, derated pack contributes 0.45 kW
+        assert combined.high_soc_max_charge_kw == pytest.approx(1.65)
+        # Threshold = lowest threshold among the packs that actually derate
+        assert combined.high_soc_charge_threshold_pct == pytest.approx(95.0)
 
         combined_threshold_kwh = (
             combined.high_soc_charge_threshold_pct / 100.0 * combined.capacity_kwh
-        )  # = 9.75 kWh
+        )  # = 9.5 kWh
 
-        # Start at 9.8 kWh (98 %), clearly above the 97.5 % threshold
+        # Start at 9.8 kWh (98 %), clearly above the 95 % threshold
         start_soc = 9.8
         result = self._run(
             combined,
@@ -2063,7 +2075,7 @@ class TestOptimizeWithMultiplePacks:
             price_forecast=[0.05] * 4 + [0.30] * 4,
         )
         # Any charge step while SoC is at or above the combined threshold must
-        # not exceed the derated limit (0.45 kW).
+        # not exceed the combined derated limit (1.65 kW).
         for i, (mode, power) in enumerate(
             zip(result.mode_schedule, result.power_schedule_kw)
         ):
@@ -2071,9 +2083,24 @@ class TestOptimizeWithMultiplePacks:
                 mode == "charging"
                 and result.soc_schedule_kwh[i] >= combined_threshold_kwh
             ):
-                assert power <= 0.46, (
-                    f"step {i}: charge {power:.3f} kW exceeds derated limit 0.45 kW"
+                assert power <= 1.66, (
+                    f"step {i}: charge {power:.3f} kW exceeds derated limit 1.65 kW"
                 )
+
+    def test_derating_absent_on_all_packs_stays_disabled(self):
+        """With no pack derating, the combined config must keep derating off."""
+        from custom_components.battery_controller.battery_model import (
+            aggregate_battery_configs,
+        )
+
+        a = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=1.2)
+        b = BatteryConfig(capacity_kwh=5.0, max_charge_power_kw=2.0)
+        combined = aggregate_battery_configs([a, b])
+
+        assert combined.high_soc_max_charge_kw == 0.0
+        assert combined.low_soc_max_discharge_kw == 0.0
+        # Sentinel of 0 kW means "no derating": full rating at every SoC.
+        assert combined.max_charge_at_soc(combined.max_soc_kwh) == pytest.approx(3.2)
 
     # ------------------------------------------------------------------
     # 7. Floating-point SoC boundary regression (known bug #3)
@@ -2571,7 +2598,7 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
     """Cover line 922: get_discharge_value returns price when total_kw == 0."""
 
     def test_discharge_value_zero_total_returns_price(self):
-        """When discharge_power_kw > 0 but total_kw == 0, returns price (line 922).
+        """When discharge_power_kw > 0 but total_kw == 0, returns price.
 
         total_kw = to_self_kw + to_export_kw. This is 0 only when both are 0.
         to_self_kw = min(discharge_power_kw, residual_load) = 0 when residual_load=0.
@@ -2579,7 +2606,6 @@ class TestFilterOscillationsGetDischargeCostZeroTotal:
         So total_kw > 0 normally. The guard 'if total_kw <= 0' is a safety net.
         We verify the filter runs correctly with discharging during export conditions.
         """
-        from custom_components.battery_controller.optimizer import _filter_oscillations
 
         # Discharge during PV surplus: pv > consumption → residual_load=0, all to export
         result_power, result_mode, result_soc = _filter_oscillations(
@@ -2830,3 +2856,534 @@ class TestSocGridBudget:
             cfg.min_soc_kwh - 1e-6 <= s <= cfg.max_soc_kwh + 1e-6
             for s in result.soc_schedule_kwh
         )
+
+
+class TestArbitrageHurdleInObjective:
+    """min_price_spread is part of the DP objective, not a post-hoc filter."""
+
+    @staticmethod
+    def _cfg():
+        return BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+
+    @staticmethod
+    def _run(cfg, prices, spread):
+        n = len(prices)
+        return optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=cfg.min_soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=[p * 0.5 for p in prices],
+            pv_forecast=[0.0] * n,
+            consumption_forecast=[0.5] * n,
+            step_durations_hours=[1.0] * n,
+            degradation_cost_per_kwh=0.002,
+            min_price_spread=spread,
+        )
+
+    def test_thin_spread_is_rejected_by_the_dp_itself(self):
+        """A spread below the hurdle must not be planned in the first place.
+
+        Previously the DP planned it (its objective had no hurdle) and the
+        oscillation filter deleted it afterwards, but only when a counterpart
+        happened to fall inside the lookahead window.
+        """
+        cfg = self._cfg()
+        # 3 ct spread: above 2 x degradation, below a 10 ct hurdle.
+        prices = [0.20, 0.20, 0.23, 0.23, 0.20, 0.20]
+        result = self._run(cfg, prices, spread=0.10)
+        assert all(m == ACTION_IDLE for m in result.mode_schedule)
+
+    def test_wide_spread_is_still_taken(self):
+        """A spread comfortably above the hurdle must survive."""
+        cfg = self._cfg()
+        prices = [0.05, 0.05, 0.60, 0.60, 0.05, 0.05]
+        result = self._run(cfg, prices, spread=0.10)
+        assert ACTION_CHARGING in result.mode_schedule
+        assert ACTION_DISCHARGING in result.mode_schedule
+
+    def test_raising_the_spread_never_increases_cycling(self):
+        """The hurdle is monotone: a higher spread cycles no more than a lower one."""
+        cfg = self._cfg()
+        prices = [0.10, 0.12, 0.18, 0.22, 0.16, 0.11, 0.19, 0.24]
+
+        def throughput(spread):
+            r = self._run(cfg, prices, spread)
+            return sum(abs(p) for p in r.power_schedule_kw)
+
+        assert throughput(0.20) <= throughput(0.05) + 1e-9
+        assert throughput(0.05) <= throughput(0.0) + 1e-9
+
+    def test_reported_costs_exclude_the_hurdle(self):
+        """The hurdle steers decisions; it is not money and must not be billed.
+
+        Two runs whose schedules are identical must report identical costs,
+        whatever hurdle produced them.
+        """
+        cfg = self._cfg()
+        prices = [0.05, 0.05, 0.60, 0.60, 0.05, 0.05]
+        low = self._run(cfg, prices, spread=0.0)
+        high = self._run(cfg, prices, spread=0.10)
+        assert low.power_schedule_kw == pytest.approx(high.power_schedule_kw)
+        assert low.total_cost == pytest.approx(high.total_cost)
+        assert low.savings == pytest.approx(high.savings)
+
+    def test_passive_dc_pv_is_exempt_from_the_hurdle(self):
+        """Free DC PV is not an arbitrage decision and must not be discouraged."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=True,
+            pv_dc_efficiency=0.97,
+        )
+        common = dict(
+            time_step_hours=1.0,
+            soc_wh=cfg.min_soc_kwh * 1000,
+            action_w=0.0,
+            grid_price=0.20,
+            feed_in_price=0.10,
+            pv_production_w=0.0,
+            consumption_w=500.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.002,
+            battery_config=cfg,
+            pv_dc_production_w=2000.0,
+        )
+        without = calculate_step_cost(**common, arbitrage_cost_per_kwh=0.0)
+        with_hurdle = calculate_step_cost(**common, arbitrage_cost_per_kwh=0.05)
+        assert with_hurdle == pytest.approx(without)
+
+    def test_commanded_throughput_carries_the_hurdle(self):
+        """One full cycle costs 2 x degradation + min_price_spread per kWh."""
+        cfg = self._cfg()
+        common = dict(
+            time_step_hours=1.0,
+            soc_wh=5000.0,
+            grid_price=0.20,
+            feed_in_price=0.10,
+            pv_production_w=0.0,
+            consumption_w=0.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.0,
+            battery_config=cfg,
+        )
+        hurdle = 0.025  # = min_price_spread / 2
+        charge = calculate_step_cost(
+            **common, action_w=1000.0, arbitrage_cost_per_kwh=hurdle
+        )
+        charge_free = calculate_step_cost(
+            **common, action_w=1000.0, arbitrage_cost_per_kwh=0.0
+        )
+        stored_kwh = 1.0 * math.sqrt(0.90)
+        assert charge - charge_free == pytest.approx(stored_kwh * hurdle)
+
+
+class TestSocGridExactFit:
+    """The DP SoC grid must land exactly on max_soc_kwh."""
+
+    @pytest.mark.parametrize(
+        "capacity_kwh, min_pct, max_pct",
+        [
+            (10.0, 10.0, 90.0),  # 8000 Wh: whole multiple of the 10 Wh target
+            (10.005, 10.0, 90.0),  # 8004 Wh: not a whole multiple
+            (7.68, 15.0, 95.0),
+            (55.0, 5.0, 95.0),  # coarsened by the MAX_SOC_STATES budget
+        ],
+    )
+    def test_top_state_is_max_soc(self, capacity_kwh, min_pct, max_pct):
+        cfg = BatteryConfig(
+            capacity_kwh=capacity_kwh,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=min_pct,
+            max_soc_percent=max_pct,
+        )
+        min_wh = round(cfg.min_soc_kwh * 1000)
+        max_wh = round(cfg.max_soc_kwh * 1000)
+        res = compute_soc_resolution_wh(min_wh, max_wh)
+        n = int(round((max_wh - min_wh) / res)) + 1
+        assert n <= MAX_SOC_STATES + 1
+        exact_res = (max_wh - min_wh) / (n - 1)
+        top = min_wh + (n - 1) * exact_res
+        assert top == pytest.approx(max_wh, abs=1e-6)
+
+    def test_fill_to_max_reaches_max_soc(self):
+        """The fill-to-max boundary action must end exactly at max_soc."""
+        cfg = BatteryConfig(
+            capacity_kwh=10.005,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            discharge_efficiency_curve=f"{math.sqrt(0.90):.6f}",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        result = optimize_battery_schedule(
+            battery_config=cfg,
+            current_soc_kwh=cfg.max_soc_kwh - 0.05,
+            price_forecast=[0.01, 0.90, 0.90],
+            feed_in_forecast=[0.005, 0.45, 0.45],
+            pv_forecast=[0.0] * 3,
+            consumption_forecast=[0.0] * 3,
+            step_durations_hours=[1.0] * 3,
+            degradation_cost_per_kwh=0.001,
+            min_price_spread=0.0,
+        )
+        assert max(result.soc_schedule_kwh) <= cfg.max_soc_kwh + 1e-6
+
+
+class TestStepCostCacheInvariant:
+    """The per-step cost cache relies on step cost being SoC-independent.
+
+    simulate_diagnostics.py has no such cache, so tests/test_cross_impl.py is
+    the end-to-end check that it changes no result. These tests pin the
+    precondition the cache is built on.
+    """
+
+    @staticmethod
+    def _cfg(dc_coupled):
+        return BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            charge_efficiency_curve="0:0.88, 5:0.96",
+            discharge_efficiency_curve="0:0.86, 5:0.95",
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=dc_coupled,
+            pv_dc_efficiency=0.97,
+        )
+
+    def _cost(self, cfg, soc_wh, action_w, pv_dc_w):
+        return calculate_step_cost(
+            time_step_hours=0.25,
+            soc_wh=soc_wh,
+            action_w=action_w,
+            grid_price=0.22,
+            feed_in_price=0.08,
+            pv_production_w=300.0,
+            consumption_w=700.0,
+            charge_curve=cfg.charge_efficiency_curve_parsed,
+            discharge_curve=cfg.discharge_efficiency_curve_parsed,
+            degradation_cost_per_kwh=0.003,
+            battery_config=cfg,
+            pv_dc_production_w=pv_dc_w,
+            arbitrage_cost_per_kwh=0.02,
+        )
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0, 0.0, 100.0, 3000.0])
+    def test_soc_independent_without_dc_pv(self, action_w):
+        """No DC PV: cost is the same at every SoC, so one probe covers all."""
+        cfg = self._cfg(dc_coupled=False)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 0.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 9000.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [-3000.0, -100.0])
+    def test_discharge_soc_independent_with_dc_pv(self, action_w):
+        """Discharging never reads the SoC, DC PV or not."""
+        cfg = self._cfg(dc_coupled=True)
+        costs = [
+            self._cost(cfg, soc_wh, action_w, 2000.0)
+            for soc_wh in (1000.0, 4000.0, 7000.0, 8999.0)
+        ]
+        assert costs == pytest.approx([costs[0]] * len(costs))
+
+    @pytest.mark.parametrize("action_w", [0.0, 1000.0])
+    def test_charge_and_idle_soc_independent_below_headroom_limit(self, action_w):
+        """With DC PV, charge/idle cost is constant until headroom clips it."""
+        cfg = self._cfg(dc_coupled=True)
+        pv_dc_w = 2000.0
+        max_soc_wh = cfg.max_soc_kwh * 1000
+        charge_eff = interpolate_efficiency(
+            cfg.charge_efficiency_curve_parsed, abs(action_w) / 1000.0
+        )
+        ac_stored_wh = action_w * 0.25 * charge_eff if action_w > 0 else 0.0
+        passive_full_wh = pv_dc_w * cfg.pv_dc_efficiency * 0.25
+        limit = max_soc_wh - ac_stored_wh - passive_full_wh
+
+        below = [
+            self._cost(cfg, soc_wh, action_w, pv_dc_w)
+            for soc_wh in (1000.0, 3000.0, limit - 1.0, limit)
+        ]
+        assert below == pytest.approx([below[0]] * len(below))
+
+        # Above the limit the headroom clips the passive charge, so the cost
+        # genuinely does depend on SoC and the cache must not be used.
+        clipped = self._cost(cfg, limit + 200.0, action_w, pv_dc_w)
+        assert clipped != pytest.approx(below[0])
+
+
+class TestMicroCycleFirstStep:
+    """The shortened first step must not be judged as a micro-cycle."""
+
+    def test_short_first_step_is_sized_on_the_reference_interval(self):
+        """A one-minute step 0 is a full-period action seen late, not a micro-cycle.
+
+        Step 0 covers only the remainder of the current price period, so a
+        2 kW action there moves 0.03 kWh on paper and used to be suppressed for
+        falling under MIN_CYCLE_KWH — purely because the optimizer happened to
+        run just before a period boundary.
+        """
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[2.0, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 2 kW over the 0.25 h reference interval = 0.5 kWh > 0.2 kWh
+        assert mode[0] == ACTION_CHARGING
+        assert power[0] == pytest.approx(2.0)
+
+    def test_genuine_micro_cycle_is_still_removed(self):
+        """A block that is small on its own full interval is still suppressed."""
+        durations = [1 / 60.0] + [0.25] * 3
+        power, mode, _soc = _filter_micro_cycles(
+            power_schedule_kw=[0.2, 0.0, 0.0, 0.0],
+            mode_schedule=[ACTION_CHARGING, ACTION_IDLE, ACTION_IDLE, ACTION_IDLE],
+            initial_soc_kwh=4.0,
+            step_durations_hours=durations,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        # 0.2 kW over 0.25 h = 0.05 kWh < 0.2 kWh
+        assert mode[0] == ACTION_IDLE
+        assert power[0] == pytest.approx(0.0)
+
+
+class TestGridCapacityCap:
+    """The grid connection cap must bound the ACTION, not the price of the flow.
+
+    Clipping ``net_grid_w`` on the import side made every watt above the cap
+    free — the SoC kept rising while the cost stopped growing — so the DP
+    charged at full power whenever the cap was binding and planned imports of
+    nearly twice the configured limit.
+    """
+
+    @staticmethod
+    def _config(cap_kw: float) -> BatteryConfig:
+        return BatteryConfig(
+            capacity_kwh=20.0,
+            max_charge_power_kw=4.0,
+            max_discharge_power_kw=2.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            max_grid_power_kw=cap_kw,
+        )
+
+    def test_over_cap_import_is_still_priced(self):
+        """Charging past the cap must never be free."""
+        config = self._config(3.0)
+        common = {
+            "time_step_hours": 1.0,
+            "soc_wh": 5000.0,
+            "grid_price": 0.30,
+            "feed_in_price": 0.05,
+            "pv_production_w": 0.0,
+            "consumption_w": 2000.0,
+            "charge_curve": config.charge_efficiency_curve_parsed,
+            "discharge_curve": config.discharge_efficiency_curve_parsed,
+            "degradation_cost_per_kwh": 0.0,
+            "battery_config": config,
+        }
+        costs = [calculate_step_cost(action_w=a, **common) for a in (1000, 2000, 3000)]
+        # Each extra kW costs a full kWh at the grid price, cap or no cap.
+        assert costs[1] - costs[0] == pytest.approx(0.30)
+        assert costs[2] - costs[1] == pytest.approx(0.30)
+
+    def test_export_beyond_cap_earns_nothing(self):
+        """Curtailment is still modelled: unexportable PV has no revenue."""
+        config = self._config(3.0)
+        common = {
+            "time_step_hours": 1.0,
+            "soc_wh": 5000.0,
+            "action_w": 0.0,
+            "grid_price": 0.30,
+            "feed_in_price": 0.10,
+            "consumption_w": 0.0,
+            "charge_curve": config.charge_efficiency_curve_parsed,
+            "discharge_curve": config.discharge_efficiency_curve_parsed,
+            "degradation_cost_per_kwh": 0.0,
+            "battery_config": config,
+        }
+        at_cap = calculate_step_cost(pv_production_w=3000.0, **common)
+        past_cap = calculate_step_cost(pv_production_w=6000.0, **common)
+        assert at_cap == pytest.approx(-0.30)
+        assert past_cap == pytest.approx(at_cap)
+
+    def test_schedule_respects_the_connection_limit(self):
+        """The planned grid flow may not exceed the configured cap."""
+        prices = [0.10, 0.10, 0.10, 0.40, 0.40, 0.40]
+        consumption = [1.0] * 6
+        result = optimize_battery_schedule(
+            battery_config=self._config(3.0),
+            current_soc_kwh=8.0,
+            price_forecast=prices,
+            feed_in_forecast=[0.08] * 3 + [0.35] * 3,
+            pv_forecast=[0.0] * 6,
+            consumption_forecast=consumption,
+            step_durations_hours=[1.0] * 6,
+            degradation_cost_per_kwh=0.01,
+            min_price_spread=0.05,
+        )
+        grid_kw = [
+            consumption[t] + result.power_schedule_kw[t]
+            for t in range(len(result.power_schedule_kw))
+        ]
+        assert max(grid_kw) <= 3.0 + 1e-6, f"grid flow exceeds the cap: {grid_kw}"
+        # ... and the battery is still used: the cap limits it, not disables it.
+        assert max(result.power_schedule_kw) > 0.0
+
+    def test_uncapped_schedule_is_unaffected(self):
+        """0 = unlimited must leave the plan exactly as it was."""
+        kwargs = {
+            "current_soc_kwh": 8.0,
+            "price_forecast": [0.10, 0.10, 0.10, 0.40, 0.40, 0.40],
+            "feed_in_forecast": [0.08] * 3 + [0.35] * 3,
+            "pv_forecast": [0.0] * 6,
+            "consumption_forecast": [1.0] * 6,
+            "step_durations_hours": [1.0] * 6,
+            "degradation_cost_per_kwh": 0.01,
+            "min_price_spread": 0.05,
+        }
+        uncapped = optimize_battery_schedule(battery_config=self._config(0.0), **kwargs)
+        generous = optimize_battery_schedule(
+            battery_config=self._config(50.0), **kwargs
+        )
+        assert uncapped.power_schedule_kw == pytest.approx(generous.power_schedule_kw)
+
+
+class TestPassiveDcChargeRating:
+    """Passive DC MPPT charging shares the battery's charge-power budget."""
+
+    @staticmethod
+    def _config(max_charge_kw: float) -> BatteryConfig:
+        return BatteryConfig(
+            capacity_kwh=20.0,
+            max_charge_power_kw=max_charge_kw,
+            max_discharge_power_kw=2.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+            pv_dc_coupled=True,
+            pv_dc_efficiency=0.97,
+        )
+
+    def test_array_larger_than_the_inverter_is_clipped(self):
+        """A 4 kW array on a 2 kW battery may only charge it at 2 kW."""
+        result = optimize_battery_schedule(
+            battery_config=self._config(2.0),
+            current_soc_kwh=2.5,
+            price_forecast=[0.20, 0.20, 0.50, 0.50],
+            feed_in_forecast=[0.0] * 4,
+            pv_forecast=[0.0] * 4,
+            consumption_forecast=[0.5, 0.5, 1.5, 1.5],
+            step_durations_hours=[1.0] * 4,
+            degradation_cost_per_kwh=0.02,
+            min_price_spread=0.05,
+            pv_dc_forecast=[4.0, 4.0, 0.0, 0.0],
+        )
+        soc = result.soc_schedule_kwh
+        absorbed = [soc[t + 1] - soc[t] for t in range(2)]
+        assert max(absorbed) <= 2.0 + 1e-6, f"charged past the rating: {absorbed}"
+        # The array can supply 4 x 0.97 = 3.88 kW, so the rating is what binds.
+        assert max(absorbed) == pytest.approx(2.0, abs=0.01)
+
+    def test_ac_setpoint_and_passive_path_share_the_budget(self):
+        """An AC charge command may not buy extra headroom for the DC path."""
+        rating_kw, step_h = 2.0, 1.0
+        array_wh = 4000.0 * 0.97 * step_h  # 3880 Wh available from the panels
+        roomy = 10_000.0  # SoC headroom well above anything the budget allows
+
+        idle = passive_dc_charge_wh(
+            4000.0, 0.97, step_h, roomy, charge_budget_wh(rating_kw, step_h, 0.0)
+        )
+        # Idle: the rating binds, not the array.
+        assert idle == pytest.approx(2000.0)
+        assert idle < array_wh
+
+        # Charging 1 kW AC stores ~950 Wh, so only ~1050 Wh of budget is left.
+        ac_stored_wh = 1000.0 * step_h * 0.9487
+        with_ac = passive_dc_charge_wh(
+            4000.0,
+            0.97,
+            step_h,
+            roomy,
+            charge_budget_wh(rating_kw, step_h, ac_stored_wh),
+        )
+        assert with_ac == pytest.approx(2000.0 - ac_stored_wh)
+        # Total into the battery is still the rating — not the rating plus the
+        # AC setpoint, which is what the unbounded passive path used to give.
+        assert ac_stored_wh + with_ac == pytest.approx(2000.0)
+
+    def test_headroom_still_binds_when_it_is_the_tighter_limit(self):
+        """The budget is an extra bound, not a replacement for SoC headroom."""
+        absorbed = passive_dc_charge_wh(
+            4000.0, 0.97, 1.0, headroom_wh=300.0, budget_wh=2000.0
+        )
+        assert absorbed == pytest.approx(300.0)
+
+
+class TestOscillationFilterCostGuard:
+    """The oscillation filter must never make the schedule more expensive."""
+
+    def test_filtered_schedule_is_never_worse_than_the_dp_plan(self):
+        """Priced in real money, the returned plan beats or matches the raw one."""
+        import random
+
+        random.seed(3)
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=10.0,
+            max_soc_percent=90.0,
+        )
+        shape = [0.08, 0.07, 0.16, 0.24, 0.14, 0.10, 0.22, 0.34, 0.24, 0.12]
+        for trial in range(5):
+            prices = [
+                max(0.0, shape[i % len(shape)] * (0.7 + 0.6 * random.random()))
+                for i in range(48)
+            ]
+            result = optimize_battery_schedule(
+                battery_config=config,
+                current_soc_kwh=4.0,
+                price_forecast=prices,
+                feed_in_forecast=[p * 0.85 for p in prices],
+                pv_forecast=[0.0] * 48,
+                consumption_forecast=[0.4] * 48,
+                step_durations_hours=[0.25] * 48,
+                degradation_cost_per_kwh=0.026,
+                min_price_spread=0.05,
+            )
+            # raw_savings is the pre-filter plan priced identically to savings,
+            # so the filters may only ever be neutral or better on this axis
+            # once the micro-cycle allowance is granted.
+            assert result.raw_savings is not None
+            assert result.savings <= result.raw_savings + 1e-9, (
+                f"trial {trial}: filtering somehow gained value, check the pricing"
+            )

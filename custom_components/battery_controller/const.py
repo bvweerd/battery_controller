@@ -75,6 +75,18 @@ BATTERY_SUBENTRY_TYPE = "battery"
 # internal model remains the fallback for steps not covered by sensor data.
 CONF_PV_FORECAST_SENSORS = "pv_forecast_sensors"
 
+# Configuration keys - PV array (subentry): measured production.
+# A cumulative kWh counter for THIS array. Two consumers:
+#  - the gross-load reconstruction, which only ever needs the sum and is
+#    equally happy with the legacy CONF_PV_PRODUCTION_SENSORS list;
+#  - per-array forecast calibration, which needs the attribution the flat list
+#    cannot express.
+# Same convention as the battery energy counters: where one inverter reports a
+# single counter covering several arrays, set it on one of them and the
+# collector deduplicates, so totals stay correct while per-array use of the
+# figure is unavailable.
+CONF_PV_MEASURED_PRODUCTION_SENSOR = "pv_measured_production_sensor"
+
 # Configuration keys - DC-coupled PV (PV direct on battery inverter)
 # When PV is DC-coupled to the battery, PV power goes directly to the
 # battery without AC conversion. This is common with hybrid inverters
@@ -168,7 +180,24 @@ DEFAULT_PV_DC_EFFICIENCY = 0.97
 # Default values - Advanced settings
 DEFAULT_TIME_STEP_MINUTES = 15
 DEFAULT_OPTIMIZATION_INTERVAL_MINUTES = 15
-DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.04  # EUR per full charge+discharge cycle
+# EUR per full charge+discharge cycle, derived rather than guessed:
+#
+#   replacement cost      250 EUR/kWh   (installed LFP home battery)
+#   cycle life           6000 cycles    (at 80 % depth of discharge)
+#   usable capacity          8 kWh      (the 10 kWh default at 10-90 % SoC)
+#
+#   per kWh throughput = 250 / 6000 / (2 x 0.8) = 0.026 EUR/kWh
+#   per cycle          = 0.026 x 2 x 8          = 0.42 EUR/cycle
+#
+# The coordinator converts back with degradation / (2 x usable_kwh), so the
+# per-kWh figure the optimizer sees is independent of battery size; only the
+# per-cycle presentation scales with the default capacity.
+#
+# The previous default of 0.04 EUR/cycle worked out at 0.0025 EUR/kWh, an order
+# of magnitude below any plausible replacement cost, which left the DP with
+# almost no reason to avoid cycling. Users who set their own value keep it;
+# this only changes the starting point.
+DEFAULT_DEGRADATION_COST_PER_CYCLE = 0.42
 DEFAULT_MIN_PRICE_SPREAD = 0.05  # EUR/kWh minimum spread for arbitrage
 
 # Default values - Manual control
@@ -178,6 +207,30 @@ DEFAULT_MANUAL_POWER_SETPOINT_W = 0.0
 DEFAULT_ZERO_GRID_ENABLED = True
 DEFAULT_ZERO_GRID_DEADBAND_W = 50.0
 DEFAULT_ZERO_GRID_RESPONSE_TIME_S = 10.0
+
+# Loop gain of the zero-grid integrator: target -= gain x grid_error.
+#
+# Must be < 1. At exactly 1 the loop is only stable when the grid meter already
+# reflects the setpoint issued on the previous tick. With one tick of delay —
+# an inverter still ramping, or a meter polled on its own cycle — the error
+# obeys e[n+1] = e[n] - e[n-1], whose roots sit exactly on the unit circle: the
+# loop never converges and never diverges but oscillates forever with a period
+# of six ticks. Measured against a steady 2 kW load it swung between 0 and
+# -4 kW indefinitely, and with two ticks of delay between -5 kW and +4 kW. The
+# deadband cannot damp that; the swings are far larger than it.
+#
+# With gain g the same recurrence becomes e[n+1] = e[n] - g x e[n-2..n-1], which
+# is stable for any g < 1. Ticks to settle within 5 % of a step load:
+#
+#   gain   no delay   1 tick   2 ticks
+#   1.0           0    never     never
+#   0.7           2       16     never
+#   0.5           4        8        48
+#   0.4           5        6        23
+#
+# 0.5 keeps the common cases fast (4 ticks = 40 s at the default 10 s interval)
+# while staying stable in the pathological one.
+ZERO_GRID_LOOP_GAIN = 0.5
 
 # Default values - Fixed prices
 DEFAULT_FIXED_FEED_IN_PRICE = 0.04  # EUR/kWh (post-salderingsregeling NL, 2025+)
@@ -213,6 +266,13 @@ POWER_STEP_W = 100  # Minimum practical power action granularity in W
 # typical home batteries keep the exact 10 Wh resolution and are bit-for-bit
 # unaffected. At the cap the resolution is 0.1% of usable capacity (e.g.
 # 45 Wh on a 45 kWh range), far below SoC sensor accuracy (~1%).
+#
+# This is the number of state INTERVALS, so the grid ends up with one more
+# state than this (1001): both endpoints are included, and the top state has to
+# be exactly max_soc for the fill-to-max boundary action to be credited to a
+# state that represents it. One state either way is immaterial to the solve
+# time; the name is kept as-is because changing it would shift every large
+# battery's SoC grid for no benefit.
 MAX_SOC_STATES = 1000
 
 # DC-to-AC conversion efficiency (excess DC PV through inverter to AC bus)
@@ -227,9 +287,12 @@ CONF_MAX_GRID_POWER_KW = "max_grid_power_kw"
 DEFAULT_MAX_GRID_POWER_KW = 0.0  # kW, 0 = no cap
 
 # Algorithm thresholds
-MIN_PV_SURPLUS_KW = (
-    0.05  # kW (50 W) — minimum surplus to apply PV opportunity-cost pricing
-)
+# kW (50 W) — minimum surplus to apply PV opportunity-cost pricing.
+# Not read by the integration: the DP prices PV surplus through the feed-in
+# forecast directly. It is the authoritative copy of the value the diagnostic
+# analyzer applies in docs/analyzer/index.html, kept here so the two do not
+# drift apart silently.
+MIN_PV_SURPLUS_KW = 0.05
 POWER_IDLE_THRESHOLD_KW = (
     0.001  # kW (1 W) — power below this is treated as idle in the schedule
 )
@@ -252,9 +315,46 @@ WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this 
 # a single one poisons its (hour, weekday) bucket and wrecks the DP cost.
 MAX_PLAUSIBLE_CONSUMPTION_KW = 50.0
 
-SOC_UNCERTAINTY_RESERVE_FRACTION = (
-    0.10  # max fraction of capacity reserved for solar forecast uncertainty
-)
+# Per-array PV forecast calibration.
+# The correction is a gain factor: it captures a systematically wrong tilt or
+# orientation entry, soiling, or a string that is down. It cannot capture
+# shading, which is a function of sun position rather than a constant factor —
+# see docs/algorithm.md.
+# Samples are only taken in a middle band of the array's rating: below the
+# floor the signal is smaller than the noise, above the ceiling inverter
+# clipping dominates and is not a forecast error.
+#
+# The ceiling is a proxy for where an inverter starts clipping, so it has to sit
+# above what an array genuinely reaches. A well-oriented array peaks near 0.85
+# of its rating on a clear summer day, so the old 0.80 ceiling excluded exactly
+# the steps with the best signal-to-noise ratio: a south array learned nothing
+# at midday and everything from its oblique, diffuse-dominated hours — where the
+# transposition model is weakest — and that error then became the gain applied
+# all day. Typical DC/AC ratios of 1.1-1.2 put real clipping at 0.83-0.91, so
+# 0.90 keeps clipped steps out while letting the informative ones in.
+PV_CALIBRATION_MIN_LOAD_FRACTION = 0.10
+PV_CALIBRATION_MAX_LOAD_FRACTION = 0.90
+# Energy-weighted over this many samples (a few days of daylight at 15 min),
+# so cloudy low-signal steps cannot dominate the estimate.
+PV_CALIBRATION_WINDOW = 200
+# A single step this far off the forecast is weather, a sensor glitch or a
+# window that did not line up — not a gain error.
+PV_CALIBRATION_MAX_SAMPLE_RATIO = 5.0
+# Bounds on the factor actually applied to a forecast.
+PV_CALIBRATION_APPLY_MIN = 0.5
+PV_CALIBRATION_APPLY_MAX = 1.5
+# A correction this close to nominal is within measurement noise: the forecast
+# is left alone and the array is reported as uncorrected. One constant for both
+# so what the sensor claims and what the forecast does cannot drift apart.
+PV_CALIBRATION_APPLY_EPSILON = 0.005
+# Minimum samples before the correction is used at all.
+#
+# What separates a gain error from the weather is sample count: an array that
+# only ever samples in one part of the day picks up the radiation forecast's
+# bias for those hours, and at 20 samples (5 hours of production, one afternoon)
+# that bias *is* the correction. 60 in-band quarter-hours span several days, so
+# cloud timing averages out and what is left is the systematic part.
+PV_CALIBRATION_MIN_SAMPLES = 60
 
 # Real-time control thresholds
 BATTERY_MODE_THRESHOLD_W = 50.0  # W — battery power above/below this sets mode
