@@ -295,6 +295,31 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # flip the mode every optimization run.
         self._last_surplus_capture_decision: str = "zero_grid"
 
+        # Hysteresis state for the grid-charge economics test: tracks whether
+        # buying the planned charge from the grid was last found worthwhile
+        # ("charging") or not ("zero_grid"), so a shadow price hovering near the
+        # buy price doesn't flip the mode every tick.
+        self._last_grid_charge_decision: str = ACTION_CHARGING
+
+        # Whether the hybrid charge arbitration vetoed grid charging (the DP
+        # planned a charge whose price the shadow price does not justify — a
+        # planned PV charge the sun did not deliver). Lets the commitment filter
+        # release an active charge instead of suppressing the veto until the end
+        # of the price period.
+        self._grid_charge_vetoed: bool = False
+
+        # Charge setpoint the last run would apply when following the schedule,
+        # in W. The realtime loop re-runs the charge arbitration on live sensor
+        # values and needs the run's committed power to return to, not the raw
+        # plan (which ignores the commitment filter).
+        self._scheduled_charge_w: float = 0.0
+
+        # Inputs of the last run's charge arbitration, so the realtime loop can
+        # repeat it between runs without re-running the DP.
+        self._last_feed_in_price: float = 0.0
+        self._last_grid_price: float = 0.0
+        self._last_degradation_cost_per_kwh: float = 0.0
+
         # Whether the last optimizer run found PV-surplus capture uneconomical
         # (exporting at the current feed-in price is worth more than storing).
         # Gates the realtime idle→zero_grid upgrade in _resolve_controller_mode
@@ -937,9 +962,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # and publishing jittery setpoints.
             rt_effective_mode = self._effective_mode
             controller_schedule_w = self._controller_schedule_w
+            if (
+                self._control_mode in (MODE_HYBRID, MODE_HYBRID_PLUS)
+                and self._last_result.optimal_mode == ACTION_CHARGING
+            ):
+                # A planned charge is the one decision that cannot wait for the
+                # next run: it is taken on forecast PV, and when that PV does
+                # not arrive the schedule imports from the grid until the price
+                # period ends (issue #174). The arbitration itself is a handful
+                # of comparisons on the cached plan — no DP — so it is repeated
+                # here on live sensor values. Everything else stays cached.
+                rt_effective_mode, rt_power_kw = self._resolve_charge_mode(
+                    self._last_result,
+                    self._net_surplus_w(current_grid_w, battery_state.power_kw * 1000),
+                    self._last_feed_in_price,
+                    self._last_grid_price,
+                    self._last_degradation_cost_per_kwh,
+                    self._hybrid_deadband_w(),
+                )
+                controller_schedule_w = (
+                    # Return to the run's committed power, not the raw plan:
+                    # the commitment filter may have capped it.
+                    self._scheduled_charge_w
+                    if rt_effective_mode == ACTION_CHARGING
+                    else rt_power_kw * 1000
+                )
 
         controller_mode = self._resolve_controller_mode(
-            rt_effective_mode, current_grid_w
+            rt_effective_mode, current_grid_w, battery_state.power_kw * 1000
         )
 
         # A stale grid reading is only relevant to grid-driven control. For
@@ -1175,6 +1225,78 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         return should_capture
 
+    @staticmethod
+    def _net_surplus_w(current_grid_w: float, battery_power_w: float) -> float:
+        """PV surplus of the house in W, independent of what the battery does.
+
+        The grid meter reads ``load + battery - pv``, so the surplus the house
+        actually has is ``pv - load = battery - grid``. Measuring it that way
+        matters for every hybrid decision: the raw meter reading includes the
+        battery's own action, so a charge started from the DP schedule drives
+        the meter positive and makes the surplus look gone — the arbitration
+        that should downgrade that charge to zero_grid then never runs again
+        (it latches), and a zero_grid capture holding the meter at ~0 W keeps
+        reading as "surplus" long after the sun stopped delivering one.
+
+        Positive = PV exceeds consumption (exportable), negative = the house is
+        short and needs grid or battery power.
+
+        Args:
+            current_grid_w: Grid power in W (positive = import).
+            battery_power_w: Battery power in W (positive = charge).
+        """
+        return battery_power_w - current_grid_w
+
+    def _should_charge_from_grid(
+        self,
+        shadow_price_eur_kwh: float,
+        current_price: float,
+        charge_kw: float,
+        degradation_cost_per_kwh: float,
+    ) -> bool:
+        """Return whether buying the planned charge from the grid is worth it.
+
+        The mirror image of _should_capture_surplus, against the buy price
+        instead of the feed-in price. Importing 1 kWh of AC stores
+        ``charge_eff`` kWh, so a stored kWh costs ``price / charge_eff`` plus
+        the degradation of putting it through the battery. It is worth buying
+        while the DP shadow price λ — the marginal value of a stored kWh given
+        the whole price and PV forecast — covers that.
+
+        This is what separates the two reasons the DP plans a charge. Planned
+        grid arbitrage (a cheap hour) keeps λ above the cost of buying, so the
+        schedule is followed and the import is deliberate. A charge planned
+        against forecast PV that failed to show up does not: λ then reflects
+        that the battery can be filled from the sun later, well below what the
+        grid charges now, and importing to keep the plan on paper is a real
+        loss (issue #174).
+
+        Applies the same ±5% hysteresis band as the other hybrid thresholds so
+        a shadow price hovering near the buy price doesn't flip the decision.
+
+        Args:
+            shadow_price_eur_kwh: DP shadow price λ (value per stored kWh).
+            current_price: Grid buy price for the step being executed.
+            charge_kw: Planned charge power, used to price the charge at its
+                curve efficiency instead of a nominal scalar.
+            degradation_cost_per_kwh: Battery wear per kWh stored.
+        """
+        charge_eff = self._charge_efficiency_at(charge_kw)
+        cost_per_stored_kwh = (
+            current_price / charge_eff if charge_eff > 0 else current_price
+        ) + degradation_cost_per_kwh
+        if cost_per_stored_kwh <= 0:
+            # Free or paid-for import (negative prices): always worth it, and
+            # the ±5% band is meaningless on a negative threshold.
+            self._last_grid_charge_decision = ACTION_CHARGING
+            return True
+        if self._last_grid_charge_decision == ACTION_CHARGING:
+            worthwhile = bool(shadow_price_eur_kwh >= cost_per_stored_kwh * 0.95)
+        else:
+            worthwhile = bool(shadow_price_eur_kwh >= cost_per_stored_kwh * 1.05)
+        self._last_grid_charge_decision = ACTION_CHARGING if worthwhile else "zero_grid"
+        return worthwhile
+
     def _hybrid_deadband_w(self) -> float:
         """Return the hysteresis band for the hybrid mode transitions, in W.
 
@@ -1188,22 +1310,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
     def _resolve_controller_mode(
-        self, effective_mode: str, current_grid_w: float
+        self,
+        effective_mode: str,
+        current_grid_w: float,
+        battery_power_w: float = 0.0,
     ) -> str:
         """Map effective mode to zero_grid_controller mode.
 
         For idle mode with PV surplus, upgrades to zero_grid when real-time
-        power sensors are available. The decision is damped with a band of
-        ±zero_grid_deadband_w (the user-tunable number entity, default 50 W)
-        around the 0 W crossing, remembered across calls: enter zero_grid only
-        once the grid exports more than the band, then stay there until it
-        climbs solidly positive.
+        power sensors are available. The surplus is measured as
+        ``battery - grid`` (see _net_surplus_w), so it stays valid once the
+        upgrade takes effect: a zero_grid capture holds the meter near 0 W,
+        which on the raw reading is indistinguishable from "no surplus left".
+        The decision is damped with a band of ±zero_grid_deadband_w (the
+        user-tunable number entity, default 50 W) around the 0 W crossing,
+        remembered across calls: enter zero_grid only once the surplus exceeds
+        the band, then stay there until it goes solidly negative.
 
-        Without that band the battery absorbing PV drives the grid to ~0 W,
-        which reads as "no surplus", which stops the charge, which sends the
-        grid negative again — an oscillation at tick rate. The setpoint
-        deadband does not damp it, because the swing between the zero_grid
-        setpoint and idle's 0 W is far larger than the deadband.
+        Without that band sensor noise around the crossing would flip the mode
+        at tick rate; the setpoint deadband does not damp that, because the
+        swing between the zero_grid setpoint and idle's 0 W is far larger than
+        the deadband.
 
         The upgrade is suppressed while the last optimizer run found surplus
         capture uneconomical (exporting is worth more than storing per the
@@ -1213,6 +1340,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Args:
             effective_mode: The resolved mode from optimization logic.
             current_grid_w: Current grid power in W (positive = import).
+            battery_power_w: Current battery power in W (positive = charge).
 
         Returns:
             Controller mode string for ZeroGridController.
@@ -1238,14 +1366,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 self._last_idle_upgrade_decision = ACTION_IDLE
                 return ACTION_IDLE
             band = self._hybrid_deadband_w()
+            surplus_w = self._net_surplus_w(current_grid_w, battery_power_w)
             if self._last_idle_upgrade_decision == "zero_grid":
-                # Was capturing surplus; keep doing so until the grid climbs
-                # solidly positive (the surplus has genuinely disappeared).
-                has_pv_surplus = current_grid_w < band
+                # Was capturing surplus; keep doing so until it has genuinely
+                # disappeared (the house draws more than the PV delivers).
+                has_pv_surplus = surplus_w > -band
             else:
                 # Was idle; only start capturing once the surplus is solid, so
-                # near-zero import noise does not trigger it.
-                has_pv_surplus = current_grid_w < -band
+                # near-zero sensor noise does not trigger it.
+                has_pv_surplus = surplus_w > band
             self._last_idle_upgrade_decision = (
                 "zero_grid" if has_pv_surplus else ACTION_IDLE
             )
@@ -2126,6 +2255,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         current_grid: float,
         resampled_feed_in: list[float] | None,
         hybrid_deadband_w: float,
+        battery_power_w: float = 0.0,
+        current_price: float = 0.0,
+        degradation_cost_per_kwh: float = 0.0,
     ) -> tuple[str, float]:
         """Turn the DP schedule into what the controller should actually do.
 
@@ -2134,9 +2266,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         per step. Every branch is damped with hysteresis so a value hovering at
         a threshold does not flip the mode on every run.
 
+        All hybrid branches judge the PV surplus as ``battery - grid``
+        (_net_surplus_w) rather than as the raw meter reading, so the battery's
+        own action does not mask the surplus it is running on.
+
         Returns:
             (effective_mode, effective_power_kw)
         """
+        # Only the hybrid charge branch below can raise the veto; clearing it
+        # here keeps it from outliving the run that decided it.
+        self._grid_charge_vetoed = False
         if self._control_mode == MODE_ZERO_GRID:
             if self._pv_curtailed:
                 # PV is unavailable: follow the DP schedule so the battery charges
@@ -2159,6 +2298,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # Default to allowing capture; the idle and discharge branches
             # overrule it so a block never outlives the run that decided it.
             self._surplus_capture_blocked = False
+            # The surplus every branch below reasons about: what the house has
+            # spare regardless of what the battery is doing with it.
+            surplus_w = self._net_surplus_w(current_grid, battery_power_w)
             if result.optimal_mode == ACTION_IDLE:
                 # Optimizer wants to preserve battery capacity.
                 # This means: don't charge (even with PV surplus) and don't discharge.
@@ -2173,16 +2315,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     m == ACTION_DISCHARGING for m in result.mode_schedule[1:]
                 )
                 # Hysteresis: use a ±hybrid_deadband_w band (the user-tunable
-                # zero-grid deadband) around the 0 W crossing so grid power
+                # zero-grid deadband) around the 0 W crossing so a surplus
                 # hovering near zero (e.g. consumption ≈ PV production) doesn't
                 # flip idle/zero_grid every realtime tick.
                 if self._last_hybrid_idle_decision == "zero_grid":
-                    # Was capturing surplus; keep doing so until grid climbs
-                    # solidly positive (surplus has genuinely disappeared).
-                    has_pv_surplus = current_grid < hybrid_deadband_w
+                    # Was capturing surplus; keep doing so until it has
+                    # genuinely disappeared.
+                    has_pv_surplus = surplus_w > -hybrid_deadband_w
                 else:
                     # Was idle; only start capturing once surplus is solid.
-                    has_pv_surplus = current_grid < -hybrid_deadband_w
+                    has_pv_surplus = surplus_w > hybrid_deadband_w
                 # Hybrid+: check the forecast before capturing surplus. The
                 # shadow price λ already prices in upcoming cheap-surplus hours
                 # (e.g. the midday PV peak at low prices): when λ × sqrt(RTE)
@@ -2194,7 +2336,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     capture_blocked = not self._should_capture_surplus(
                         result.shadow_price_eur_kwh,
                         current_feed_in,
-                        max(0.0, -current_grid) / 1000.0,
+                        max(0.0, surplus_w) / 1000.0,
                     )
                 self._surplus_capture_blocked = capture_blocked
                 if has_upcoming_discharge and not has_pv_surplus:
@@ -2252,52 +2394,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     capture = self._should_capture_surplus(
                         result.shadow_price_eur_kwh,
                         current_feed_in,
-                        max(0.0, -current_grid) / 1000.0,
+                        max(0.0, surplus_w) / 1000.0,
                     )
                     effective_mode = "zero_grid" if capture else ACTION_IDLE
                     effective_power = 0.0
                     self._last_hybrid_decision = effective_mode
                     self._surplus_capture_blocked = not capture
-            elif result.optimal_mode == ACTION_CHARGING and current_grid < 0:
-                current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                if current_feed_in < 0:
-                    # Negative feed-in: exporting costs money. Use follow_schedule
-                    # so curtailing PV (grid → ~0) doesn't cause a zero_grid
-                    # deadlock that stops charging.
-                    effective_mode = result.optimal_mode
-                    effective_power = result.optimal_power_kw
-                    self._last_hybrid_charge_decision = ACTION_CHARGING
-                else:
-                    # Hysteresis: apply a ±5% band around the coverage threshold
-                    # (same pattern as the discharge decision above) so PV surplus
-                    # hovering near _SURPLUS_COVERS_PLAN_FRACTION of the planned
-                    # charge power doesn't flip zero_grid/charging every tick.
-                    # • Was zero_grid → stay unless surplus drops below 95% of threshold
-                    # • Was charging → switch only once surplus reaches 105% of threshold
-                    if self._last_hybrid_charge_decision == "zero_grid":
-                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
-                    else:
-                        coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
-                    if (
-                        -current_grid
-                        >= result.optimal_power_kw * 1000 * coverage_threshold
-                    ):
-                        # PV surplus covers (most of) the planned charge: use
-                        # zero_grid to dynamically match the actual surplus instead
-                        # of fixed-rate charging. Fixed charging may import from
-                        # grid when clouds pass.
-                        effective_mode = "zero_grid"
-                        effective_power = 0.0
-                        self._last_hybrid_charge_decision = "zero_grid"
-                    else:
-                        # The DP planned substantially more charging than the
-                        # current export surplus — it wants grid charging (e.g. a
-                        # cheap price hour that happens to coincide with a small PV
-                        # surplus). Zero_grid would only charge the surplus and
-                        # forfeit the planned arbitrage, so follow the schedule.
-                        effective_mode = result.optimal_mode
-                        effective_power = result.optimal_power_kw
-                        self._last_hybrid_charge_decision = ACTION_CHARGING
+            elif result.optimal_mode == ACTION_CHARGING:
+                effective_mode, effective_power = self._resolve_charge_mode(
+                    result,
+                    surplus_w,
+                    self._current_feed_in_price(resampled_feed_in),
+                    current_price,
+                    degradation_cost_per_kwh,
+                    hybrid_deadband_w,
+                )
             else:
                 effective_mode = result.optimal_mode
                 effective_power = result.optimal_power_kw
@@ -2307,6 +2418,110 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_power = result.optimal_power_kw
 
         return effective_mode, effective_power
+
+    def _resolve_charge_mode(
+        self,
+        result: OptimizationResult,
+        surplus_w: float,
+        current_feed_in: float,
+        current_price: float,
+        degradation_cost_per_kwh: float,
+        deadband_w: float,
+    ) -> tuple[str, float]:
+        """Arbitrate a planned charge between the DP schedule and the surplus.
+
+        Runs whichever way the grid meter points. The earlier version only ran
+        while the grid was exporting, which left the one case that needs it
+        uncovered: a charge planned against forecast PV that failed to arrive
+        imports from the grid, which makes the meter positive, which skipped
+        this arbitration entirely and followed the plan to the end of the price
+        period (issue #174).
+
+        In order:
+        1. Negative feed-in — exporting costs money, so follow the schedule;
+           curtailing PV would otherwise deadlock zero_grid at ~0 W.
+        2. The surplus covers (most of) the plan — zero_grid tracks the real
+           surplus instead of a fixed setpoint that imports whenever a cloud
+           passes.
+        3. Buying the rest is worth it per the shadow price — follow the
+           schedule; this is the planned grid arbitrage the DP asked for.
+        4. Otherwise the import is not justified: capture whatever surplus
+           there is (zero_grid), or hold at idle when there is none.
+
+        Both coverage and surplus tests carry the usual hysteresis so a value
+        hovering at a threshold doesn't flip the mode every tick.
+
+        Args:
+            result: The optimization result being executed.
+            surplus_w: House PV surplus in W (see _net_surplus_w).
+            current_feed_in: Feed-in price for the step being executed.
+            current_price: Grid buy price for the step being executed.
+            degradation_cost_per_kwh: Battery wear per kWh stored.
+            deadband_w: Hysteresis band in W (the zero-grid deadband).
+
+        Returns:
+            (effective_mode, effective_power_kw)
+        """
+        if current_feed_in < 0 and surplus_w > 0:
+            # Negative feed-in: exporting costs money. Use follow_schedule
+            # so curtailing PV (grid → ~0) doesn't cause a zero_grid
+            # deadlock that stops charging.
+            self._last_hybrid_charge_decision = ACTION_CHARGING
+            return ACTION_CHARGING, result.optimal_power_kw
+
+        # Hysteresis: apply a ±5% band around the coverage threshold (same
+        # pattern as the discharge decision) so PV surplus hovering near
+        # _SURPLUS_COVERS_PLAN_FRACTION of the planned charge power doesn't
+        # flip zero_grid/charging every tick.
+        # • Was zero_grid → stay unless surplus drops below 95% of threshold
+        # • Was charging → switch only once surplus reaches 105% of threshold
+        if self._last_hybrid_charge_decision == "zero_grid":
+            coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
+        else:
+            coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
+        if surplus_w >= result.optimal_power_kw * 1000 * coverage_threshold:
+            # PV surplus covers (most of) the planned charge: use zero_grid to
+            # dynamically match the actual surplus instead of fixed-rate
+            # charging. Fixed charging may import from grid when clouds pass.
+            self._last_hybrid_charge_decision = "zero_grid"
+            return "zero_grid", 0.0
+
+        if self._should_charge_from_grid(
+            result.shadow_price_eur_kwh,
+            current_price,
+            result.optimal_power_kw,
+            degradation_cost_per_kwh,
+        ):
+            # The DP planned substantially more charging than the current
+            # surplus and the shadow price justifies buying the difference —
+            # e.g. a cheap price hour that happens to coincide with a small PV
+            # surplus. Zero_grid would forfeit that arbitrage, so follow the
+            # schedule.
+            self._last_hybrid_charge_decision = ACTION_CHARGING
+            return ACTION_CHARGING, result.optimal_power_kw
+
+        # The plan counted on PV that is not there, and grid power is worth
+        # less stored than it costs to buy. Never import for it: charge on
+        # whatever surplus exists, and hold when there is none. The DP charges
+        # later, when the sun (or a cheaper hour) delivers.
+        self._grid_charge_vetoed = True
+        if self._last_hybrid_charge_decision == "zero_grid":
+            surplus_present = surplus_w > -deadband_w
+        else:
+            surplus_present = surplus_w > deadband_w
+        _LOGGER.debug(
+            "Hybrid charge veto: plan %.0f W, surplus %.0f W, price %.3f, "
+            "shadow price %.3f -> %s",
+            result.optimal_power_kw * 1000,
+            surplus_w,
+            current_price,
+            result.shadow_price_eur_kwh,
+            "zero_grid" if surplus_present else ACTION_IDLE,
+        )
+        self._last_hybrid_charge_decision = (
+            "zero_grid" if surplus_present else ACTION_IDLE
+        )
+        return ("zero_grid", 0.0) if surplus_present else (ACTION_IDLE, 0.0)
 
     def _apply_commitment_filter(
         self,
@@ -2365,6 +2580,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 and not price_jumped
                 and not soc_at_limit
                 and not direction_flip
+                # A vetoed grid charge is not the 15-min re-planning jitter the
+                # commitment exists to damp — it is a measurement saying the
+                # plan's PV never arrived. Holding it would import for the rest
+                # of the price period.
+                and not self._grid_charge_vetoed
             ):
                 if effective_mode == self._committed_action:
                     # Same direction within the same price period: lock power so
@@ -2871,8 +3091,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             price_start_times[0] if price_start_times else None
         )
 
+        current_price = resampled_prices[0] if resampled_prices else 0.0
         effective_mode, effective_power = self._resolve_effective_mode(
-            result, current_grid, resampled_feed_in, hybrid_deadband_w
+            result,
+            current_grid,
+            resampled_feed_in,
+            hybrid_deadband_w,
+            battery_state.power_kw * 1000,
+            current_price,
+            degradation_cost_per_kwh,
         )
         (
             effective_mode,
@@ -2884,7 +3111,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_power,
             battery_state=battery_state,
             battery_config=battery_config,
-            current_price=resampled_prices[0] if resampled_prices else 0.0,
+            current_price=current_price,
             current_step_start=current_step_start,
             degradation_cost_per_kwh=degradation_cost_per_kwh,
             min_spread=min_spread,
@@ -2898,9 +3125,26 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._effective_mode = effective_mode
         self._effective_power = effective_power
         self._controller_schedule_w = controller_schedule_w
+        # Inputs the realtime loop needs to repeat the charge arbitration
+        # between runs. _scheduled_charge_w is the setpoint to return to when
+        # the surplus recovers: the committed power when this run followed the
+        # schedule, the raw plan when it downgraded to zero_grid or idle.
+        self._last_feed_in_price = self._current_feed_in_price(resampled_feed_in)
+        self._last_grid_price = current_price
+        self._last_degradation_cost_per_kwh = degradation_cost_per_kwh
+        if result.optimal_mode == ACTION_CHARGING:
+            self._scheduled_charge_w = (
+                controller_schedule_w
+                if effective_mode == ACTION_CHARGING
+                else result.optimal_power_kw * 1000
+            )
+        else:
+            self._scheduled_charge_w = 0.0
 
         # Calculate zero-grid control action using the resolved effective mode
-        controller_mode = self._resolve_controller_mode(effective_mode, current_grid)
+        controller_mode = self._resolve_controller_mode(
+            effective_mode, current_grid, battery_state.power_kw * 1000
+        )
 
         control_action = self.zero_grid_controller.get_control_action(
             current_grid_w=current_grid,
@@ -2957,6 +3201,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else None,
                 "shadow_price_eur_kwh": round(result.shadow_price_eur_kwh, 4),
                 "grid_kw": round(current_grid / 1000, 3),
+                # Surplus the hybrid branches judged, measured independently of
+                # the battery's own action (see _net_surplus_w).
+                "surplus_kw": round(
+                    self._net_surplus_w(current_grid, battery_state.power_kw * 1000)
+                    / 1000,
+                    3,
+                ),
+                "grid_charge_vetoed": self._grid_charge_vetoed,
                 "commitment_locked": commitment_locked,
                 "commitment_reason": commitment_reason,
                 "charge_eff_correction": round(self.charge_eff_correction, 4),

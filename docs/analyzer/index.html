@@ -237,6 +237,7 @@
             <th class="border border-gray-200 px-2 py-1">Price</th>
             <th class="border border-gray-200 px-2 py-1">Shadow λ</th>
             <th class="border border-gray-200 px-2 py-1">Grid kW</th>
+            <th class="border border-gray-200 px-2 py-1" title="PV surplus of the house (battery &minus; grid), independent of what the battery is doing with it. This is what the hybrid branches judge, not the raw meter reading.">Surplus kW</th>
             <th class="border border-gray-200 px-2 py-1">Commit</th>
           </tr>
         </thead>
@@ -1061,6 +1062,13 @@ function renderDiagnostics(raw) {
       const price = entry.current_price != null ? `€ ${entry.current_price.toFixed(4)}` : '—';
       const shadow = entry.shadow_price_eur_kwh != null ? `€ ${entry.shadow_price_eur_kwh.toFixed(4)}` : '—';
       const grid = entry.grid_kw != null ? `${entry.grid_kw.toFixed(2)}` : '—';
+      const surplus = entry.surplus_kw != null ? `${entry.surplus_kw.toFixed(2)}` : '—';
+      // A vetoed grid charge is a deliberate override: the DP planned a charge
+      // whose import the shadow price does not justify (planned PV that did not
+      // arrive), so the surplus is what the battery may charge on.
+      const surplusCell = entry.grid_charge_vetoed
+        ? `<span class="badge badge-idle" title="Grid charging vetoed: shadow price below the cost of buying">${surplus}</span>`
+        : surplus;
       const locked = entry.commitment_locked
         ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`
         : '<span class="text-gray-300">—</span>';
@@ -1097,6 +1105,7 @@ function renderDiagnostics(raw) {
         <td class="border border-gray-200 px-2 py-1 text-right">${price}</td>
         <td class="border border-gray-200 px-2 py-1 text-right">${shadow}</td>
         <td class="border border-gray-200 px-2 py-1 text-right">${grid}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${surplusCell}</td>
         <td class="border border-gray-200 px-2 py-1 text-center">${locked}</td>`;
       runTbody.appendChild(tr);
     });

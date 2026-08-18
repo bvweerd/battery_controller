@@ -49,6 +49,7 @@ from custom_components.battery_controller.const import (
 )
 from custom_components.battery_controller.coordinator_optimization import (
     OptimizationCoordinator,
+    _mode_from_power_kw,
 )
 from custom_components.battery_controller.helpers import (
     extract_price_forecast_with_timestamps,
@@ -969,6 +970,30 @@ def test_resolve_controller_mode_idle_upgrade_hysteresis(hass):
 
     # And re-entry needs a solid surplus again, not just a dip below zero.
     assert coord._resolve_controller_mode("idle", -band / 2) == "idle"
+
+
+def test_resolve_controller_mode_idle_upgrade_reads_surplus_through_battery(hass):
+    """The upgrade decision must survive the battery hiding the surplus.
+
+    While capturing, the zero-grid loop holds the meter at ~0 W, so the raw
+    reading cannot tell "still 2 kW of sun" from "sun gone, house balanced".
+    Measured as battery - grid it can: the capture continues while the surplus
+    is real, and stops once the house is genuinely short.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    coord._power_consumption_sensors = ["sensor.c"]
+    band = coord._hybrid_deadband_w()
+
+    # Enter on a solid surplus, battery still idle.
+    assert coord._resolve_controller_mode("idle", -band * 4, 0.0) == "zero_grid"
+
+    # Capturing 2 kW of surplus: the meter sits at ~0 W but the surplus is real.
+    assert coord._resolve_controller_mode("idle", 0.0, 2000.0) == "zero_grid"
+
+    # The sun drops and the loop discharges to cover the house instead. That is
+    # not a surplus, so the capture must stop.
+    assert coord._resolve_controller_mode("idle", 0.0, -800.0) == "idle"
 
 
 def test_resolve_controller_mode_idle_upgrade_resets_when_blocked(hass):
@@ -2229,6 +2254,106 @@ async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
     assert captured.get("dp_schedule_w") == pytest.approx(0.0)
 
 
+async def _run_hybrid_realtime_charge_tick(
+    hass,
+    monkeypatch,
+    grid_w: float,
+    battery_power_kw: float,
+    shadow_price: float,
+) -> dict:
+    """One realtime tick on a cached 3 kW charge plan, in hybrid mode.
+
+    Returns the kwargs the zero-grid controller was called with, so the test
+    can see which mode and setpoint the tick resolved to without a DP run.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    # What the last 15-min run left behind: follow the schedule at 1.2 kW.
+    coord._effective_mode = "charging"
+    coord._controller_schedule_w = 1200.0
+    coord._scheduled_charge_w = 1200.0
+    coord._last_feed_in_price = 0.07
+    coord._last_grid_price = 0.10
+    coord._last_degradation_cost_per_kwh = 0.01
+    coord.data = {
+        "control_action": {
+            "target_power_kw": 1.2,
+            "action_mode": "charging",
+            "raw_target_w": 1200.0,
+            "dp_schedule_w": 1200.0,
+            "mode": "follow_schedule",
+        },
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=battery_power_kw, mode="charging"
+        ),
+        "per_battery_states": {},
+    }
+    coord._last_result = MagicMock()
+    coord._last_result.optimal_mode = "charging"
+    coord._last_result.optimal_power_kw = 1.2
+    coord._last_result.shadow_price_eur_kwh = shadow_price
+
+    captured: dict = {}
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        side_effect=lambda **kw: (
+            captured.update(kw)
+            or {
+                "target_power_kw": 0.0,
+                "target_power_w": 0.0,
+                "action_mode": kw["mode"],
+                "raw_target_w": 0.0,
+                "dp_schedule_w": kw["dp_schedule_w"],
+                "mode": kw["mode"],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0,
+            soc_percent=50.0,
+            power_kw=battery_power_kw,
+            mode=_mode_from_power_kw(battery_power_kw),
+        ),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: None)
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_stops_uneconomical_charge_import(hass, monkeypatch):
+    """A charge importing on failed PV is released between runs, not after 15 min.
+
+    The cached plan charges 1.2 kW; the meter says 0.5 kW is coming from the
+    grid and the shadow price does not justify buying it. The tick must drop
+    the setpoint rather than hold it until the next optimizer run.
+    """
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass, monkeypatch, grid_w=500.0, battery_power_kw=1.2, shadow_price=0.06
+    )
+    assert captured["mode"] == "zero_grid"
+    assert captured["dp_schedule_w"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_keeps_charge_when_grid_charging_pays(hass, monkeypatch):
+    """Planned grid arbitrage survives the realtime re-check at its committed power."""
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass, monkeypatch, grid_w=500.0, battery_power_kw=1.2, shadow_price=0.30
+    )
+    assert captured["mode"] == "follow_schedule"
+    assert captured["dp_schedule_w"] == pytest.approx(1200.0)
+
+
 @pytest.mark.asyncio
 async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
     """_handle_realtime_update reads live manual setpoint in MODE_MANUAL."""
@@ -3299,11 +3424,23 @@ async def test_feed_in_forecast_not_overlapping_horizon_uses_fixed_price(
 # ---------------------------------------------------------------------------
 
 
-async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
-    """Run one hybrid optimization with a 3 kW planned charge and given grid power."""
+async def _run_hybrid_charge_case(
+    hass,
+    monkeypatch,
+    grid_w: float,
+    shadow_price: float = 0.15,
+    battery_power_kw: float = 0.0,
+    control_mode: str = MODE_HYBRID,
+):
+    """Run one hybrid optimization with a 3 kW planned charge and given grid power.
+
+    ``shadow_price`` decides whether buying the uncovered part of the plan from
+    the grid is worth it (the buy price is 0.10); ``battery_power_kw`` is what
+    the battery is already doing, which the grid meter reading includes.
+    """
 
     coord = _make_coordinator(hass)
-    coord.control_mode = MODE_HYBRID
+    coord.control_mode = control_mode
     fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
     coord.forecast_coordinator.data = {
         "pv_forecast_kw": [0.5, 0.5],
@@ -3317,7 +3454,12 @@ async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
     monkeypatch.setattr(
         coord,
         "get_current_battery_state",
-        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+        lambda: BatteryState(
+            soc_kwh=5.0,
+            soc_percent=50.0,
+            power_kw=battery_power_kw,
+            mode=_mode_from_power_kw(battery_power_kw),
+        ),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
     monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
@@ -3348,7 +3490,7 @@ async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
         savings=0.0,
         optimal_power_kw=3.0,
         optimal_mode="charging",
-        shadow_price_eur_kwh=0.15,
+        shadow_price_eur_kwh=shadow_price,
         price_forecast=[0.10, 0.12],
         pv_forecast=[0.5, 0.5],
         consumption_forecast=[0.3, 0.3],
@@ -3385,6 +3527,113 @@ async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
     """When the surplus covers the planned charge, zero_grid follows the surplus."""
     data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-3500.0)
     assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_without_surplus_vetoes_grid_import(hass, monkeypatch):
+    """A planned PV charge the sun did not deliver must not import (issue #174).
+
+    The plan was made on forecast PV, so the shadow price (0.06) sits below the
+    cost of buying a stored kWh at 0.10. Importing to keep the plan on paper is
+    a loss, and the grid reading is positive, which used to skip the whole
+    arbitration and follow the schedule.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=300.0, shadow_price=0.06
+    )
+    assert data["optimal_mode"] == "idle"
+    assert data["optimal_power_kw"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_veto_captures_partial_surplus(hass, monkeypatch):
+    """With PV short of the plan, charge on the surplus instead of importing.
+
+    The reporter's case: a 3 kW plan, 0.9 kW of real surplus. Neither following
+    the schedule (0.9 kW of import) nor idling (0.9 kW exported at the feed-in
+    price while the DP wants the energy) is right — zero_grid charges exactly
+    what the sun delivers.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=-900.0, shadow_price=0.06
+    )
+    assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_follows_schedule_when_grid_charging_pays(
+    hass, monkeypatch
+):
+    """Planned grid arbitrage keeps importing: λ covers the buy price."""
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=300.0, shadow_price=0.30
+    )
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_charge_veto_matches_hybrid(hass, monkeypatch):
+    """The charge arbitration is shared: hybrid+ vetoes the same import."""
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=300.0,
+        shadow_price=0.06,
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert data["optimal_mode"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_surplus_seen_through_own_charging(hass, monkeypatch):
+    """The battery's own charge must not mask the surplus it runs on.
+
+    Charging at 3 kW on 3.5 kW of surplus reads as 0.5 kW of *import* on the
+    meter. Measured raw that looks like "no surplus" and the arbitration never
+    re-runs; measured as battery - grid the surplus is still there and
+    zero_grid keeps tracking it.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=-500.0, battery_power_kw=3.0
+    )
+    assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_veto_releases_commitment(hass, monkeypatch):
+    """The veto must not be suppressed by an active charge commitment.
+
+    Without the exemption the commitment filter turns the vetoed idle back into
+    charging for the rest of the price period — exactly the "sticking to the
+    schedule" the issue describes.
+    """
+    coord = _make_coordinator(hass)
+    coord.control_mode = MODE_HYBRID
+    step_start = datetime(2026, 3, 21, 13, 0, 0, tzinfo=timezone.utc)
+    coord._committed_action = "charging"
+    coord._committed_price = 0.10
+    coord._committed_power = 1.2
+    coord._committed_step_start = step_start
+    coord._grid_charge_vetoed = True
+
+    mode, power, locked, reason = coord._apply_commitment_filter(
+        "idle",
+        0.0,
+        battery_state=BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=1.2, mode="charging"
+        ),
+        battery_config=coord.battery_config,
+        current_price=0.10,
+        current_step_start=step_start,
+        degradation_cost_per_kwh=0.01,
+        min_spread=0.02,
+    )
+
+    assert mode == "idle"
+    assert power == pytest.approx(0.0)
+    assert not locked
+    assert reason == ""
 
 
 async def _run_hybrid_mode_sequence(
