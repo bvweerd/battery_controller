@@ -790,7 +790,13 @@ function renderDiagnostics(raw) {
   document.getElementById('s-soc-kwh').textContent = bs.soc_kwh !== undefined ? `${bs.soc_kwh.toFixed(3)} kWh` : '';
   const modeEl = document.getElementById('s-mode');
   modeEl.innerHTML = bs.mode ? badge(bs.mode, bs.mode) : '—';
-  document.getElementById('s-power').textContent   = bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '';
+  // Same snapshot as the Current Values panel, so it needs the same caveat: this
+  // is what the battery was doing when the data was last published, not
+  // necessarily now. Undated, it read as live and outlived the discharge it
+  // described (issue #174).
+  const powerTxt = bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '';
+  const takenAt = opt.updated_at ? new Date(opt.updated_at).toLocaleTimeString() : '';
+  document.getElementById('s-power').textContent   = takenAt ? `${powerTxt} · measured ${takenAt}` : powerTxt;
   const savings = opt.savings || 0;
   const base = opt.baseline_cost || 0;
   document.getElementById('s-savings').textContent    = `€ ${savings.toFixed(4)}`;
@@ -802,7 +808,7 @@ function renderDiagnostics(raw) {
     document.getElementById('s-shadow').textContent = '—';
   }
   document.getElementById('s-ctrl').textContent       = opt.control_mode || '—';
-  document.getElementById('s-ts').textContent         = opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '';
+  document.getElementById('s-ts').textContent         = opt.timestamp ? `last run ${new Date(opt.timestamp).toLocaleString()}` : '';
 
   // ── Config cards
   document.getElementById('cfg-hw').innerHTML =
