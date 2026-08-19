@@ -65,6 +65,10 @@ def _representative_efficiency(curve: EfficiencyCurve, max_power_kw: float) -> f
     ) / len(_REPRESENTATIVE_LOAD_POINTS)
 
 
+# Mirrors DEFAULT_MIN_PRICE_SPREAD in const.py: the arbitrage hurdle the
+# integration applies when the config entry carries no explicit value.
+DEFAULT_MIN_PRICE_SPREAD = 0.05
+
 # Boundary-power fixed point: iterate until the efficiency stops moving.
 _BOUNDARY_SOLVER_MAX_ITER = 12
 _BOUNDARY_SOLVER_TOL = 1e-9
@@ -282,7 +286,12 @@ def extract_inputs(diag: dict) -> tuple:
         if usable_kwh > 0
         else degradation_cost_per_cycle
     )
-    min_price_spread = options.get("min_price_spread", 0.0)
+    # The key is absent from the config entry until the user changes it, so the
+    # fallback here has to be the integration's own default (DEFAULT_MIN_PRICE_SPREAD
+    # in const.py). Falling back to 0 reported a zero arbitrage hurdle — and with it
+    # wrong break-even prices — for every untouched configuration, which is most of
+    # them.
+    min_price_spread = options.get("min_price_spread", DEFAULT_MIN_PRICE_SPREAD)
     fixed_feed_in_price = options.get("fixed_feed_in_price", 0.04)
 
     # Use actual feed-in forecast from schedule if available (new diagnostics field)

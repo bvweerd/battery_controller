@@ -475,6 +475,12 @@
 //       computeShadowPrice, computeTotalCost, runOptimizer, generateTips
 //       are defined in analyzer.js (loaded above).
 
+// Mirrors DEFAULT_MIN_PRICE_SPREAD in const.py: the arbitrage hurdle the
+// integration applies when the config entry carries no explicit value. The key
+// only appears in the entry once the user changes the setting, so every
+// diagnostics file from an untouched configuration needs this fallback.
+const DEFAULT_MIN_PRICE_SPREAD = 0.05;
+
 // ══════════════════════════════════════════════════════════════════
 // CHART HELPERS
 // ══════════════════════════════════════════════════════════════════
@@ -696,7 +702,10 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
   const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
-  const arbCost      = Math.max(0, opts.min_price_spread ?? 0) / 2;
+  // Absent from the config entry until the user changes it, so fall back to the
+  // integration's default (DEFAULT_MIN_PRICE_SPREAD). Falling back to 0 reported a
+  // zero arbitrage hurdle, and wrong break-evens with it, for untouched configs.
+  const arbCost      = Math.max(0, opts.min_price_spread ?? DEFAULT_MIN_PRICE_SPREAD) / 2;
   const decisionCost = degrad + arbCost;
   const breakeven    = (terminalPrice + decisionCost) / sqrtRte;
   const breakevenChg = (terminalPrice - decisionCost) * sqrtRte;
@@ -828,7 +837,7 @@ function renderDiagnostics(raw) {
     kv('Charge eff correction', chgEffCorrClass ? `<span class="${chgEffCorrClass}">${chgEffCorrStr}</span>` : chgEffCorrStr) +
     kv('Discharge eff correction', disEffCorrClass ? `<span class="${disEffCorrClass}">${disEffCorrStr}</span>` : disEffCorrStr) +
     kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
-    kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
+    kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : `€ ${DEFAULT_MIN_PRICE_SPREAD}/kWh (default)`) +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
 
   // ── Learned calibration (battery efficiency + per-PV-array forecast gain)
@@ -1032,7 +1041,7 @@ function renderDiagnostics(raw) {
       pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
-      degradPerKwhDp, opts.min_price_spread || 0.05,
+      degradPerKwhDp, opts.min_price_spread ?? DEFAULT_MIN_PRICE_SPREAD,
       null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
