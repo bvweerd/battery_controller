@@ -305,6 +305,12 @@ PRICE_CHANGE_REOPTIMIZE_ABS_EUR = (
 STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
+# Floor under that age limit, in seconds. At the default 10 s response time the
+# multiplier alone gives 20 s, which an on-change-only source (template, MQTT)
+# exceeds routinely whenever the grid is steady — flagging a perfectly accurate
+# reading as stale. Sixty seconds still catches a sensor that has genuinely
+# stopped, well inside the 15-minute optimizer cycle.
+STALE_SENSOR_MIN_LIMIT_S = 60.0
 WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
 # Plausibility ceiling for a learned hourly consumption sample, in kW.
 # An hourly statistics "change" equals the average power over that hour, so a

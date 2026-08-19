@@ -187,6 +187,7 @@ class OptimizationRunHarness:
         mp.setattr(self.hass.config_entries, "async_get_entry", lambda eid: live_entry)
 
         coord.zero_grid_controller = MagicMock()
+        coord.zero_grid_controller.config.response_time_s = 10.0
         coord.zero_grid_controller.get_control_action = MagicMock(
             return_value=self._control_action()
         )

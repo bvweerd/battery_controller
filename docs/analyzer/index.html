@@ -152,6 +152,12 @@
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-3 text-sm">🔌 Current Values</h3>
       <div id="current-values" class="space-y-1"></div>
+      <div class="text-xs text-gray-400 mt-2">
+        Rows marked <em>forecast</em> are the model's value for the step now running,
+        not a meter reading — they are what the optimizer planned against. Rows marked
+        <em>measured</em> come from your sensors. A gap between the two is the forecast
+        error the controller is correcting for, not a contradiction.
+      </div>
     </div>
   </div>
 
@@ -932,21 +938,43 @@ function renderDiagnostics(raw) {
     ${kv('Wind speed', fc.current_wind_speed_ms !== undefined ? `${fc.current_wind_speed_ms} m/s` : '—')}
     ${failureHtml}`;
 
-  document.getElementById('current-values').innerHTML =
-    kv('PV AC production', `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
-    kv('PV DC production', `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
-    kv('Consumption', `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +
-    kv('Net load', `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
-    kv('Battery SoC', `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
-    kv('Battery power', bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
-    kv('Battery mode', bs.mode ? badge(bs.mode, bs.mode) : '—') +
-    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+  // Two kinds of value live in this panel and they are not interchangeable.
+  // The PV/consumption rows are the FORECAST for the step now running (the
+  // coordinator derives them as forecast[0], they are not meter readings); the
+  // battery, grid and price rows are measured. Labelling them apart stops a
+  // model/reality gap from reading as a contradiction in the panel itself.
+  const ca = opt.control_action || {};
+  const modelled = (label) => `${label} <span class="text-xs text-gray-400">(forecast)</span>`;
+  const measured = (label) => `${label} <span class="text-xs text-gray-400">(measured)</span>`;
+  // When this snapshot was captured. Every early return in the realtime loop
+  // leaves the previous values in place, so a reading minutes old looks exactly
+  // like a live one — which is how a battery reported as "discharging" outlived
+  // the discharge itself. The file records no download time, so its own age
+  // cannot be computed here; stating when the values were taken is what lets a
+  // reader compare them against what the system is doing now.
+  const asOf = opt.updated_at
+    ? `<div class="text-xs text-gray-400 mb-2">Snapshot taken ${new Date(opt.updated_at).toLocaleString()} — not necessarily the moment you downloaded the file</div>`
+    : '<div class="text-xs text-gray-400 mb-2">Snapshot time not recorded (diagnostics from an older version)</div>';
+  document.getElementById('current-values').innerHTML = asOf +
+    kv(modelled('PV AC production'), `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
+    kv(modelled('PV DC production'), `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
+    kv(modelled('Consumption'), `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +
+    kv(modelled('Net load'), `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
+    kv(measured('Battery SoC'), `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
+    kv(measured('Battery power'), bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
+    kv(measured('Battery mode'), bs.mode ? badge(bs.mode, bs.mode) : '—') +
+    // The grid reading the zero-grid loop actually acted on, next to the
+    // setpoint it produced: without both, a setpoint that looks wrong cannot be
+    // told apart from a grid that had already moved.
+    kv(measured('Grid power'), ca.current_grid_w !== undefined ? `${ca.current_grid_w>0?'+':''}${(ca.current_grid_w/1000).toFixed(3)} kW ${ca.current_grid_w>0?'(import)':'(export)'}` : '—') +
+    kv('Battery setpoint', ca.target_power_w !== undefined ? `${ca.target_power_w>0?'+':''}${(ca.target_power_w/1000).toFixed(3)} kW ${ca.action_mode ? `(${ca.action_mode})` : ''}` : '—') +
+    kv(measured('Current feed-in price'), opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
     // Per-array PV breakdown
     (() => {
       const arrays = fc.per_pv_array_forecasts || {};
       const keys = Object.keys(arrays);
       if (keys.length < 2) return '';
-      return keys.map(k => kv(`PV array ${k} now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
+      return keys.map(k => kv(modelled(`PV array ${k} now`), `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
     })();
 
   // ── Charts

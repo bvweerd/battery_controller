@@ -83,6 +83,7 @@ from .const import (
     MODE_ZERO_GRID,
     PRICE_CHANGE_REOPTIMIZE_ABS_EUR,
     PRICE_CHANGE_REOPTIMIZE_THRESHOLD,
+    STALE_SENSOR_MIN_LIMIT_S,
     STALE_SENSOR_MULTIPLIER,
     BATTERY_MODE_THRESHOLD_W,
     SETPOINT_STABLE_THRESHOLD_KW,
@@ -300,6 +301,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # ("charging") or not ("zero_grid"), so a shadow price hovering near the
         # buy price doesn't flip the mode every tick.
         self._last_grid_charge_decision: str = ACTION_CHARGING
+
+        # Whether the current stale-sensor episode has already spent its one
+        # allowed correction away from zero. Reset as soon as a sensor reports
+        # again. See the stale-sensor handling in _handle_realtime_update.
+        self._stale_escape_used: bool = False
 
         # Whether the hybrid charge arbitration vetoed grid charging (the DP
         # planned a charge whose price the shadow price does not justify — a
@@ -930,8 +936,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # controller in an over-committed setpoint (e.g. the battery left
         # discharging after a Quooker/kettle spike), which only the next full
         # optimizer run would clear. Instead the flag is handled per-mode below.
-        stale_limit_s = (
-            STALE_SENSOR_MULTIPLIER * self.zero_grid_controller.config.response_time_s
+        stale_limit_s = max(
+            STALE_SENSOR_MULTIPLIER * self.zero_grid_controller.config.response_time_s,
+            STALE_SENSOR_MIN_LIMIT_S,
         )
         grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
 
@@ -1017,9 +1024,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Stale sensor in zero_grid: the live grid drives the setpoint. Acting on
         # a steady reading is exactly what breaks a self-locking over-commitment
         # (reducing battery power changes the grid and wakes an on-change sensor).
-        # But a genuinely dead sensor stays frozen, so only allow the setpoint to
-        # move TOWARD zero — never let a stale reading push the battery into a
-        # larger charge/discharge or flip its direction (no runaway).
+        # A genuinely dead sensor stays frozen, though, so a move AWAY from zero —
+        # a larger charge/discharge, or a reversal — is rationed: one per stale
+        # episode, then the setpoint holds until a sensor reports again.
+        #
+        # Refusing those moves outright deadlocks (issue #174). The grid can sit
+        # far from zero while the setpoint sits near it — a correction the
+        # downstream inverter or automation ignored, say — and then every input
+        # is frozen: the battery does not move, so the grid does not move, so an
+        # on-change sensor never reports, so the reading stays "stale" and the
+        # correction that would fix it is exactly the one being refused. One
+        # bounded step breaks that, because acting moves the grid, which is what
+        # wakes the sensor. If it does not wake, nothing further happens.
         if grid_sensor_stale:
             prev_w = (
                 self.data.get("control_action", {}).get("target_power_w", 0.0)
@@ -1028,16 +1044,27 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             )
             new_w = control_action["target_power_w"]
             moves_away_from_zero = abs(new_w) > abs(prev_w) or (new_w * prev_w < 0)
-            if moves_away_from_zero:
-                # Untrustworthy while stale — restore integrator state and hold.
+            if moves_away_from_zero and self._stale_escape_used:
+                # This episode already spent its step — restore and hold.
                 self.zero_grid_controller.reset_setpoint(saved_last_target_w)
                 _LOGGER.debug(
                     "Grid power sensor stale; holding zero_grid setpoint "
-                    "(rejected %.0f W -> %.0f W, away from zero)",
+                    "(rejected %.0f W -> %.0f W, away from zero, escape spent)",
                     prev_w,
                     new_w,
                 )
                 return
+            if moves_away_from_zero:
+                self._stale_escape_used = True
+                _LOGGER.debug(
+                    "Grid power sensor stale; allowing one correction away from "
+                    "zero (%.0f W -> %.0f W) to break a possible deadlock",
+                    prev_w,
+                    new_w,
+                )
+        else:
+            # A sensor reported again: the next episode starts with its step.
+            self._stale_escape_used = False
 
         prev_target = (
             self.data.get("control_action", {}).get("target_power_kw")
@@ -1064,6 +1091,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         **self.data,
                         "battery_state": battery_state,
                         "per_battery_states": dict(self._per_battery_states),
+                        "updated_at": dt_util.now().isoformat(),
                     }
                 )
             return
@@ -1109,6 +1137,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 # is still zero_grid. The physical action is already visible via
                 # the Battery Power / Setpoint sensors.
                 "optimal_mode": rt_effective_mode,
+                # When this snapshot was taken. `timestamp` marks the last full
+                # optimizer run; this marks the last publish of any kind, so a
+                # consumer can tell a live reading from one the loop stopped
+                # refreshing (every early return below leaves the previous
+                # values in place, including battery_state).
+                "updated_at": dt_util.now().isoformat(),
             }
         )
 
@@ -3270,4 +3304,5 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "discharge_eff_last_result": self.discharge_eff_last_result,
             "battery_calibration": self.battery_calibration_report(),
             "timestamp": dt_util.utcnow(),
+            "updated_at": dt_util.now().isoformat(),
         }
