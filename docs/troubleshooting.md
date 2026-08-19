@@ -43,6 +43,29 @@ logger:
   set **Manual Power Setpoint** to −500 W, and verify the battery *charges*. See
   [sign conventions](inverter-control.md#sign-conventions).
 
+## The zero-grid setpoint stops moving while the grid is far from zero
+
+Two things can park it there, and the diagnostics tell them apart — the analyzer's
+**Current Values** panel shows the measured grid power next to the setpoint the loop
+produced from it.
+
+- **The correction is smaller than the deadband.** `apply_deadband` compares the
+  *change* in setpoint against **Zero Grid Deadband** (default 50 W), and the loop moves
+  half the grid error per tick, so a steady error below roughly twice the deadband is
+  left alone on purpose. Lower the deadband if you want it chased.
+- **Something downstream is ignoring small setpoints.** If your automation or inverter
+  has a minimum power, a setpoint below it does nothing, so the grid does not move
+  either. The loop still corrects — it needs the next tick to raise the setpoint past
+  that minimum — but while everything is steady an on-change-only power sensor
+  (template, MQTT) stops reporting, and the controller then treats its own reading as
+  stale. It takes one bounded correction to break out of that; if a sensor still does
+  not report, the setpoint holds until one does. Turn on debug logging to see it:
+  `Grid power sensor stale; allowing one correction away from zero`.
+
+If your power sensors are on-change-only, raising **Zero Grid Response Time** also
+raises the staleness limit that goes with it (twice the response time, and never below
+60 s).
+
 ## The optimizer always schedules idle / never does arbitrage
 
 - Ensure the price spread between cheap and expensive hours exceeds the **Minimum Price
