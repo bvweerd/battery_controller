@@ -946,7 +946,16 @@ function renderDiagnostics(raw) {
   const ca = opt.control_action || {};
   const modelled = (label) => `${label} <span class="text-xs text-gray-400">(forecast)</span>`;
   const measured = (label) => `${label} <span class="text-xs text-gray-400">(measured)</span>`;
-  document.getElementById('current-values').innerHTML =
+  // When this snapshot was captured. Every early return in the realtime loop
+  // leaves the previous values in place, so a reading minutes old looks exactly
+  // like a live one — which is how a battery reported as "discharging" outlived
+  // the discharge itself. The file records no download time, so its own age
+  // cannot be computed here; stating when the values were taken is what lets a
+  // reader compare them against what the system is doing now.
+  const asOf = opt.updated_at
+    ? `<div class="text-xs text-gray-400 mb-2">Snapshot taken ${new Date(opt.updated_at).toLocaleString()} — not necessarily the moment you downloaded the file</div>`
+    : '<div class="text-xs text-gray-400 mb-2">Snapshot time not recorded (diagnostics from an older version)</div>';
+  document.getElementById('current-values').innerHTML = asOf +
     kv(modelled('PV AC production'), `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
     kv(modelled('PV DC production'), `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
     kv(modelled('Consumption'), `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +

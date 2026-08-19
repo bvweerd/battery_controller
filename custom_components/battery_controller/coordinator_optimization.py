@@ -1091,6 +1091,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                         **self.data,
                         "battery_state": battery_state,
                         "per_battery_states": dict(self._per_battery_states),
+                        "updated_at": dt_util.now().isoformat(),
                     }
                 )
             return
@@ -1136,6 +1137,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 # is still zero_grid. The physical action is already visible via
                 # the Battery Power / Setpoint sensors.
                 "optimal_mode": rt_effective_mode,
+                # When this snapshot was taken. `timestamp` marks the last full
+                # optimizer run; this marks the last publish of any kind, so a
+                # consumer can tell a live reading from one the loop stopped
+                # refreshing (every early return below leaves the previous
+                # values in place, including battery_state).
+                "updated_at": dt_util.now().isoformat(),
             }
         )
 
@@ -3297,4 +3304,5 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             "discharge_eff_last_result": self.discharge_eff_last_result,
             "battery_calibration": self.battery_calibration_report(),
             "timestamp": dt_util.utcnow(),
+            "updated_at": dt_util.now().isoformat(),
         }

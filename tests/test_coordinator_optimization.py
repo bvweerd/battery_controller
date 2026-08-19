@@ -2268,6 +2268,45 @@ async def test_stale_zero_grid_escapes_small_setpoint_deadlock(hass, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_realtime_publish_stamps_updated_at(hass, monkeypatch):
+    """Every realtime publish records when it happened.
+
+    Without it a snapshot the loop stopped refreshing is indistinguishable from
+    a live one — the battery reported as discharging in the diagnostics on
+    issue #174 was measured minutes before the file was read.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+    hass.states.async_set("sensor.grid_w", "-800", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -800.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "a 800 W export must move the setpoint"
+    assert "updated_at" in updated[-1]
+    # Parseable ISO timestamp, not a bare object.
+    datetime.fromisoformat(updated[-1]["updated_at"])
+
+
+@pytest.mark.asyncio
 async def test_stale_escape_resets_when_a_sensor_reports_again(hass, monkeypatch):
     """The one-step ration is per stale episode, not once per lifetime."""
     coord = _make_coordinator(hass)
