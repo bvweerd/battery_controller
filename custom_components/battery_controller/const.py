@@ -326,6 +326,10 @@ STALE_SENSOR_MULTIPLIER = (
 # reading as stale. Sixty seconds still catches a sensor that has genuinely
 # stopped, well inside the 15-minute optimizer cycle.
 STALE_SENSOR_MIN_LIMIT_S = 60.0
+# How much the summed grid reading must move between two real-time ticks to
+# count as proof that the sensors behind it are alive, in W. Small enough to
+# catch any real household change, large enough to ignore float noise.
+GRID_READING_ALIVE_W = 5.0
 WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
 # Plausibility ceiling for a learned hourly consumption sample, in kW.
 # An hourly statistics "change" equals the average power over that hour, so a
