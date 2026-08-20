@@ -83,6 +83,7 @@ from .const import (
     MODE_ZERO_GRID,
     PRICE_CHANGE_REOPTIMIZE_ABS_EUR,
     PRICE_CHANGE_REOPTIMIZE_THRESHOLD,
+    GRID_READING_ALIVE_W,
     STALE_SENSOR_MIN_LIMIT_S,
     STALE_SENSOR_MULTIPLIER,
     BATTERY_MODE_THRESHOLD_W,
@@ -301,6 +302,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # ("charging") or not ("zero_grid"), so a shadow price hovering near the
         # buy price doesn't flip the mode every tick.
         self._last_grid_charge_decision: str = ACTION_CHARGING
+
+        # Previous tick's summed grid reading, for the liveness check in
+        # _handle_realtime_update. None until the first reading.
+        self._last_grid_reading_w: float | None = None
 
         # Whether the current stale-sensor episode has already spent its one
         # allowed correction away from zero. Reset as soon as a sensor reports
@@ -941,6 +946,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             STALE_SENSOR_MIN_LIMIT_S,
         )
         grid_sensor_stale = self._find_stale_power_sensor(stale_limit_s) is not None
+        # A sensor that has not reported is only untrustworthy if the reading it
+        # feeds has stopped moving too. The common false positive is a sensor
+        # that is legitimately constant: an import meter reads exactly 0 W for
+        # as long as the house exports, so an on-change source stops publishing
+        # it and the whole set is flagged — during precisely the export the
+        # loop is supposed to be correcting (issue #174). A summed reading that
+        # keeps changing is proof the set is alive, and a frozen sum is the
+        # runaway condition the guard actually cares about, so it is the better
+        # signal on both counts.
+        if (
+            grid_sensor_stale
+            and self._last_grid_reading_w is not None
+            and abs(current_grid_w - self._last_grid_reading_w) >= GRID_READING_ALIVE_W
+        ):
+            grid_sensor_stale = False
+        self._last_grid_reading_w = current_grid_w
 
         # Read current battery state
         battery_state = self.get_current_battery_state()

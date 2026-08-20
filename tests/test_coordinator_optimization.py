@@ -2307,6 +2307,57 @@ async def test_realtime_publish_stamps_updated_at(hass, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_moving_grid_reading_overrides_stale_timestamps(hass, monkeypatch):
+    """A reading that keeps moving is not stale, whatever the timestamps say.
+
+    The reported case (issue #174): an import meter reads exactly 0 W for as
+    long as the house exports, so an on-change source stops publishing it and
+    every configured sensor counts as stale — during the export the loop is
+    meant to correct. The summed reading was changing on every tick throughout,
+    so the loop must keep correcting instead of spending its one rationed step.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+    # Timestamps say stale for the whole test.
+    hass.states.async_set("sensor.grid_w", "-800", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=300),
+    )
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    # Three ticks on a reading that keeps moving: every one must correct.
+    for grid_w in (-800.0, -600.0, -400.0):
+        monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda v=grid_w: v)
+        await coord._handle_realtime_update(datetime.now(timezone.utc))
+        if updated:
+            coord.data = updated[-1]
+
+    assert len(updated) == 3, "a moving reading must not be rationed as stale"
+    # 0 + 400, then 400 + 300, then 700 + 200 — each tick corrects half the error.
+    assert updated[-1]["control_action"]["target_power_w"] == pytest.approx(900.0)
+    assert not coord._stale_escape_used
+
+
+@pytest.mark.asyncio
 async def test_stale_escape_resets_when_a_sensor_reports_again(hass, monkeypatch):
     """The one-step ration is per stale episode, not once per lifetime."""
     coord = _make_coordinator(hass)
