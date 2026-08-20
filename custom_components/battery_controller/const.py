@@ -142,6 +142,21 @@ CONF_ZERO_GRID_RESPONSE_TIME_S = "zero_grid_response_time_s"
 # Configuration keys - Control mode (persisted)
 CONF_CONTROL_MODE = "control_mode"
 
+# Option keys owned by entities rather than by the options form. The number and
+# select entities write straight into entry.options so they take effect without
+# a reload; the options flow rebuilds entry.options from its own form fields and
+# would drop anything not listed here. Leaving a key out silently resets it to
+# its default the next time a user saves any setting — which is how Hybrid+ fell
+# back to Hybrid (issue #179). Any new entity that persists to options belongs
+# in this tuple; tests/test_config_flow.py checks that none is forgotten.
+ENTITY_MANAGED_OPTIONS = (
+    CONF_DEGRADATION_COST_PER_CYCLE,
+    CONF_MIN_PRICE_SPREAD,
+    CONF_ZERO_GRID_DEADBAND_W,
+    CONF_MANUAL_POWER_SETPOINT_W,
+    CONF_CONTROL_MODE,
+)
+
 # Configuration keys - Fixed prices (fallback)
 CONF_FIXED_FEED_IN_PRICE = "fixed_feed_in_price"
 
