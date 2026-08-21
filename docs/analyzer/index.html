@@ -189,6 +189,7 @@
       Charge profit = λ − p<sub>buy</sub>/√RTE − degradation per kWh.
       Discharge profit = p<sub>sell</sub>·√RTE − λ − degradation per kWh.
       Green = active action · Red rows = missed discharge opportunity (profit &gt; 0 but idle/charging).
+      Times are shown in your browser's timezone.
     </p>
     <div class="scrolltable sticky-header">
       <table class="w-full text-xs border-collapse">
@@ -497,12 +498,27 @@ function mkChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
+// The schedule's step_start_times_iso are written in UTC by the integration,
+// while the run and setpoint logs are written in local time. Slicing the raw
+// string — as the schedule views used to — therefore showed UTC in one half of
+// the page and local time in the other, with no hint which was which (issue
+// #182). Everything the user reads is now formatted in their own timezone.
+function fmtStepTime(iso) {
+  if (!iso) return '';
+  const raw = String(iso);
+  if (!raw.includes('T')) return raw;
+  const d = new Date(raw);
+  // Unparsable: show it as it came rather than a mangled substring.
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 function timeLabels(n, startIso, stepH) {
   const labels = [];
   let d = startIso ? new Date(startIso) : new Date();
   d.setSeconds(0, 0);
   for (let i = 0; i < n; i++) {
-    labels.push(d.toLocaleTimeString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+    labels.push(fmtStepTime(d.toISOString()));
     d = new Date(d.getTime() + (stepH || 0.25) * 3600000);
   }
   return labels;
@@ -735,9 +751,7 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
     const mode = modes[t] || 'idle';
     const soc  = socKwh[t] || 0;
     const pw   = powerKw[t] || 0;
-    const timeStr = stepTimes && stepTimes[t]
-      ? (stepTimes[t].includes('T') ? stepTimes[t].slice(5,16).replace('T',' ') : stepTimes[t])
-      : `step ${t}`;
+    const timeStr = stepTimes && stepTimes[t] ? fmtStepTime(stepTimes[t]) : `step ${t}`;
 
     const isMissedDischarge = discProfit > 0 && mode !== 'discharging';
     let rowClass = '';
@@ -1008,7 +1022,7 @@ function renderDiagnostics(raw) {
   const startIso = resolvedStepTimes[0] || wx.forecast_start_utc || opt.timestamp;
   const stepH    = resolvedStepDurs[0]  || 0.25;
   const labels   = resolvedStepTimes.length > 0
-    ? resolvedStepTimes.map(t => t.includes('T') ? t.slice(5,16).replace('T',' ') : t)
+    ? resolvedStepTimes.map(fmtStepTime)
     : timeLabels(prices.length, startIso, stepH);
 
   // Forecast-coordinator series come at fc.forecast_interval_minutes (15 min
