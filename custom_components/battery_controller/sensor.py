@@ -537,12 +537,21 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     recorder accumulate the difference between consecutive states into a
     long-term sum, which for a fluctuating forecast produces a meaningless
     running figure and an incorrect cost in the energy dashboard.
+
+    Home Assistant allows only TOTAL alongside the MONETARY device class, and
+    logs an error for anything else, so keeping MEASUREMENT means carrying no
+    device class at all (issue #184). That is the right way round: MONETARY
+    describes an amount of money held or spent, which a forward-looking estimate
+    is not, and the alternatives both cost more than the currency styling is
+    worth — TOTAL fabricates the running sum described above, and dropping the
+    state class instead would give up the min/mean/max statistics that are
+    exactly what a fluctuating estimate should be recorded as. The unit still
+    says EUR, and the shadow-price sensor already reads EUR/kWh the same way.
     """
 
     _attr_translation_key = "daily_savings"
     _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
-    _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "daily_savings"
 

@@ -49,6 +49,7 @@ from custom_components.battery_controller.const import (
 )
 from custom_components.battery_controller.coordinator_optimization import (
     OptimizationCoordinator,
+    _mode_from_power_kw,
 )
 from custom_components.battery_controller.helpers import (
     extract_price_forecast_with_timestamps,
@@ -971,6 +972,30 @@ def test_resolve_controller_mode_idle_upgrade_hysteresis(hass):
     assert coord._resolve_controller_mode("idle", -band / 2) == "idle"
 
 
+def test_resolve_controller_mode_idle_upgrade_reads_surplus_through_battery(hass):
+    """The upgrade decision must survive the battery hiding the surplus.
+
+    While capturing, the zero-grid loop holds the meter at ~0 W, so the raw
+    reading cannot tell "still 2 kW of sun" from "sun gone, house balanced".
+    Measured as battery - grid it can: the capture continues while the surplus
+    is real, and stops once the house is genuinely short.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    coord._power_consumption_sensors = ["sensor.c"]
+    band = coord._hybrid_deadband_w()
+
+    # Enter on a solid surplus, battery still idle.
+    assert coord._resolve_controller_mode("idle", -band * 4, 0.0) == "zero_grid"
+
+    # Capturing 2 kW of surplus: the meter sits at ~0 W but the surplus is real.
+    assert coord._resolve_controller_mode("idle", 0.0, 2000.0) == "zero_grid"
+
+    # The sun drops and the loop discharges to cover the house instead. That is
+    # not a surplus, so the capture must stop.
+    assert coord._resolve_controller_mode("idle", 0.0, -800.0) == "idle"
+
+
 def test_resolve_controller_mode_idle_upgrade_resets_when_blocked(hass):
     """A blocked upgrade resets the memory to the strict entry threshold."""
     from custom_components.battery_controller.const import (
@@ -1584,6 +1609,7 @@ async def test_handle_realtime_update_no_data_returns_early(hass):
     coord.data = None
     coord._last_result = None
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
 
     await coord._handle_realtime_update(datetime.now(timezone.utc))
 
@@ -1599,6 +1625,7 @@ async def test_handle_realtime_update_no_grid_returns_early(hass, monkeypatch):
     coord.data = {"control_action": {}}
     coord._last_result = MagicMock()
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
 
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: None)
 
@@ -1640,6 +1667,7 @@ async def test_handle_realtime_update_stable_setpoint_updates_battery_state(
     monkeypatch.setattr(coord, "get_current_battery_state", lambda: new_battery_state)
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -200.0)
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     # Same target_power_kw as cached → setpoint_stable
     coord.zero_grid_controller.get_control_action = MagicMock(
         return_value={
@@ -1692,6 +1720,7 @@ async def test_handle_realtime_update_changed_setpoint(hass, monkeypatch):
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -300.0)
     monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     coord.zero_grid_controller.get_control_action = MagicMock(
         return_value={
             "target_power_kw": 1.5,  # Changed from 0.5
@@ -2025,10 +2054,10 @@ async def test_handle_realtime_update_stale_sensor_returns_early(hass, monkeypat
     hass.states.async_set("sensor.grid_w", "500", {"unit_of_measurement": "W"})
     state_time = hass.states.get("sensor.grid_w").last_updated
 
-    # Mock utcnow to be 30 s later (> stale_limit_s = 2.0 × 10.0 = 20 s)
+    # Mock utcnow past the stale limit: max(2.0 × 10.0, STALE_SENSOR_MIN_LIMIT_S)
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
-        lambda: state_time + timedelta(seconds=30),
+        lambda: state_time + timedelta(seconds=90),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 500.0)
 
@@ -2069,7 +2098,7 @@ async def test_stale_zero_grid_unwinds_toward_zero(hass, monkeypatch):
     state_time = hass.states.get("sensor.grid_w").last_updated
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
-        lambda: state_time + timedelta(seconds=30),
+        lambda: state_time + timedelta(seconds=90),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -1300.0)
     monkeypatch.setattr(
@@ -2135,9 +2164,15 @@ async def test_realtime_zero_grid_reports_zero_grid_mode(hass, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
-    """A stale (possibly dead/frozen) grid sensor must never drive the battery
-    into a larger discharge — the original P4.1 runaway protection is kept."""
+async def test_stale_zero_grid_rations_moves_away_from_zero(hass, monkeypatch):
+    """A stale grid sensor gets exactly one correction away from zero, then holds.
+
+    The step exists to break the deadlock in issue #174: refusing every such
+    move can leave the setpoint parked near zero while the grid sits far from
+    it, with nothing able to move either. Acting once changes the grid, which is
+    what wakes an on-change sensor. A sensor that stays frozen gets no more:
+    the second attempt is refused, so a dead reading cannot wind the battery up.
+    """
     coord = _make_coordinator(hass)
     coord._control_mode = MODE_ZERO_GRID
     coord._power_consumption_sensors = ["sensor.grid_w"]
@@ -2156,7 +2191,7 @@ async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
     state_time = hass.states.get("sensor.grid_w").last_updated
     monkeypatch.setattr(
         "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
-        lambda: state_time + timedelta(seconds=30),
+        lambda: state_time + timedelta(seconds=90),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: 2000.0)
     monkeypatch.setattr(
@@ -2170,11 +2205,188 @@ async def test_stale_zero_grid_rejects_runaway(hass, monkeypatch):
     updated = []
     monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
 
+    # First tick: one step is allowed — target = -200 - 0.5 x 2000 = -1200 W.
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+    assert updated, "the first correction away from zero must go through"
+    assert updated[-1]["control_action"]["target_power_w"] == pytest.approx(-1200.0)
+    coord.data = updated[-1]
+
+    # Second tick on the same frozen reading: refused, setpoint held.
+    updated.clear()
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+    assert not updated, "a frozen sensor must not wind the battery up further"
+    # Integrator memory restored — not wound up further.
+    assert coord.zero_grid_controller.last_target_w == pytest.approx(-1200.0)
+
+
+@pytest.mark.asyncio
+async def test_stale_zero_grid_escapes_small_setpoint_deadlock(hass, monkeypatch):
+    """The reported deadlock: setpoint parked at 44 W while 580 W is exported.
+
+    From the diagnostics on issue #174. The loop had just stepped the setpoint
+    from -245 W up through +44 W; the house surplus is 334 W (battery - grid),
+    so the next correction is upwards. Downstream ignored the 44 W command, so
+    nothing moved, the sensor went quiet, and the old rule refused every further
+    step because each one increases the setpoint. The escape must lift it.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(44.5)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0445, "target_power_w": 44.5},
+        "battery_state": BatteryState(
+            soc_kwh=3.253, soc_percent=65.06, power_kw=-0.246, mode="discharging"
+        ),
+        "per_battery_states": {},
+    }
+
+    hass.states.async_set("sensor.grid_w", "-580", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=90),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -580.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=3.253, soc_percent=65.06, power_kw=-0.246, mode="discharging"
+        ),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
     await coord._handle_realtime_update(datetime.now(timezone.utc))
 
-    assert not updated, "stale frozen sensor must not drive a larger discharge"
-    # Integrator memory restored — not wound up further.
-    assert coord.zero_grid_controller.last_target_w == pytest.approx(-200.0)
+    assert updated, "the setpoint must not stay parked while the grid exports"
+    # 44.5 - 0.5 x (-580) = 334.5 W — the surplus the house actually has.
+    assert updated[-1]["control_action"]["target_power_w"] == pytest.approx(334.5)
+
+
+@pytest.mark.asyncio
+async def test_realtime_publish_stamps_updated_at(hass, monkeypatch):
+    """Every realtime publish records when it happened.
+
+    Without it a snapshot the loop stopped refreshing is indistinguishable from
+    a live one — the battery reported as discharging in the diagnostics on
+    issue #174 was measured minutes before the file was read.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+    hass.states.async_set("sensor.grid_w", "-800", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -800.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert updated, "a 800 W export must move the setpoint"
+    assert "updated_at" in updated[-1]
+    # Parseable ISO timestamp, not a bare object.
+    datetime.fromisoformat(updated[-1]["updated_at"])
+
+
+@pytest.mark.asyncio
+async def test_moving_grid_reading_overrides_stale_timestamps(hass, monkeypatch):
+    """A reading that keeps moving is not stale, whatever the timestamps say.
+
+    The reported case (issue #174): an import meter reads exactly 0 W for as
+    long as the house exports, so an on-change source stops publishing it and
+    every configured sensor counts as stale — during the export the loop is
+    meant to correct. The summed reading was changing on every tick throughout,
+    so the loop must keep correcting instead of spending its one rationed step.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+    # Timestamps say stale for the whole test.
+    hass.states.async_set("sensor.grid_w", "-800", {"unit_of_measurement": "W"})
+    state_time = hass.states.get("sensor.grid_w").last_updated
+    monkeypatch.setattr(
+        "custom_components.battery_controller.coordinator_optimization.dt_util.utcnow",
+        lambda: state_time + timedelta(seconds=300),
+    )
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    updated = []
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: updated.append(d))
+
+    # Three ticks on a reading that keeps moving: every one must correct.
+    for grid_w in (-800.0, -600.0, -400.0):
+        monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda v=grid_w: v)
+        await coord._handle_realtime_update(datetime.now(timezone.utc))
+        if updated:
+            coord.data = updated[-1]
+
+    assert len(updated) == 3, "a moving reading must not be rationed as stale"
+    # 0 + 400, then 400 + 300, then 700 + 200 — each tick corrects half the error.
+    assert updated[-1]["control_action"]["target_power_w"] == pytest.approx(900.0)
+    assert not coord._stale_escape_used
+
+
+@pytest.mark.asyncio
+async def test_stale_escape_resets_when_a_sensor_reports_again(hass, monkeypatch):
+    """The one-step ration is per stale episode, not once per lifetime."""
+    coord = _make_coordinator(hass)
+    coord._stale_escape_used = True
+    coord._control_mode = MODE_ZERO_GRID
+    coord._power_consumption_sensors = ["sensor.grid_w"]
+    coord._last_result = MagicMock()
+    coord.zero_grid_controller.reset_setpoint(0.0)
+    coord.data = {
+        "control_action": {"target_power_kw": 0.0, "target_power_w": 0.0},
+        "battery_state": BatteryState(
+            soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"
+        ),
+        "per_battery_states": {},
+    }
+    # Sensor reporting normally — not stale.
+    hass.states.async_set("sensor.grid_w", "-400", {"unit_of_measurement": "W"})
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: -400.0)
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(soc_kwh=3.0, soc_percent=60.0, power_kw=0.0, mode="idle"),
+    )
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: None)
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+
+    assert not coord._stale_escape_used
 
 
 @pytest.mark.asyncio
@@ -2200,6 +2412,7 @@ async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
     coord._last_result = MagicMock()
 
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     captured = {}
     coord.zero_grid_controller.get_control_action = MagicMock(
         side_effect=lambda **kw: (
@@ -2229,6 +2442,107 @@ async def test_handle_realtime_update_mode_zero_grid(hass, monkeypatch):
     assert captured.get("dp_schedule_w") == pytest.approx(0.0)
 
 
+async def _run_hybrid_realtime_charge_tick(
+    hass,
+    monkeypatch,
+    grid_w: float,
+    battery_power_kw: float,
+    shadow_price: float,
+) -> dict:
+    """One realtime tick on a cached 3 kW charge plan, in hybrid mode.
+
+    Returns the kwargs the zero-grid controller was called with, so the test
+    can see which mode and setpoint the tick resolved to without a DP run.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+    # What the last 15-min run left behind: follow the schedule at 1.2 kW.
+    coord._effective_mode = "charging"
+    coord._controller_schedule_w = 1200.0
+    coord._scheduled_charge_w = 1200.0
+    coord._last_feed_in_price = 0.07
+    coord._last_grid_price = 0.10
+    coord._last_degradation_cost_per_kwh = 0.01
+    coord.data = {
+        "control_action": {
+            "target_power_kw": 1.2,
+            "action_mode": "charging",
+            "raw_target_w": 1200.0,
+            "dp_schedule_w": 1200.0,
+            "mode": "follow_schedule",
+        },
+        "battery_state": BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=battery_power_kw, mode="charging"
+        ),
+        "per_battery_states": {},
+    }
+    coord._last_result = MagicMock()
+    coord._last_result.optimal_mode = "charging"
+    coord._last_result.optimal_power_kw = 1.2
+    coord._last_result.shadow_price_eur_kwh = shadow_price
+
+    captured: dict = {}
+    coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
+    coord.zero_grid_controller.get_control_action = MagicMock(
+        side_effect=lambda **kw: (
+            captured.update(kw)
+            or {
+                "target_power_kw": 0.0,
+                "target_power_w": 0.0,
+                "action_mode": kw["mode"],
+                "raw_target_w": 0.0,
+                "dp_schedule_w": kw["dp_schedule_w"],
+                "mode": kw["mode"],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        coord,
+        "get_current_battery_state",
+        lambda: BatteryState(
+            soc_kwh=5.0,
+            soc_percent=50.0,
+            power_kw=battery_power_kw,
+            mode=_mode_from_power_kw(battery_power_kw),
+        ),
+    )
+    monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
+    monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {})
+    monkeypatch.setattr(coord, "async_set_updated_data", lambda d: None)
+    live_entry = MagicMock()
+    live_entry.options = {}
+    monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
+
+    await coord._handle_realtime_update(datetime.now(timezone.utc))
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_stops_uneconomical_charge_import(hass, monkeypatch):
+    """A charge importing on failed PV is released between runs, not after 15 min.
+
+    The cached plan charges 1.2 kW; the meter says 0.5 kW is coming from the
+    grid and the shadow price does not justify buying it. The tick must drop
+    the setpoint rather than hold it until the next optimizer run.
+    """
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass, monkeypatch, grid_w=500.0, battery_power_kw=1.2, shadow_price=0.06
+    )
+    assert captured["mode"] == "zero_grid"
+    assert captured["dp_schedule_w"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_keeps_charge_when_grid_charging_pays(hass, monkeypatch):
+    """Planned grid arbitrage survives the realtime re-check at its committed power."""
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass, monkeypatch, grid_w=500.0, battery_power_kw=1.2, shadow_price=0.30
+    )
+    assert captured["mode"] == "follow_schedule"
+    assert captured["dp_schedule_w"] == pytest.approx(1200.0)
+
+
 @pytest.mark.asyncio
 async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
     """_handle_realtime_update reads live manual setpoint in MODE_MANUAL."""
@@ -2255,6 +2569,7 @@ async def test_handle_realtime_update_mode_manual(hass, monkeypatch):
     monkeypatch.setattr(coord, "_get_manual_setpoint_w", lambda: -1000.0)
 
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     captured = {}
     coord.zero_grid_controller.get_control_action = MagicMock(
         side_effect=lambda **kw: (
@@ -3299,11 +3614,23 @@ async def test_feed_in_forecast_not_overlapping_horizon_uses_fixed_price(
 # ---------------------------------------------------------------------------
 
 
-async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
-    """Run one hybrid optimization with a 3 kW planned charge and given grid power."""
+async def _run_hybrid_charge_case(
+    hass,
+    monkeypatch,
+    grid_w: float,
+    shadow_price: float = 0.15,
+    battery_power_kw: float = 0.0,
+    control_mode: str = MODE_HYBRID,
+):
+    """Run one hybrid optimization with a 3 kW planned charge and given grid power.
+
+    ``shadow_price`` decides whether buying the uncovered part of the plan from
+    the grid is worth it (the buy price is 0.10); ``battery_power_kw`` is what
+    the battery is already doing, which the grid meter reading includes.
+    """
 
     coord = _make_coordinator(hass)
-    coord.control_mode = MODE_HYBRID
+    coord.control_mode = control_mode
     fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
     coord.forecast_coordinator.data = {
         "pv_forecast_kw": [0.5, 0.5],
@@ -3317,7 +3644,12 @@ async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
     monkeypatch.setattr(
         coord,
         "get_current_battery_state",
-        lambda: BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle"),
+        lambda: BatteryState(
+            soc_kwh=5.0,
+            soc_percent=50.0,
+            power_kw=battery_power_kw,
+            mode=_mode_from_power_kw(battery_power_kw),
+        ),
     )
     monkeypatch.setattr(coord, "_get_realtime_grid_w", lambda: grid_w)
     monkeypatch.setattr(coord, "_split_setpoint", lambda kw, _mode="": {"bat1": kw})
@@ -3348,12 +3680,13 @@ async def _run_hybrid_charge_case(hass, monkeypatch, grid_w: float):
         savings=0.0,
         optimal_power_kw=3.0,
         optimal_mode="charging",
-        shadow_price_eur_kwh=0.15,
+        shadow_price_eur_kwh=shadow_price,
         price_forecast=[0.10, 0.12],
         pv_forecast=[0.5, 0.5],
         consumption_forecast=[0.3, 0.3],
     )
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     coord.zero_grid_controller.get_control_action = MagicMock(
         return_value={
             "target_power_kw": 0.0,
@@ -3385,6 +3718,113 @@ async def test_hybrid_large_surplus_uses_zero_grid(hass, monkeypatch):
     """When the surplus covers the planned charge, zero_grid follows the surplus."""
     data = await _run_hybrid_charge_case(hass, monkeypatch, grid_w=-3500.0)
     assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_without_surplus_vetoes_grid_import(hass, monkeypatch):
+    """A planned PV charge the sun did not deliver must not import (issue #174).
+
+    The plan was made on forecast PV, so the shadow price (0.06) sits below the
+    cost of buying a stored kWh at 0.10. Importing to keep the plan on paper is
+    a loss, and the grid reading is positive, which used to skip the whole
+    arbitration and follow the schedule.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=300.0, shadow_price=0.06
+    )
+    assert data["optimal_mode"] == "idle"
+    assert data["optimal_power_kw"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_veto_captures_partial_surplus(hass, monkeypatch):
+    """With PV short of the plan, charge on the surplus instead of importing.
+
+    The reporter's case: a 3 kW plan, 0.9 kW of real surplus. Neither following
+    the schedule (0.9 kW of import) nor idling (0.9 kW exported at the feed-in
+    price while the DP wants the energy) is right — zero_grid charges exactly
+    what the sun delivers.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=-900.0, shadow_price=0.06
+    )
+    assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_follows_schedule_when_grid_charging_pays(
+    hass, monkeypatch
+):
+    """Planned grid arbitrage keeps importing: λ covers the buy price."""
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=300.0, shadow_price=0.30
+    )
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_plus_charge_veto_matches_hybrid(hass, monkeypatch):
+    """The charge arbitration is shared: hybrid+ vetoes the same import."""
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=300.0,
+        shadow_price=0.06,
+        control_mode=MODE_HYBRID_PLUS,
+    )
+    assert data["optimal_mode"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_surplus_seen_through_own_charging(hass, monkeypatch):
+    """The battery's own charge must not mask the surplus it runs on.
+
+    Charging at 3 kW on 3.5 kW of surplus reads as 0.5 kW of *import* on the
+    meter. Measured raw that looks like "no surplus" and the arbitration never
+    re-runs; measured as battery - grid the surplus is still there and
+    zero_grid keeps tracking it.
+    """
+    data = await _run_hybrid_charge_case(
+        hass, monkeypatch, grid_w=-500.0, battery_power_kw=3.0
+    )
+    assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_charge_veto_releases_commitment(hass, monkeypatch):
+    """The veto must not be suppressed by an active charge commitment.
+
+    Without the exemption the commitment filter turns the vetoed idle back into
+    charging for the rest of the price period — exactly the "sticking to the
+    schedule" the issue describes.
+    """
+    coord = _make_coordinator(hass)
+    coord.control_mode = MODE_HYBRID
+    step_start = datetime(2026, 3, 21, 13, 0, 0, tzinfo=timezone.utc)
+    coord._committed_action = "charging"
+    coord._committed_price = 0.10
+    coord._committed_power = 1.2
+    coord._committed_step_start = step_start
+    coord._grid_charge_vetoed = True
+
+    mode, power, locked, reason = coord._apply_commitment_filter(
+        "idle",
+        0.0,
+        battery_state=BatteryState(
+            soc_kwh=5.0, soc_percent=50.0, power_kw=1.2, mode="charging"
+        ),
+        battery_config=coord.battery_config,
+        current_price=0.10,
+        current_step_start=step_start,
+        degradation_cost_per_kwh=0.01,
+        min_spread=0.02,
+    )
+
+    assert mode == "idle"
+    assert power == pytest.approx(0.0)
+    assert not locked
+    assert reason == ""
 
 
 async def _run_hybrid_mode_sequence(
@@ -3447,6 +3887,7 @@ async def _run_hybrid_mode_sequence(
     monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
 
     coord.zero_grid_controller = MagicMock()
+    coord.zero_grid_controller.config.response_time_s = 10.0
     coord.zero_grid_controller.get_control_action = MagicMock(
         return_value={
             "target_power_kw": 0.0,

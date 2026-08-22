@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity import DeviceInfo
 
 from custom_components.battery_controller.__init__ import BatteryControllerData
@@ -1488,3 +1489,58 @@ def test_pv_array_calibration_sensors_have_distinct_unique_ids():
     west = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_west", "West")
 
     assert east.unique_id != west.unique_id
+
+
+# ---------------------------------------------------------------------------
+# Device class / state class compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_every_sensor_pairs_a_legal_device_and_state_class():
+    """No sensor may pair a device class with a state class HA forbids.
+
+    Home Assistant validates the pair when the entity is added and logs an error
+    naming this integration when it does not hold — a MONETARY sensor with state
+    class MEASUREMENT was doing exactly that (issue #184). The rule is read from
+    HA's own table rather than restated here, so this keeps testing what HA
+    enforces as that table changes.
+
+    The classes are instantiated rather than inspected: HA stores an entity's
+    declared _attr_ values behind a descriptor, so reading them off the class
+    yields the descriptor instead of the value and every pair would look empty.
+    """
+    from homeassistant.components.sensor import DEVICE_CLASS_STATE_CLASSES
+
+    from custom_components.battery_controller import sensor as sensor_platform
+
+    device, entry = _make_device(), _make_entry()
+    offenders = []
+    checked = 0
+    for name, cls in vars(sensor_platform).items():
+        if not isinstance(cls, type) or not issubclass(cls, SensorEntity):
+            continue
+        coord = (
+            _make_forecast_coord()
+            if issubclass(cls, sensor_platform.BatteryForecastSensor)
+            else _make_opt_coord()
+        )
+        try:
+            sensor = cls(coord, device, entry)
+        except TypeError:
+            # Per-subentry sensors take the subentry id and its title as well.
+            try:
+                sensor = cls(coord, device, entry, "sub1", "Sub One")
+            except TypeError:
+                continue
+        checked += 1
+        allowed = DEVICE_CLASS_STATE_CLASSES.get(sensor.device_class)
+        if (
+            sensor.device_class is not None
+            and sensor.state_class is not None
+            and allowed is not None
+            and sensor.state_class not in allowed
+        ):
+            offenders.append(f"{name}: {sensor.device_class} + {sensor.state_class}")
+
+    assert checked > 10, f"only {checked} sensors instantiated; the walk is broken"
+    assert not offenders, "illegal device/state class pairs: " + ", ".join(offenders)

@@ -124,10 +124,32 @@ feed-in price would immediately buy PV surplus at that same price. Both Hybrid a
 Hybrid+ apply this test; Hybrid's unconditional surplus capture applies where the DP has
 no opinion, not where it is overruling an explicit plan.
 
+A **planned charge** is arbitrated the same way. The DP plans it against forecast PV, so
+when the sun under-delivers, following the plan verbatim means buying the difference from
+the grid. Hybrid checks whether that is worth it: a stored kWh costs `price / charge_eff`
+plus degradation, and buying it is justified only while the shadow price covers that
+(±5 % hysteresis). Planned grid arbitrage — a cheap hour the DP deliberately charges in —
+passes that test and runs at full power. A charge planned against PV that failed to
+arrive does not: the mode then charges on whatever surplus there is (zero-grid), or holds
+at idle when there is none, and lets the DP charge later when the sun or a cheaper hour
+delivers. Both Hybrid and Hybrid+ apply this test.
+
+Every one of these decisions reads the PV surplus as `battery − grid`, not as the meter
+reading. The meter includes what the battery itself is doing, so a charge that is
+importing looks like "no surplus" and a zero-grid capture holding the meter at 0 W looks
+the same whether the sun is still shining or not. Measured against the battery's own
+action, the surplus stays visible and the arbitration keeps working while it acts on it.
+
 !!! info "Hybrid is recommended for robustness, not for maximum arbitrage profit"
     If you want surplus capture to follow the price forecast instead, use **Hybrid+**.
     For the strictly cost-optimal schedule with no opportunistic charging at all, use
     **Follow Schedule**.
+
+!!! note "Response time"
+    The charge arbitration is re-checked on every real-time tick (the zero-grid response
+    time, ~5-10 s), not only when the optimizer runs. A charge that starts importing
+    because a forecast did not hold is released within seconds instead of at the end of
+    the price period.
 
 ## Hybrid+
 

@@ -61,7 +61,21 @@ Because every run re-solves the entire 24–36 hour horizon from scratch, rather
 patching the previous plan. A small change in the price forecast, PV forecast or actual
 SoC can shift how much capacity gets allocated to the current window versus a later one.
 
-This is expected rolling-horizon DP behaviour. See
+One input differs even when everything else is identical: **the first step is only as long
+as what is left of the current price period**. The mid-period correction run has roughly
+half a step in front of it where the run at the period boundary had a whole one, so the two
+are not solving quite the same problem. Near a decision boundary that is enough to land on
+different sides of it — re-solving one real horizon with nothing varied but that first step
+moves the shadow price by about 0.02 EUR/kWh and the first action by a kilowatt.
+
+What it looks like from outside: the plan starts an action, drops it, and picks it up again
+a period later. Add the [commitment filter](control-modes.md#follow-schedule), which holds
+an action for the rest of its price period once started, and the battery keeps running for
+minutes on a plan the optimizer has already abandoned.
+
+This is expected rolling-horizon DP behaviour. If you would rather not see decisions this
+finely balanced acted on at all, raise **Minimum Price Spread** (default 0.05 EUR/kWh) —
+that is the "do not cycle for margins this thin" knob. See also
 [the learning period](how-it-works.md#learning-period-give-the-optimizer-time-to-calibrate).
 
 ### Why does it not re-optimize every few seconds?

@@ -65,6 +65,10 @@ def _representative_efficiency(curve: EfficiencyCurve, max_power_kw: float) -> f
     ) / len(_REPRESENTATIVE_LOAD_POINTS)
 
 
+# Mirrors DEFAULT_MIN_PRICE_SPREAD in const.py: the arbitrage hurdle the
+# integration applies when the config entry carries no explicit value.
+DEFAULT_MIN_PRICE_SPREAD = 0.05
+
 # Boundary-power fixed point: iterate until the efficiency stops moving.
 _BOUNDARY_SOLVER_MAX_ITER = 12
 _BOUNDARY_SOLVER_TOL = 1e-9
@@ -282,7 +286,12 @@ def extract_inputs(diag: dict) -> tuple:
         if usable_kwh > 0
         else degradation_cost_per_cycle
     )
-    min_price_spread = options.get("min_price_spread", 0.0)
+    # The key is absent from the config entry until the user changes it, so the
+    # fallback here has to be the integration's own default (DEFAULT_MIN_PRICE_SPREAD
+    # in const.py). Falling back to 0 reported a zero arbitrage hurdle — and with it
+    # wrong break-even prices — for every untouched configuration, which is most of
+    # them.
+    min_price_spread = options.get("min_price_spread", DEFAULT_MIN_PRICE_SPREAD)
     fixed_feed_in_price = options.get("fixed_feed_in_price", 0.04)
 
     # Use actual feed-in forecast from schedule if available (new diagnostics field)
@@ -1709,9 +1718,10 @@ def main():
         print(
             f"  {'Timestamp':>22}  {'Ctrl':>14}  {'DP mode':>11}  {'DP kW':>6}  "
             f"{'Eff.mode':>11}  {'Eff.kW':>6}  {'Setpt kW':>8}  "
-            f"{'SoC kWh':>7}  {'Price':>7}  {'Shadow':>7}  {'Commit':>6}  {'Reason'}"
+            f"{'SoC kWh':>7}  {'Price':>7}  {'Shadow':>7}  {'Surplus':>7}  "
+            f"{'Commit':>6}  {'Reason'}"
         )
-        print("-" * 120)
+        print("-" * 132)
         for entry in run_log:
             ts = entry.get("timestamp", "")[:19].replace("T", " ")
             locked = "YES" if entry.get("commitment_locked") else "no"
@@ -1724,6 +1734,14 @@ def main():
                 dev = " ← SoC/power limit"
             elif abs(eff_kw - dp_kw) > 0.05 and not entry.get("commitment_locked"):
                 dev = " ← mode override"
+            if entry.get("grid_charge_vetoed"):
+                # The hybrid arbitration refused to buy the planned charge:
+                # the shadow price does not cover the buy price, so only PV
+                # surplus (if any) is charged.
+                dev += " ← grid charge vetoed"
+            # PV surplus as the hybrid branches see it (battery - grid), absent
+            # in diagnostics from older versions.
+            surplus = entry.get("surplus_kw")
             print(
                 f"  {ts:>22}  {entry.get('control_mode', ''):>14}  "
                 f"{entry.get('dp_mode', ''):>11}  {dp_kw:>6.3f}  "
@@ -1731,9 +1749,10 @@ def main():
                 f"{entry.get('soc_kwh', 0):>7.3f}  "
                 f"{entry.get('current_price') or 0:>7.4f}  "
                 f"{entry.get('shadow_price_eur_kwh') or 0:>7.4f}  "
+                f"{'—' if surplus is None else f'{surplus:7.3f}':>7}  "
                 f"{locked:>6}  {reason}{dev}"
             )
-        print("-" * 120)
+        print("-" * 132)
 
     if setpoint_log:
         print()

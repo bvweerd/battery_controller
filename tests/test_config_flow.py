@@ -1205,6 +1205,59 @@ async def test_options_flow_preserves_number_entity_values(
     assert v4_config_entry.options["min_price_spread"] == 0.08
 
 
+async def test_options_flow_preserves_control_mode(
+    hass: HomeAssistant,
+    v4_config_entry: config_entries.ConfigEntry,
+) -> None:
+    """Saving any setting must not reset the control mode (issue #179).
+
+    The select entity writes control_mode straight into entry.options, but the
+    options form does not render it, so rebuilding options from the form alone
+    dropped it — and the coordinator then fell back to its default, turning
+    Hybrid+ into Hybrid on the next configuration change.
+    """
+    hass.config_entries.async_update_entry(
+        v4_config_entry,
+        options={"control_mode": "hybrid_plus", "manual_power_setpoint_w": -750.0},
+    )
+
+    result = await hass.config_entries.options.async_init(v4_config_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"sensors": {"price_sensor": "sensor.price"}},
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert v4_config_entry.options["control_mode"] == "hybrid_plus"
+    assert v4_config_entry.options["manual_power_setpoint_w"] == -750.0
+
+
+def test_entity_managed_options_covers_every_persisting_entity() -> None:
+    """Every option an entity persists must be listed as entity-managed.
+
+    The options flow preserves exactly the keys in ENTITY_MANAGED_OPTIONS, so an
+    entity whose key is missing has its value silently reset whenever a user
+    saves any setting. This walks the entity modules rather than repeating a
+    list, so adding an entity without updating the tuple fails here instead of
+    in someone's installation.
+    """
+    from custom_components.battery_controller import number as number_platform
+    from custom_components.battery_controller import select as select_platform
+    from custom_components.battery_controller.const import ENTITY_MANAGED_OPTIONS
+
+    persisted = {
+        obj._conf_key
+        for obj in vars(number_platform).values()
+        if isinstance(obj, type) and getattr(obj, "_conf_key", None)
+    }
+    # The select writes the control mode in async_select_option, using the key
+    # it imports — reading it from the module keeps this honest if that changes.
+    persisted.add(select_platform.CONF_CONTROL_MODE)
+
+    missing = persisted - set(ENTITY_MANAGED_OPTIONS)
+    assert not missing, f"not preserved by the options flow: {sorted(missing)}"
+
+
 async def test_options_flow_subentries_untouched(
     hass: HomeAssistant,
     v4_config_entry_with_battery: config_entries.ConfigEntry,

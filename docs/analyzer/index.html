@@ -152,6 +152,12 @@
     <div class="bg-white rounded-xl border border-gray-200 p-5">
       <h3 class="font-semibold text-gray-700 mb-3 text-sm">🔌 Current Values</h3>
       <div id="current-values" class="space-y-1"></div>
+      <div class="text-xs text-gray-400 mt-2">
+        Rows marked <em>forecast</em> are the model's value for the step now running,
+        not a meter reading — they are what the optimizer planned against. Rows marked
+        <em>measured</em> come from your sensors. A gap between the two is the forecast
+        error the controller is correcting for, not a contradiction.
+      </div>
     </div>
   </div>
 
@@ -183,6 +189,7 @@
       Charge profit = λ − p<sub>buy</sub>/√RTE − degradation per kWh.
       Discharge profit = p<sub>sell</sub>·√RTE − λ − degradation per kWh.
       Green = active action · Red rows = missed discharge opportunity (profit &gt; 0 but idle/charging).
+      Times are shown in your browser's timezone.
     </p>
     <div class="scrolltable sticky-header">
       <table class="w-full text-xs border-collapse">
@@ -237,6 +244,7 @@
             <th class="border border-gray-200 px-2 py-1">Price</th>
             <th class="border border-gray-200 px-2 py-1">Shadow λ</th>
             <th class="border border-gray-200 px-2 py-1">Grid kW</th>
+            <th class="border border-gray-200 px-2 py-1" title="PV surplus of the house (battery &minus; grid), independent of what the battery is doing with it. This is what the hybrid branches judge, not the raw meter reading.">Surplus kW</th>
             <th class="border border-gray-200 px-2 py-1">Commit</th>
           </tr>
         </thead>
@@ -474,6 +482,12 @@
 //       computeShadowPrice, computeTotalCost, runOptimizer, generateTips
 //       are defined in analyzer.js (loaded above).
 
+// Mirrors DEFAULT_MIN_PRICE_SPREAD in const.py: the arbitrage hurdle the
+// integration applies when the config entry carries no explicit value. The key
+// only appears in the entry once the user changes the setting, so every
+// diagnostics file from an untouched configuration needs this fallback.
+const DEFAULT_MIN_PRICE_SPREAD = 0.05;
+
 // ══════════════════════════════════════════════════════════════════
 // CHART HELPERS
 // ══════════════════════════════════════════════════════════════════
@@ -484,12 +498,27 @@ function mkChart(id, config) {
   charts[id] = new Chart(ctx, config);
 }
 
+// The schedule's step_start_times_iso are written in UTC by the integration,
+// while the run and setpoint logs are written in local time. Slicing the raw
+// string — as the schedule views used to — therefore showed UTC in one half of
+// the page and local time in the other, with no hint which was which (issue
+// #182). Everything the user reads is now formatted in their own timezone.
+function fmtStepTime(iso) {
+  if (!iso) return '';
+  const raw = String(iso);
+  if (!raw.includes('T')) return raw;
+  const d = new Date(raw);
+  // Unparsable: show it as it came rather than a mangled substring.
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 function timeLabels(n, startIso, stepH) {
   const labels = [];
   let d = startIso ? new Date(startIso) : new Date();
   d.setSeconds(0, 0);
   for (let i = 0; i < n; i++) {
-    labels.push(d.toLocaleTimeString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+    labels.push(fmtStepTime(d.toISOString()));
     d = new Date(d.getTime() + (stepH || 0.25) * 3600000);
   }
   return labels;
@@ -695,7 +724,10 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
   const usableKwh1024 = ((bc.max_soc_kwh || 0) - (bc.min_soc_kwh || 0)) || 1;
   const degradCyc1024 = opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh;
   const degrad = degradCyc1024 != null ? degradCyc1024 / (2 * usableKwh1024) : 0.04 / (2 * usableKwh1024);
-  const arbCost      = Math.max(0, opts.min_price_spread ?? 0) / 2;
+  // Absent from the config entry until the user changes it, so fall back to the
+  // integration's default (DEFAULT_MIN_PRICE_SPREAD). Falling back to 0 reported a
+  // zero arbitrage hurdle, and wrong break-evens with it, for untouched configs.
+  const arbCost      = Math.max(0, opts.min_price_spread ?? DEFAULT_MIN_PRICE_SPREAD) / 2;
   const decisionCost = degrad + arbCost;
   const breakeven    = (terminalPrice + decisionCost) / sqrtRte;
   const breakevenChg = (terminalPrice - decisionCost) * sqrtRte;
@@ -719,9 +751,7 @@ function renderProfitabilityTable(prices, feedInFc, pvFc, consumFc, powerKw, mod
     const mode = modes[t] || 'idle';
     const soc  = socKwh[t] || 0;
     const pw   = powerKw[t] || 0;
-    const timeStr = stepTimes && stepTimes[t]
-      ? (stepTimes[t].includes('T') ? stepTimes[t].slice(5,16).replace('T',' ') : stepTimes[t])
-      : `step ${t}`;
+    const timeStr = stepTimes && stepTimes[t] ? fmtStepTime(stepTimes[t]) : `step ${t}`;
 
     const isMissedDischarge = discProfit > 0 && mode !== 'discharging';
     let rowClass = '';
@@ -774,7 +804,13 @@ function renderDiagnostics(raw) {
   document.getElementById('s-soc-kwh').textContent = bs.soc_kwh !== undefined ? `${bs.soc_kwh.toFixed(3)} kWh` : '';
   const modeEl = document.getElementById('s-mode');
   modeEl.innerHTML = bs.mode ? badge(bs.mode, bs.mode) : '—';
-  document.getElementById('s-power').textContent   = bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '';
+  // Same snapshot as the Current Values panel, so it needs the same caveat: this
+  // is what the battery was doing when the data was last published, not
+  // necessarily now. Undated, it read as live and outlived the discharge it
+  // described (issue #174).
+  const powerTxt = bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '';
+  const takenAt = opt.updated_at ? new Date(opt.updated_at).toLocaleTimeString() : '';
+  document.getElementById('s-power').textContent   = takenAt ? `${powerTxt} · measured ${takenAt}` : powerTxt;
   const savings = opt.savings || 0;
   const base = opt.baseline_cost || 0;
   document.getElementById('s-savings').textContent    = `€ ${savings.toFixed(4)}`;
@@ -786,7 +822,7 @@ function renderDiagnostics(raw) {
     document.getElementById('s-shadow').textContent = '—';
   }
   document.getElementById('s-ctrl').textContent       = opt.control_mode || '—';
-  document.getElementById('s-ts').textContent         = opt.timestamp ? new Date(opt.timestamp).toLocaleString() : '';
+  document.getElementById('s-ts').textContent         = opt.timestamp ? `last run ${new Date(opt.timestamp).toLocaleString()}` : '';
 
   // ── Config cards
   document.getElementById('cfg-hw').innerHTML =
@@ -827,7 +863,7 @@ function renderDiagnostics(raw) {
     kv('Charge eff correction', chgEffCorrClass ? `<span class="${chgEffCorrClass}">${chgEffCorrStr}</span>` : chgEffCorrStr) +
     kv('Discharge eff correction', disEffCorrClass ? `<span class="${disEffCorrClass}">${disEffCorrStr}</span>` : disEffCorrStr) +
     kv('Degradation cost', (opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh) !== undefined ? `€ ${(opts.degradation_cost_per_cycle ?? opts.degradation_cost_per_kwh).toFixed(3)}/cycle` : '—') +
-    kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : '—') +
+    kv('Min price spread', opts.min_price_spread !== undefined ? `€ ${opts.min_price_spread}/kWh` : `€ ${DEFAULT_MIN_PRICE_SPREAD}/kWh (default)`) +
     kv('Fixed feed-in fallback', opts.fixed_feed_in_price !== undefined ? `€ ${opts.fixed_feed_in_price}/kWh` : '—');
 
   // ── Learned calibration (battery efficiency + per-PV-array forecast gain)
@@ -922,21 +958,43 @@ function renderDiagnostics(raw) {
     ${kv('Wind speed', fc.current_wind_speed_ms !== undefined ? `${fc.current_wind_speed_ms} m/s` : '—')}
     ${failureHtml}`;
 
-  document.getElementById('current-values').innerHTML =
-    kv('PV AC production', `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
-    kv('PV DC production', `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
-    kv('Consumption', `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +
-    kv('Net load', `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
-    kv('Battery SoC', `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
-    kv('Battery power', bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
-    kv('Battery mode', bs.mode ? badge(bs.mode, bs.mode) : '—') +
-    kv('Current feed-in price', opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
+  // Two kinds of value live in this panel and they are not interchangeable.
+  // The PV/consumption rows are the FORECAST for the step now running (the
+  // coordinator derives them as forecast[0], they are not meter readings); the
+  // battery, grid and price rows are measured. Labelling them apart stops a
+  // model/reality gap from reading as a contradiction in the panel itself.
+  const ca = opt.control_action || {};
+  const modelled = (label) => `${label} <span class="text-xs text-gray-400">(forecast)</span>`;
+  const measured = (label) => `${label} <span class="text-xs text-gray-400">(measured)</span>`;
+  // When this snapshot was captured. Every early return in the realtime loop
+  // leaves the previous values in place, so a reading minutes old looks exactly
+  // like a live one — which is how a battery reported as "discharging" outlived
+  // the discharge itself. The file records no download time, so its own age
+  // cannot be computed here; stating when the values were taken is what lets a
+  // reader compare them against what the system is doing now.
+  const asOf = opt.updated_at
+    ? `<div class="text-xs text-gray-400 mb-2">Snapshot taken ${new Date(opt.updated_at).toLocaleString()} — not necessarily the moment you downloaded the file</div>`
+    : '<div class="text-xs text-gray-400 mb-2">Snapshot time not recorded (diagnostics from an older version)</div>';
+  document.getElementById('current-values').innerHTML = asOf +
+    kv(modelled('PV AC production'), `${(fc.current_pv_kw||0).toFixed(3)} kW`) +
+    kv(modelled('PV DC production'), `${(fc.current_dc_pv_kw||0).toFixed(3)} kW`) +
+    kv(modelled('Consumption'), `${(fc.current_consumption_kw||0).toFixed(3)} kW`) +
+    kv(modelled('Net load'), `${(fc.current_net_load_kw||0).toFixed(3)} kW`) +
+    kv(measured('Battery SoC'), `${(bs.soc_percent||0).toFixed(1)}% (${(bs.soc_kwh||0).toFixed(3)} kWh)`) +
+    kv(measured('Battery power'), bs.power_kw !== undefined ? `${bs.power_kw>0?'+':''}${bs.power_kw.toFixed(3)} kW` : '—') +
+    kv(measured('Battery mode'), bs.mode ? badge(bs.mode, bs.mode) : '—') +
+    // The grid reading the zero-grid loop actually acted on, next to the
+    // setpoint it produced: without both, a setpoint that looks wrong cannot be
+    // told apart from a grid that had already moved.
+    kv(measured('Grid power'), ca.current_grid_w !== undefined ? `${ca.current_grid_w>0?'+':''}${(ca.current_grid_w/1000).toFixed(3)} kW ${ca.current_grid_w>0?'(import)':'(export)'}` : '—') +
+    kv('Battery setpoint', ca.target_power_w !== undefined ? `${ca.target_power_w>0?'+':''}${(ca.target_power_w/1000).toFixed(3)} kW ${ca.action_mode ? `(${ca.action_mode})` : ''}` : '—') +
+    kv(measured('Current feed-in price'), opt.current_feed_in_price !== undefined ? `€ ${opt.current_feed_in_price.toFixed(4)}/kWh` : '—') +
     // Per-array PV breakdown
     (() => {
       const arrays = fc.per_pv_array_forecasts || {};
       const keys = Object.keys(arrays);
       if (keys.length < 2) return '';
-      return keys.map(k => kv(`PV array ${k} now`, `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
+      return keys.map(k => kv(modelled(`PV array ${k} now`), `${((arrays[k]||[])[0]||0).toFixed(3)} kW`)).join('');
     })();
 
   // ── Charts
@@ -964,7 +1022,7 @@ function renderDiagnostics(raw) {
   const startIso = resolvedStepTimes[0] || wx.forecast_start_utc || opt.timestamp;
   const stepH    = resolvedStepDurs[0]  || 0.25;
   const labels   = resolvedStepTimes.length > 0
-    ? resolvedStepTimes.map(t => t.includes('T') ? t.slice(5,16).replace('T',' ') : t)
+    ? resolvedStepTimes.map(fmtStepTime)
     : timeLabels(prices.length, startIso, stepH);
 
   // Forecast-coordinator series come at fc.forecast_interval_minutes (15 min
@@ -1031,7 +1089,7 @@ function renderDiagnostics(raw) {
       pvFc.length ? pvFc : new Array(prices.length).fill(0),
       consumFc.length ? consumFc : new Array(prices.length).fill(0),
       resolvedStepDurs.length ? resolvedStepDurs : null,
-      degradPerKwhDp, opts.min_price_spread || 0.05,
+      degradPerKwhDp, opts.min_price_spread ?? DEFAULT_MIN_PRICE_SPREAD,
       null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
@@ -1061,6 +1119,13 @@ function renderDiagnostics(raw) {
       const price = entry.current_price != null ? `€ ${entry.current_price.toFixed(4)}` : '—';
       const shadow = entry.shadow_price_eur_kwh != null ? `€ ${entry.shadow_price_eur_kwh.toFixed(4)}` : '—';
       const grid = entry.grid_kw != null ? `${entry.grid_kw.toFixed(2)}` : '—';
+      const surplus = entry.surplus_kw != null ? `${entry.surplus_kw.toFixed(2)}` : '—';
+      // A vetoed grid charge is a deliberate override: the DP planned a charge
+      // whose import the shadow price does not justify (planned PV that did not
+      // arrive), so the surplus is what the battery may charge on.
+      const surplusCell = entry.grid_charge_vetoed
+        ? `<span class="badge badge-idle" title="Grid charging vetoed: shadow price below the cost of buying">${surplus}</span>`
+        : surplus;
       const locked = entry.commitment_locked
         ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`
         : '<span class="text-gray-300">—</span>';
@@ -1097,6 +1162,7 @@ function renderDiagnostics(raw) {
         <td class="border border-gray-200 px-2 py-1 text-right">${price}</td>
         <td class="border border-gray-200 px-2 py-1 text-right">${shadow}</td>
         <td class="border border-gray-200 px-2 py-1 text-right">${grid}</td>
+        <td class="border border-gray-200 px-2 py-1 text-right">${surplusCell}</td>
         <td class="border border-gray-200 px-2 py-1 text-center">${locked}</td>`;
       runTbody.appendChild(tr);
     });

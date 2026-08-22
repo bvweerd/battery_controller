@@ -22,7 +22,6 @@ from .const import (
     CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
-    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
     CONF_GRID_EXPORT_SENSORS,
@@ -38,7 +37,6 @@ from .const import (
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MAX_SOC_PERCENT,
-    CONF_MIN_PRICE_SPREAD,
     CONF_MIN_SOC_PERCENT,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
@@ -50,7 +48,6 @@ from .const import (
     CONF_PV_MEASURED_PRODUCTION_SENSOR,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_MAX_GRID_POWER_KW,
-    CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_ENABLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_CAPACITY_KWH,
@@ -72,6 +69,7 @@ from .const import (
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
+    ENTITY_MANAGED_OPTIONS,
     PV_SUBENTRY_TYPE,
 )
 from .efficiency_curve import parse_efficiency_curve
@@ -790,12 +788,11 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
             if not data.get(CONF_PRICE_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                # Preserve number entity values managed outside the config flow
-                for key in (
-                    CONF_DEGRADATION_COST_PER_CYCLE,
-                    CONF_MIN_PRICE_SPREAD,
-                    CONF_ZERO_GRID_DEADBAND_W,
-                ):
+                # Preserve the options that entities own (see
+                # ENTITY_MANAGED_OPTIONS). This form does not render them, so
+                # without this they would be dropped from the rebuilt options
+                # and silently revert to their defaults.
+                for key in ENTITY_MANAGED_OPTIONS:
                     if key in self.config_entry.options:
                         data.setdefault(key, self.config_entry.options[key])
                 return self.async_create_entry(title="", data=data)

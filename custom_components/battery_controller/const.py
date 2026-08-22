@@ -142,6 +142,21 @@ CONF_ZERO_GRID_RESPONSE_TIME_S = "zero_grid_response_time_s"
 # Configuration keys - Control mode (persisted)
 CONF_CONTROL_MODE = "control_mode"
 
+# Option keys owned by entities rather than by the options form. The number and
+# select entities write straight into entry.options so they take effect without
+# a reload; the options flow rebuilds entry.options from its own form fields and
+# would drop anything not listed here. Leaving a key out silently resets it to
+# its default the next time a user saves any setting — which is how Hybrid+ fell
+# back to Hybrid (issue #179). Any new entity that persists to options belongs
+# in this tuple; tests/test_config_flow.py checks that none is forgotten.
+ENTITY_MANAGED_OPTIONS = (
+    CONF_DEGRADATION_COST_PER_CYCLE,
+    CONF_MIN_PRICE_SPREAD,
+    CONF_ZERO_GRID_DEADBAND_W,
+    CONF_MANUAL_POWER_SETPOINT_W,
+    CONF_CONTROL_MODE,
+)
+
 # Configuration keys - Fixed prices (fallback)
 CONF_FIXED_FEED_IN_PRICE = "fixed_feed_in_price"
 
@@ -305,6 +320,16 @@ PRICE_CHANGE_REOPTIMIZE_ABS_EUR = (
 STALE_SENSOR_MULTIPLIER = (
     2.0  # x response_time_s — age limit before sensor is treated as stale
 )
+# Floor under that age limit, in seconds. At the default 10 s response time the
+# multiplier alone gives 20 s, which an on-change-only source (template, MQTT)
+# exceeds routinely whenever the grid is steady — flagging a perfectly accurate
+# reading as stale. Sixty seconds still catches a sensor that has genuinely
+# stopped, well inside the 15-minute optimizer cycle.
+STALE_SENSOR_MIN_LIMIT_S = 60.0
+# How much the summed grid reading must move between two real-time ticks to
+# count as proof that the sensors behind it are alive, in W. Small enough to
+# catch any real household change, large enough to ignore float noise.
+GRID_READING_ALIVE_W = 5.0
 WEATHER_STALE_AFTER_MINUTES = 120.0  # minutes — weather data older than this is treated as stale (4 missed updates)
 # Plausibility ceiling for a learned hourly consumption sample, in kW.
 # An hourly statistics "change" equals the average power over that hour, so a
