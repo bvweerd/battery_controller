@@ -525,6 +525,56 @@ def test_schedule_mid_period_run_future(hass, monkeypatch):
     assert registered[0] == period_start + timedelta(minutes=30)
 
 
+def test_price_change_rearms_mid_period_run_after_rollover(hass, monkeypatch):
+    """A rolled-over price array must still advance the period and re-arm.
+
+    The other half of issue #187: the period start is read from the same
+    forecast the optimizer plans on, so an array that still begins at midnight
+    pins it. Then no later state change looks like a new period, the mid-period
+    timer is never re-armed because its mid-point is already past, and the ~7
+    minute cadence collapses to the hourly base interval until HA restarts.
+    """
+    coordinator = _make_coordinator(hass)
+    coordinator._last_price = 0.30
+    coordinator._last_period_start = None
+
+    midnight = datetime(2026, 8, 24, 0, 0, 0, tzinfo=timezone.utc)
+    now = midnight + timedelta(hours=5, minutes=20)
+    entries = [
+        {"start": (midnight + timedelta(minutes=15 * i)).isoformat(), "value": 0.30}
+        for i in range(96)
+    ]
+    new_state = MagicMock()
+    new_state.state = "0.30"
+    new_state.attributes = {"net_prices_tomorrow": entries}
+    old_state = MagicMock()
+    old_state.state = "0.30"
+    old_state.attributes = {}
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+
+    for module in (
+        "custom_components.battery_controller.coordinator_optimization",
+        "custom_components.battery_controller.helpers",
+    ):
+        monkeypatch.setattr(f"{module}.dt_util.utcnow", lambda: now)
+        monkeypatch.setattr(f"{module}.dt_util.now", lambda: now)
+    monkeypatch.setattr(coordinator, "async_request_refresh", AsyncMock())
+
+    registered = []
+    with patch(
+        "custom_components.battery_controller.coordinator_optimization.async_track_point_in_time",
+        side_effect=lambda hass, cb, t: registered.append(t) or (lambda: None),
+    ):
+        coordinator._handle_price_change(event)
+
+    # The current period, not midnight — otherwise every later change looks
+    # like the same period and nothing fires again.
+    assert coordinator._last_period_start == midnight + timedelta(hours=5, minutes=15)
+    assert registered, "the mid-period timer must be re-armed"
+    assert registered[0] > now
+
+
 def test_schedule_mid_period_run_past(hass, monkeypatch):
     """Mid-period timer is skipped when mid-point is already past."""
     coordinator = _make_coordinator(hass)
