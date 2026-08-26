@@ -284,7 +284,42 @@ def extract_price_forecast_with_timestamps(
     scale = price_unit_scale(state, prices)
     if scale != 1.0:
         prices = [price * scale for price in prices]
-    return prices, start_times, interval
+    return _drop_elapsed_periods(prices, start_times, interval)
+
+
+def _drop_elapsed_periods(
+    prices: list[float],
+    start_times: list[datetime],
+    interval_minutes: int,
+) -> tuple[list[float], list[datetime], int]:
+    """Drop price periods that have already ended.
+
+    Each individual format skips elapsed entries as it reads them, but only for
+    the attribute it treats as "today" — an integration that has rolled over at
+    midnight, so that what it still publishes as tomorrow is now today, hands
+    back a forecast that starts hours in the past. So does a back-filled
+    timestamp, which is extrapolated from the first entry that carried one and
+    can therefore land before it.
+
+    Enforcing it once here, where every caller comes through, is what makes the
+    guarantee hold: the optimizer builds its whole step grid from these
+    timestamps, and a past entry silently moves the horizon into history —
+    planning against yesterday's prices, resampling PV and consumption onto
+    windows their forecasts do not cover (which flattens them to a single
+    repeated value), and pinning the period start so the boundary and
+    mid-period triggers stop firing altogether (issue #187).
+
+    Everything elapsed is dropped rather than only a leading run of it, since
+    no caller has any use for a period that is over. An empty result is left
+    empty: the coordinator already falls back to the historical price model,
+    which is the honest answer for a sensor whose every period has passed.
+    """
+    now = dt_util.utcnow()
+    period = timedelta(minutes=interval_minutes)
+    kept = [(price, ts) for price, ts in zip(prices, start_times) if ts + period > now]
+    if len(kept) == len(prices):
+        return prices, start_times, interval_minutes
+    return [price for price, _ in kept], [ts for _, ts in kept], interval_minutes
 
 
 def _extract_price_forecast_raw(
