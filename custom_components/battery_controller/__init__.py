@@ -8,7 +8,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -189,6 +189,27 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
 
+def _link_to_hub(info: DeviceInfo, hub: tuple[str, str]) -> DeviceInfo:
+    """Point a child device (battery, PV array) at the hub device it belongs to.
+
+    Home Assistant 2026.9 removed ``via_device`` from the ``DeviceInfo``
+    TypedDict in favour of ``via_device_id``, which takes the hub's
+    device-registry id rather than its identifier tuple — an id that does not
+    exist until the hub device has been registered. Runtime support for the old
+    key runs until HA 2027.8, and the 2026.2 line this integration still
+    supports has no ``via_device_id`` at all, so the link keeps being written as
+    ``via_device``, through a plain-dict view. That types clean against both
+    Home Assistant versions: a ``type: ignore`` would be an error itself
+    (unused, under strict mypy) on whichever of the two it is not run against.
+
+    Replace this with ``via_device_id`` — resolved from the device registry
+    once the hub device exists — when the supported floor reaches a Home
+    Assistant that has it, and before the key is removed in HA 2027.8.
+    """
+    cast(dict[str, Any], info)["via_device"] = hub
+    return info
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry by forwarding to sensor & number platforms."""
     _LOGGER.info("Setting up entry %s", entry.entry_id)
@@ -280,24 +301,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             or f"{subentry_data.get(CONF_CAPACITY_KWH, '?')} kWh"
         )
         capacity_kwh = subentry_data.get(CONF_CAPACITY_KWH, "?")
-        battery_devices[subentry_id] = DeviceInfo(
-            identifiers={(DOMAIN, subentry_id)},
-            name=title,
-            manufacturer="Custom",
-            model=f"{capacity_kwh} kWh Battery",
-            via_device=(DOMAIN, entry.entry_id),
+        battery_devices[subentry_id] = _link_to_hub(
+            DeviceInfo(
+                identifiers={(DOMAIN, subentry_id)},
+                name=title,
+                manufacturer="Custom",
+                model=f"{capacity_kwh} kWh Battery",
+            ),
+            (DOMAIN, entry.entry_id),
         )
 
     pv_devices: dict[str, DeviceInfo] = {}
     for s in entry.subentries.values():
         if s.subentry_type == PV_SUBENTRY_TYPE:
             kwp = s.data.get("peak_power_kwp", "?")
-            pv_devices[s.subentry_id] = DeviceInfo(
-                identifiers={(DOMAIN, s.subentry_id)},
-                name=s.title,
-                manufacturer="Custom",
-                model=f"{kwp} kWp PV Array",
-                via_device=(DOMAIN, entry.entry_id),
+            pv_devices[s.subentry_id] = _link_to_hub(
+                DeviceInfo(
+                    identifiers={(DOMAIN, s.subentry_id)},
+                    name=s.title,
+                    manufacturer="Custom",
+                    model=f"{kwp} kWp PV Array",
+                ),
+                (DOMAIN, entry.entry_id),
             )
 
     entry.runtime_data = BatteryControllerData(
