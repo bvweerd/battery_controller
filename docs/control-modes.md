@@ -134,6 +134,11 @@ arrive does not: the mode then charges on whatever surplus there is (zero-grid),
 at idle when there is none, and lets the DP charge later when the sun or a cheaper hour
 delivers. Both Hybrid and Hybrid+ apply this test.
 
+When the **feed-in price is negative**, exporting costs money and zero-grid would stall
+at ~0 W as soon as the solar inverter curtails, so the charge stays commanded — but it is
+capped at the surplus the house actually has. Import is still bought at the (positive)
+buy price, so it is only kept when the shadow price justifies it, exactly as above.
+
 Every one of these decisions reads the PV surplus as `battery − grid`, not as the meter
 reading. The meter includes what the battery itself is doing, so a charge that is
 importing looks like "no surplus" and a zero-grid capture holding the meter at 0 W looks

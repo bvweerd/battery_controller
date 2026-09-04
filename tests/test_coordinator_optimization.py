@@ -2498,6 +2498,7 @@ async def _run_hybrid_realtime_charge_tick(
     grid_w: float,
     battery_power_kw: float,
     shadow_price: float,
+    feed_in_price: float = 0.07,
 ) -> dict:
     """One realtime tick on a cached 3 kW charge plan, in hybrid mode.
 
@@ -2510,7 +2511,7 @@ async def _run_hybrid_realtime_charge_tick(
     coord._effective_mode = "charging"
     coord._controller_schedule_w = 1200.0
     coord._scheduled_charge_w = 1200.0
-    coord._last_feed_in_price = 0.07
+    coord._last_feed_in_price = feed_in_price
     coord._last_grid_price = 0.10
     coord._last_degradation_cost_per_kwh = 0.01
     coord.data = {
@@ -2588,6 +2589,43 @@ async def test_realtime_tick_keeps_charge_when_grid_charging_pays(hass, monkeypa
     """Planned grid arbitrage survives the realtime re-check at its committed power."""
     captured = await _run_hybrid_realtime_charge_tick(
         hass, monkeypatch, grid_w=500.0, battery_power_kw=1.2, shadow_price=0.30
+    )
+    assert captured["mode"] == "follow_schedule"
+    assert captured["dp_schedule_w"] == pytest.approx(1200.0)
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_caps_charge_at_surplus_on_negative_feed_in(
+    hass, monkeypatch
+):
+    """The cap reaches the controller within a tick, not at the next run.
+
+    Cached plan 1.2 kW, battery running it, 0.5 kW coming from the grid: the
+    surplus is 0.7 kW and the negative feed-in price does not make the import
+    worth it, so the setpoint must follow the surplus.
+    """
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass,
+        monkeypatch,
+        grid_w=500.0,
+        battery_power_kw=1.2,
+        shadow_price=0.06,
+        feed_in_price=-0.05,
+    )
+    assert captured["mode"] == "follow_schedule"
+    assert captured["dp_schedule_w"] == pytest.approx(700.0)
+
+
+@pytest.mark.asyncio
+async def test_realtime_tick_restores_plan_when_surplus_returns(hass, monkeypatch):
+    """Once PV covers the plan again, the tick returns to the committed power."""
+    captured = await _run_hybrid_realtime_charge_tick(
+        hass,
+        monkeypatch,
+        grid_w=-300.0,
+        battery_power_kw=1.2,
+        shadow_price=0.06,
+        feed_in_price=-0.05,
     )
     assert captured["mode"] == "follow_schedule"
     assert captured["dp_schedule_w"] == pytest.approx(1200.0)
@@ -3671,16 +3709,20 @@ async def _run_hybrid_charge_case(
     shadow_price: float = 0.15,
     battery_power_kw: float = 0.0,
     control_mode: str = MODE_HYBRID,
+    feed_in_price: float | None = None,
 ):
     """Run one hybrid optimization with a 3 kW planned charge and given grid power.
 
     ``shadow_price`` decides whether buying the uncovered part of the plan from
     the grid is worth it (the buy price is 0.10); ``battery_power_kw`` is what
     the battery is already doing, which the grid meter reading includes.
+    ``feed_in_price`` overrides the fixed feed-in price the run falls back to.
     """
 
     coord = _make_coordinator(hass)
     coord.control_mode = control_mode
+    if feed_in_price is not None:
+        coord.config[CONF_FIXED_FEED_IN_PRICE] = feed_in_price
     fixed_now = datetime(2026, 3, 21, 10, 0, 0, tzinfo=timezone.utc)
     coord.forecast_coordinator.data = {
         "pv_forecast_kw": [0.5, 0.5],
@@ -3752,6 +3794,9 @@ async def _run_hybrid_charge_case(
         return_value=fake_result,
     ):
         data = await coord._run_optimization()
+    # Handy for assertions on the state the run leaves behind for the realtime
+    # loop; not part of the coordinator's own result.
+    data["coordinator"] = coord
     return data
 
 
@@ -3799,6 +3844,75 @@ async def test_hybrid_charge_veto_captures_partial_surplus(hass, monkeypatch):
         hass, monkeypatch, grid_w=-900.0, shadow_price=0.06
     )
     assert data["optimal_mode"] == "zero_grid"
+
+
+@pytest.mark.asyncio
+async def test_negative_feed_in_charge_caps_at_surplus(hass, monkeypatch):
+    """A negative feed-in price is no licence to import (issue #174).
+
+    Exporting costs money, so the charge stays commanded rather than dropping
+    to zero_grid — but the 3 kW plan counted on PV that scattered cloud did not
+    deliver, and the 0.9 kW that did arrive is all it may run on. The buy price
+    is still positive, and at λ = 0.06 buying the missing 2.1 kW is a loss.
+    """
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=-900.0,
+        shadow_price=0.06,
+        feed_in_price=-0.05,
+    )
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_negative_feed_in_capped_charge_keeps_plan_to_return_to(
+    hass, monkeypatch
+):
+    """The capped power must not become the setpoint the realtime loop returns to.
+
+    Storing it would latch the trim: the tick caps its own result with this
+    value, so the charge could never climb back to the plan once the sun covers
+    it again.
+    """
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=-900.0,
+        shadow_price=0.06,
+        feed_in_price=-0.05,
+    )
+    assert data["optimal_power_kw"] == pytest.approx(0.9)
+    assert data["coordinator"]._scheduled_charge_w == pytest.approx(3000.0)
+
+
+@pytest.mark.asyncio
+async def test_negative_feed_in_full_surplus_follows_schedule(hass, monkeypatch):
+    """With the surplus covering the plan, the whole plan is charged from PV."""
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=-3200.0,
+        shadow_price=0.06,
+        feed_in_price=-0.05,
+    )
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_negative_feed_in_import_kept_when_grid_charging_pays(hass, monkeypatch):
+    """Planned grid arbitrage still runs at full power under a negative feed-in."""
+    data = await _run_hybrid_charge_case(
+        hass,
+        monkeypatch,
+        grid_w=-900.0,
+        shadow_price=0.30,
+        feed_in_price=-0.05,
+    )
+    assert data["optimal_mode"] == "charging"
+    assert data["optimal_power_kw"] == pytest.approx(3.0)
 
 
 @pytest.mark.asyncio
