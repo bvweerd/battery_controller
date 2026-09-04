@@ -11,6 +11,7 @@ from custom_components.battery_controller.__init__ import (
     BatteryControllerData,
     _async_handle_reset_charge_efficiency_calibration,
     _async_register_services,
+    _link_to_hub,
     _update_listener,
 )
 from custom_components.battery_controller.const import DOMAIN
@@ -478,3 +479,20 @@ async def test_async_unload_entry_coordinator_shutdown_exception():
     # The remaining two coordinators must still have been shut down
     entry.runtime_data.optimization_coordinator.async_shutdown.assert_called_once()
     entry.runtime_data.weather_coordinator.async_shutdown.assert_called_once()
+
+
+def test_link_to_hub_sets_via_device():
+    """Child devices keep pointing at the hub entry.
+
+    The key lives outside the DeviceInfo TypedDict as of HA 2026.9, so it is
+    written through a dict view — this is what proves the link is still there.
+    """
+    from homeassistant.helpers.device_registry import DeviceInfo
+
+    info = _link_to_hub(
+        DeviceInfo(identifiers={(DOMAIN, "child")}, name="Battery"),
+        (DOMAIN, "parent_entry"),
+    )
+
+    assert info["via_device"] == (DOMAIN, "parent_entry")
+    assert (DOMAIN, "child") in info["identifiers"]
