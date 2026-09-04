@@ -1122,9 +1122,11 @@ function renderDiagnostics(raw) {
       const surplus = entry.surplus_kw != null ? `${entry.surplus_kw.toFixed(2)}` : '—';
       // A vetoed grid charge is a deliberate override: the DP planned a charge
       // whose import the shadow price does not justify (planned PV that did not
-      // arrive), so the surplus is what the battery may charge on.
+      // arrive), so the surplus is what the battery may charge on — either by
+      // dropping the charge to zero-grid/idle, or by capping it at the surplus
+      // when a negative feed-in price keeps it commanded.
       const surplusCell = entry.grid_charge_vetoed
-        ? `<span class="badge badge-idle" title="Grid charging vetoed: shadow price below the cost of buying">${surplus}</span>`
+        ? `<span class="badge badge-idle" title="Grid charging vetoed: shadow price below the cost of buying; the charge is limited to this surplus">${surplus}</span>`
         : surplus;
       const locked = entry.commitment_locked
         ? `<span class="badge badge-charging">${entry.commitment_reason || 'locked'}</span>`

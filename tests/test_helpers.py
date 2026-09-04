@@ -670,6 +670,96 @@ class TestExtractPriceForecastWithTimestamps:
         state.attributes = attributes or {}
         return state
 
+    def test_rolled_over_tomorrow_attribute_drops_elapsed_periods(self):
+        """A "tomorrow" array that has become today must not reach the optimizer.
+
+        The reported failure (issue #187): after midnight the integration still
+        publishes the new day under net_prices_tomorrow, which the reader trusts
+        as future and takes whole. By 05:15 that put twenty-one elapsed periods
+        at the head of the forecast, and the optimizer builds its step grid from
+        these timestamps — so the horizon started five hours in the past.
+        """
+        midnight = datetime(2026, 8, 24, 0, 0, 0, tzinfo=timezone.utc)
+        entries = [
+            {
+                "start": (midnight + timedelta(minutes=15 * i)).isoformat(),
+                "value": 0.30 + i * 0.001,
+            }
+            for i in range(96)
+        ]
+        state = self._make_state(attributes={"net_prices_tomorrow": entries})
+
+        fake_now = midnight + timedelta(hours=5, minutes=15)
+        with (
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.utcnow",
+                return_value=fake_now,
+            ),
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.now",
+                return_value=fake_now,
+            ),
+        ):
+            prices, timestamps, interval = extract_price_forecast_with_timestamps(state)
+
+        assert timestamps, "the remaining future periods must survive"
+        assert len(prices) == len(timestamps)
+        # 05:15 falls exactly on a boundary, so that period is still current.
+        assert timestamps[0] == fake_now
+        assert all(ts + timedelta(minutes=interval) > fake_now for ts in timestamps)
+
+    def test_period_in_progress_is_kept(self):
+        """The period containing now is current, not elapsed — it must stay."""
+        start = datetime(2026, 8, 24, 5, 0, 0, tzinfo=timezone.utc)
+        entries = [
+            {
+                "start": (start + timedelta(minutes=15 * i)).isoformat(),
+                "value": 0.3,
+            }
+            for i in range(4)
+        ]
+        state = self._make_state(attributes={"net_prices_tomorrow": entries})
+
+        fake_now = start + timedelta(minutes=7)  # halfway through the first period
+        with (
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.utcnow",
+                return_value=fake_now,
+            ),
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.now",
+                return_value=fake_now,
+            ),
+        ):
+            _, timestamps, _ = extract_price_forecast_with_timestamps(state)
+
+        assert timestamps[0] == start
+
+    def test_forecast_entirely_in_the_past_returns_empty(self):
+        """Nothing usable left is reported as such, so the model fallback runs."""
+        start = datetime(2026, 8, 23, 0, 0, 0, tzinfo=timezone.utc)
+        entries = [
+            {"start": (start + timedelta(hours=i)).isoformat(), "value": 0.3}
+            for i in range(24)
+        ]
+        state = self._make_state(attributes={"net_prices_tomorrow": entries})
+
+        fake_now = start + timedelta(days=1, hours=6)
+        with (
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.utcnow",
+                return_value=fake_now,
+            ),
+            patch(
+                "custom_components.battery_controller.helpers.dt_util.now",
+                return_value=fake_now,
+            ),
+        ):
+            prices, timestamps, _ = extract_price_forecast_with_timestamps(state)
+
+        assert prices == []
+        assert timestamps == []
+
     def test_net_prices_today_with_timestamps(self):
         """net_prices_today with timestamps returns prices and timestamps."""
 

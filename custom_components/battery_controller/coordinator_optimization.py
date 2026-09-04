@@ -312,11 +312,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # again. See the stale-sensor handling in _handle_realtime_update.
         self._stale_escape_used: bool = False
 
-        # Whether the hybrid charge arbitration vetoed grid charging (the DP
-        # planned a charge whose price the shadow price does not justify — a
-        # planned PV charge the sun did not deliver). Lets the commitment filter
-        # release an active charge instead of suppressing the veto until the end
-        # of the price period.
+        # Whether the hybrid charge arbitration refused grid import for the
+        # planned charge (the DP planned a charge whose price the shadow price
+        # does not justify — a planned PV charge the sun did not deliver). Set
+        # both when the charge is dropped altogether and when it is only capped
+        # at the available surplus. Lets the commitment filter release an active
+        # charge instead of suppressing the veto until the end of the price
+        # period, and keeps the raw plan as the setpoint the realtime loop
+        # returns to once the surplus recovers.
         self._grid_charge_vetoed: bool = False
 
         # Charge setpoint the last run would apply when following the schedule,
@@ -1010,8 +1013,10 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 controller_schedule_w = (
                     # Return to the run's committed power, not the raw plan:
-                    # the commitment filter may have capped it.
-                    self._scheduled_charge_w
+                    # the commitment filter may have capped it. The arbitration
+                    # can cap it further (a charge trimmed to the surplus at a
+                    # negative feed-in price), so take whichever is lower.
+                    min(self._scheduled_charge_w, rt_power_kw * 1000)
                     if rt_effective_mode == ACTION_CHARGING
                     else rt_power_kw * 1000
                 )
@@ -2493,8 +2498,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         period (issue #174).
 
         In order:
-        1. Negative feed-in — exporting costs money, so follow the schedule;
-           curtailing PV would otherwise deadlock zero_grid at ~0 W.
+        1. Negative feed-in — exporting costs money, so keep a commanded charge
+           (curtailing PV would otherwise deadlock zero_grid at ~0 W), capped at
+           the surplus so it is still paid for by the sun and not by the grid.
         2. The surplus covers (most of) the plan — zero_grid tracks the real
            surplus instead of a fixed setpoint that imports whenever a cloud
            passes.
@@ -2517,12 +2523,43 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Returns:
             (effective_mode, effective_power_kw)
         """
+        plan_w = result.optimal_power_kw * 1000
         if current_feed_in < 0 and surplus_w > 0:
-            # Negative feed-in: exporting costs money. Use follow_schedule
-            # so curtailing PV (grid → ~0) doesn't cause a zero_grid
-            # deadlock that stops charging.
+            # Negative feed-in: exporting costs money. Keep a commanded charge
+            # rather than zero_grid, so curtailing PV (grid → ~0) doesn't cause
+            # a zero_grid deadlock that stops charging.
+            #
+            # The command is capped at the surplus the house actually has,
+            # though. A negative feed-in price says exporting is worthless; it
+            # says nothing about what importing costs, and the buy price is
+            # usually still positive. Following the plan verbatim on a surplus
+            # that is short of it therefore buys the difference — the case
+            # reported on issue #174: a planned PV charge held at full power
+            # through scattered cloud, importing at the buy price the whole
+            # time. Rule 3 is what decides that buying is justified, so it is
+            # consulted before the cap applies.
+            if surplus_w >= plan_w or self._should_charge_from_grid(
+                result.shadow_price_eur_kwh,
+                current_price,
+                result.optimal_power_kw,
+                degradation_cost_per_kwh,
+            ):
+                self._last_hybrid_charge_decision = ACTION_CHARGING
+                return ACTION_CHARGING, result.optimal_power_kw
+            # Charging exactly the surplus is self-correcting: the grid settles
+            # at ~0 W, and as PV recovers the surplus (battery - grid) grows
+            # with it, so the setpoint climbs back to the plan on its own.
+            self._grid_charge_vetoed = True
+            _LOGGER.debug(
+                "Hybrid charge capped to surplus at negative feed-in: "
+                "plan %.0f W, surplus %.0f W, price %.3f, shadow price %.3f",
+                plan_w,
+                surplus_w,
+                current_price,
+                result.shadow_price_eur_kwh,
+            )
             self._last_hybrid_charge_decision = ACTION_CHARGING
-            return ACTION_CHARGING, result.optimal_power_kw
+            return ACTION_CHARGING, surplus_w / 1000
 
         # Hysteresis: apply a ±5% band around the coverage threshold (same
         # pattern as the discharge decision) so PV surplus hovering near
@@ -2534,7 +2571,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 0.95
         else:
             coverage_threshold = _SURPLUS_COVERS_PLAN_FRACTION * 1.05
-        if surplus_w >= result.optimal_power_kw * 1000 * coverage_threshold:
+        if surplus_w >= plan_w * coverage_threshold:
             # PV surplus covers (most of) the planned charge: use zero_grid to
             # dynamically match the actual surplus instead of fixed-rate
             # charging. Fixed charging may import from grid when clouds pass.
@@ -2567,7 +2604,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         _LOGGER.debug(
             "Hybrid charge veto: plan %.0f W, surplus %.0f W, price %.3f, "
             "shadow price %.3f -> %s",
-            result.optimal_power_kw * 1000,
+            plan_w,
             surplus_w,
             current_price,
             result.shadow_price_eur_kwh,
@@ -3183,14 +3220,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Inputs the realtime loop needs to repeat the charge arbitration
         # between runs. _scheduled_charge_w is the setpoint to return to when
         # the surplus recovers: the committed power when this run followed the
-        # schedule, the raw plan when it downgraded to zero_grid or idle.
+        # schedule, the raw plan when it refused the import — whether it
+        # downgraded to zero_grid/idle or only trimmed the charge to the
+        # surplus. Storing the trimmed power there would latch it: the realtime
+        # loop caps its own result with it, so the charge could never climb back
+        # to the plan the sun can now cover.
         self._last_feed_in_price = self._current_feed_in_price(resampled_feed_in)
         self._last_grid_price = current_price
         self._last_degradation_cost_per_kwh = degradation_cost_per_kwh
         if result.optimal_mode == ACTION_CHARGING:
             self._scheduled_charge_w = (
                 controller_schedule_w
-                if effective_mode == ACTION_CHARGING
+                if effective_mode == ACTION_CHARGING and not self._grid_charge_vetoed
                 else result.optimal_power_kw * 1000
             )
         else:
