@@ -1617,9 +1617,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else:
                     self._warn_unit_once(power_sensor, unit, "treating value as kW")
 
-        # Use the previous run's setpoint for mode classification. The power
-        # sensor convention (positive = charge or positive = discharge) varies
-        # by inverter; the setpoint sign convention is always positive = charge.
+        # Use the previous run's setpoint for mode classification instead of
+        # the power sensor value: the sensor may briefly read 0 between samples,
+        # which would show "idle" while the battery is actively charging/discharging.
         setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
         return BatteryState(
             soc_kwh=soc_kwh,
@@ -1666,7 +1666,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if total_capacity_kwh > 0
             else 50.0
         )
-        # Use the combined setpoint for fleet-level mode (same sign convention).
+        # Use the combined setpoint for fleet-level mode (avoids sensor sampling gaps).
         total_setpoint_kw = (
             sum(self._last_battery_setpoints.values())
             if self._last_battery_setpoints
