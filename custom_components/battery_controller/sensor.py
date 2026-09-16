@@ -155,10 +155,13 @@ async def async_setup_entry(
     # the device has both None and the subentry ID in its associations, causing it to
     # appear in both "not under a sub-item" and the correct subentry in the HA UI.
     device_registry = dr.async_get(hass)
+    _get_dev = getattr(device_registry, "async_get_device_by_identifier", None)
     for sid in list(battery_devices) + list(pv_devices):
-        dev = device_registry.async_get_device_by_identifier(
-            (DOMAIN, sid), entry.entry_id
-        )
+        if _get_dev is not None:
+            dev = _get_dev((DOMAIN, sid), entry.entry_id)
+        else:
+            # Fallback for HA versions before async_get_device_by_identifier.
+            dev = device_registry.async_get_device(identifiers={(DOMAIN, sid)})
         if dev and None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,
@@ -309,7 +312,9 @@ class BatteryScheduleSensor(BatteryControllerSensor):
                 -v for v in self.coordinator.data.get("power_schedule_kw", [])[:cap]
             ],
             "mode_schedule": self.coordinator.data.get("mode_schedule", [])[:cap],
-            "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", [])[:cap],
+            "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", [])[
+                : cap + 1
+            ],
         }
         if result is not None:
             attrs["grid_price_forecast"] = result.price_forecast[:cap]

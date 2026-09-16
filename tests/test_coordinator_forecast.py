@@ -20,6 +20,7 @@ from custom_components.battery_controller.coordinator_forecast import (
     PV_CAL_NO_MEASURED_SENSOR,
     PV_CAL_SAMPLED,
     ForecastCoordinator,
+    _pv_elevation_band,
 )
 from custom_components.battery_controller.helpers import battery_energy_sensor_ids
 
@@ -1716,3 +1717,76 @@ async def test_pv_calibration_is_published_for_every_array(hass):
     assert report["pv2"]["last_result"] == PV_CAL_NO_MEASURED_SENSOR
     assert report["pv1"]["applied"] is False
     assert report["pv1"]["correction"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# PV elevation-band calibration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "elevation, expected_band",
+    [
+        (-5.0, 0),  # below horizon → band 0
+        (0.0, 0),  # exactly on boundary → band 0
+        (5.0, 0),  # within 0–10°
+        (10.0, 1),  # boundary 10° → band 1
+        (15.0, 1),
+        (20.0, 2),
+        (25.0, 2),
+        (30.0, 3),
+        (35.0, 3),
+        (40.0, 4),
+        (70.0, 4),  # well above top band
+    ],
+)
+def test_pv_elevation_band_mapping(elevation, expected_band):
+    """Verify that _pv_elevation_band maps elevations to correct bands."""
+    assert _pv_elevation_band(elevation) == expected_band
+
+
+@pytest.mark.asyncio
+async def test_pv_band_calibration_learns_per_band(hass):
+    """Band corrections are learned independently per elevation band."""
+    coord = _make_cal_coordinator(hass)
+    now = datetime(2026, 6, 1, 8, 0, tzinfo=timezone.utc)
+    step_h = 0.25
+    meter = 100.0
+
+    # Feed samples with elevation_deg in band 1 (10–20°), delivering 70% of forecast.
+    for i in range(10):
+        forecast_kw = 2.0
+        coord._pv_cal_snapshot = {
+            "taken_at": now,
+            "elevation_deg": 15.0,  # band 1
+            "forecast_kwh": {"pv1": forecast_kw * step_h},
+            "meter_kwh": {"pv1": meter},
+        }
+        meter += 0.7 * forecast_kw * step_h
+        hass.states.async_set(
+            "sensor.pv1_energy", f"{meter}", {"unit_of_measurement": "kWh"}
+        )
+        now += timedelta(minutes=15)
+        coord._update_pv_calibration(now)
+
+    corrections = coord.pv_band_corrections("pv1")
+    assert 1 in corrections
+    assert corrections[1] == pytest.approx(0.7, abs=0.01)
+    # Band 3 has no samples → should not appear
+    assert 3 not in corrections
+
+
+@pytest.mark.asyncio
+async def test_pv_gain_for_elevation_falls_back_to_global(hass):
+    """When a band has no correction, the global scalar is returned."""
+    coord = _make_cal_coordinator(hass)
+    # Set up a global correction without any band data.
+    coord._pv_cal_correction["pv1"] = 0.85
+    coord._pv_cal_band_corrections["pv1"] = {2: 0.75}  # only band 2
+
+    # Band 2 → use band correction
+    assert coord._pv_gain_for_elevation("pv1", 25.0) == pytest.approx(0.75)
+    # Band 0 → fall back to global
+    assert coord._pv_gain_for_elevation("pv1", 5.0) == pytest.approx(0.85)
+    # Unknown array → fall back to 1.0
+    assert coord._pv_gain_for_elevation("unknown", 25.0) == pytest.approx(1.0)

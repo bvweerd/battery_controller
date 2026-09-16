@@ -548,6 +548,38 @@ class TestBatteryScheduleSensor:
         attrs = self._sensor(data).extra_state_attributes
         assert attrs["power_schedule_kw"] == [-1.0, 0.5]
 
+    def test_schedule_truncated_at_max_steps(self):
+        """Attributes are capped at _MAX_SCHEDULE_STEPS (96)."""
+        n = 120  # more than 96
+        result = MagicMock()
+        result.price_forecast = list(range(n))
+        result.pv_forecast = list(range(n))
+        result.consumption_forecast = list(range(n))
+        data = {
+            "mode_schedule": ["idle"] * n,
+            "step_start_times_iso": [f"t{i}" for i in range(n)],
+            "step_durations_hours": [0.25] * n,
+            "power_schedule_kw": [0.0] * n,
+            "soc_schedule_kwh": [5.0] * (n + 1),  # N+1 entries
+            "optimization_result": result,
+            "price_forecast_model": list(range(n)),
+            "feed_in_price_forecast": [0.07] * n,
+            "feed_in_price_forecast_model": [0.07] * n,
+        }
+        attrs = self._sensor(data).extra_state_attributes
+        cap = BatteryScheduleSensor._MAX_SCHEDULE_STEPS
+        assert len(attrs["mode_schedule"]) == cap
+        assert len(attrs["step_start_times_iso"]) == cap
+        assert len(attrs["step_durations_hours"]) == cap
+        assert len(attrs["power_schedule_kw"]) == cap
+        assert len(attrs["soc_schedule_kwh"]) == cap + 1  # N+1 for SoC
+        assert len(attrs["grid_price_forecast"]) == cap
+        assert len(attrs["pv_forecast_kw"]) == cap
+        assert len(attrs["consumption_forecast_kw"]) == cap
+        assert len(attrs["grid_price_forecast_predicted"]) == cap
+        assert len(attrs["feed_in_price_forecast"]) == cap
+        assert len(attrs["feed_in_price_forecast_predicted"]) == cap
+
 
 # ---------------------------------------------------------------------------
 # BatterySoCSensor

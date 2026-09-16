@@ -815,6 +815,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
             calibration on the way through.
             """
             total = [0.0] * n
+            # Precompute elevation per timestep (same for all arrays).
+            elevations = [_solar_position(ts, lat, lon)[0] for ts in timestamps_utc]
             for sid, model, sensors in zip(subentry_ids, models, sensors_per_array):
                 series = model.forecast_from_radiation(
                     radiation_steps,
@@ -833,8 +835,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     raw_first_step_kw[sid] = series[0] if series else 0.0
                     kwp_by_sid[sid] = model.peak_power_kwp
                 corrected = []
-                for v, ts in zip(series, timestamps_utc):
-                    el, _ = _solar_position(ts, lat, lon)
+                for v, el in zip(series, elevations):
                     gain = self._pv_gain_for_elevation(sid, el)
                     corrected.append(v * gain if _pv_gain_is_significant(gain) else v)
                 series = corrected
