@@ -45,6 +45,7 @@ from .forecast_models import (
     PVForecastModel,
 )
 from .helpers import (
+    _solar_position,
     battery_energy_sensor_ids,
     extract_pv_forecast_series,
     usable_state,
@@ -64,6 +65,18 @@ PV_CAL_WINDOW_MISMATCH = "forecast_window_did_not_elapse"
 PV_CAL_CURTAILED = "pv_curtailed"
 PV_CAL_METER_RESET = "production_counter_reset"
 PV_CAL_IMPLAUSIBLE = "sample_dropped_implausible"
+
+
+_PV_CAL_ELEVATION_BANDS = (0, 10, 20, 30, 40)  # lower bounds in degrees
+_PV_CALIBRATION_BAND_MIN_SAMPLES = 5
+
+
+def _pv_elevation_band(elevation_deg: float) -> int:
+    """Map a solar elevation to one of the calibration bands (0-indexed, low→high)."""
+    for i, lower in enumerate(reversed(_PV_CAL_ELEVATION_BANDS)):
+        if elevation_deg >= lower:
+            return len(_PV_CAL_ELEVATION_BANDS) - 1 - i
+    return 0
 
 
 def _pv_gain_is_significant(correction: float) -> bool:
@@ -160,6 +173,9 @@ class ForecastCoordinator(DataUpdateCoordinator):
         self._pv_cal_samples: dict[str, deque[tuple[float, float]]] = {}
         self._pv_cal_correction: dict[str, float] = {}
         self._pv_cal_snapshot: dict[str, Any] = {}
+        # Per-band (solar elevation) calibration — each band learns its own ratio.
+        self._pv_cal_band_samples: dict[str, dict[int, deque[tuple[float, float]]]] = {}
+        self._pv_cal_band_corrections: dict[str, dict[int, float]] = {}
         # Per array: why the most recent run did or did not take a sample.
         self._pv_cal_last_result: dict[str, str] = {}
         self._pv_cal_store: storage.Store[dict[str, Any]] = storage.Store(
@@ -282,6 +298,22 @@ class ForecastCoordinator(DataUpdateCoordinator):
             return PV_CAL_NO_MEASURED_SENSOR
         return self._pv_cal_last_result.get(subentry_id, PV_CAL_OUTSIDE_LOAD_BAND)
 
+    def pv_band_corrections(self, subentry_id: str) -> dict[int, float]:
+        """Per-elevation-band correction factors for one PV array (band index → factor)."""
+        return self._pv_cal_band_corrections.get(subentry_id, {})
+
+    def _pv_gain_for_elevation(self, sid: str, elevation_deg: float) -> float:
+        """Return the correction gain for one array at the given solar elevation.
+
+        Uses the per-band correction when enough samples back that band;
+        falls back to the global scalar correction otherwise.
+        """
+        band = _pv_elevation_band(elevation_deg)
+        band_corr = self._pv_cal_band_corrections.get(sid, {}).get(band)
+        if band_corr is not None:
+            return band_corr
+        return self._pv_cal_correction.get(sid, 1.0)
+
     async def _async_load_pv_calibration(self) -> None:
         """Restore per-array PV corrections from storage.
 
@@ -303,6 +335,20 @@ class ForecastCoordinator(DataUpdateCoordinator):
             )
             if len(self._pv_cal_samples[sid]) >= PV_CALIBRATION_MIN_SAMPLES:
                 self._pv_cal_correction[sid] = float(entry.get("correction", 1.0))
+            band_samples_raw = entry.get("band_samples") or {}
+            band_corr_raw = entry.get("band_corrections") or {}
+            if band_samples_raw:
+                self._pv_cal_band_samples[sid] = {
+                    int(b): deque(
+                        ((float(m), float(f)) for m, f in s),
+                        maxlen=PV_CALIBRATION_WINDOW,
+                    )
+                    for b, s in band_samples_raw.items()
+                }
+            if band_corr_raw:
+                self._pv_cal_band_corrections[sid] = {
+                    int(b): float(c) for b, c in band_corr_raw.items()
+                }
         active = {
             sid: round(c, 3)
             for sid, c in self._pv_cal_correction.items()
@@ -319,6 +365,16 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     sid: {
                         "samples": [[m, f] for m, f in samples],
                         "correction": self._pv_cal_correction.get(sid, 1.0),
+                        "band_samples": {
+                            str(b): list(s)
+                            for b, s in self._pv_cal_band_samples.get(sid, {}).items()
+                        },
+                        "band_corrections": {
+                            str(b): c
+                            for b, c in self._pv_cal_band_corrections.get(
+                                sid, {}
+                            ).items()
+                        },
                     }
                     for sid, samples in self._pv_cal_samples.items()
                 }
@@ -336,6 +392,8 @@ class ForecastCoordinator(DataUpdateCoordinator):
             )
         self._pv_cal_samples.clear()
         self._pv_cal_correction.clear()
+        self._pv_cal_band_samples.clear()
+        self._pv_cal_band_corrections.clear()
         await self._async_save_pv_calibration()
 
     def _read_pv_meter_kwh(self, entity_id: str) -> float | None:
@@ -431,6 +489,24 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 sid, deque(maxlen=PV_CALIBRATION_WINDOW)
             )
             samples.append((measured_kwh, planned_kwh))
+            # Per-elevation-band calibration: same sample, split by sun angle.
+            elevation_deg = snapshot.get("elevation_deg")
+            if elevation_deg is not None:
+                band = _pv_elevation_band(elevation_deg)
+                band_samples = self._pv_cal_band_samples.setdefault(
+                    sid, {}
+                ).setdefault(band, deque(maxlen=PV_CALIBRATION_WINDOW))
+                band_samples.append((measured_kwh, planned_kwh))
+                b_m = sum(m for m, _ in band_samples)
+                b_f = sum(f for _, f in band_samples)
+                if (
+                    len(band_samples) >= _PV_CALIBRATION_BAND_MIN_SAMPLES
+                    and b_f > 0
+                ):
+                    self._pv_cal_band_corrections.setdefault(sid, {})[band] = max(
+                        PV_CALIBRATION_APPLY_MIN,
+                        min(PV_CALIBRATION_APPLY_MAX, b_m / b_f),
+                    )
             self._pv_cal_last_result[sid] = PV_CAL_SAMPLED
             total_measured = sum(m for m, _ in samples)
             total_planned = sum(f for _, f in samples)
@@ -500,8 +576,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
             forecast_kwh[sid] = raw_kw * step_hours
             meter_kwh[sid] = meter
         if forecast_kwh:
+            lat = self.hass.config.latitude
+            lon = self.hass.config.longitude
+            elevation_deg, _ = _solar_position(now_utc, lat, lon)
             self._pv_cal_snapshot = {
                 "taken_at": now_utc,
+                "elevation_deg": elevation_deg,
                 "forecast_kwh": forecast_kwh,
                 "meter_kwh": meter_kwh,
             }
@@ -755,9 +835,12 @@ class ForecastCoordinator(DataUpdateCoordinator):
                     # compounding on itself run after run.
                     raw_first_step_kw[sid] = series[0] if series else 0.0
                     kwp_by_sid[sid] = model.peak_power_kwp
-                gain = self.pv_correction(sid)
-                if _pv_gain_is_significant(gain):
-                    series = [v * gain for v in series]
+                corrected = []
+                for v, ts in zip(series, timestamps_utc):
+                    el, _ = _solar_position(ts, lat, lon)
+                    gain = self._pv_gain_for_elevation(sid, el)
+                    corrected.append(v * gain if _pv_gain_is_significant(gain) else v)
+                series = corrected
                 if sid:
                     per_pv_array_forecasts[sid] = [
                         round(max(0.0, v), 3) for v in series[:n]

@@ -156,7 +156,7 @@ async def async_setup_entry(
     # appear in both "not under a sub-item" and the correct subentry in the HA UI.
     device_registry = dr.async_get(hass)
     for sid in list(battery_devices) + list(pv_devices):
-        dev = device_registry.async_get_device(identifiers={(DOMAIN, sid)})
+        dev = device_registry.async_get_device_by_identifier((DOMAIN, sid))
         if dev and None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,
@@ -275,6 +275,10 @@ class BatteryScheduleSensor(BatteryControllerSensor):
     # recorder load. Users who need these can enable them explicitly.
     _attr_entity_registry_enabled_default = False
     _key = "schedule"
+    # Cap at 24 hours of schedule steps to keep attributes below the 16 KB
+    # recorder limit. The optimizer may plan further ahead, but the extra steps
+    # are not stored in the DB regardless, and the warning fires every run.
+    _MAX_SCHEDULE_STEPS = 96  # 24 h × 4 steps/h at 15-min resolution
 
     @property
     def native_value(self) -> str | None:
@@ -291,34 +295,37 @@ class BatteryScheduleSensor(BatteryControllerSensor):
         if self.coordinator.data is None:
             return {}
         result = self.coordinator.data.get("optimization_result")
+        cap = self._MAX_SCHEDULE_STEPS
         attrs = {
             "step_start_times_iso": self.coordinator.data.get(
                 "step_start_times_iso", []
-            ),
+            )[:cap],
             "step_durations_hours": self.coordinator.data.get(
                 "step_durations_hours", []
-            ),
+            )[:cap],
             "power_schedule_kw": [
-                -v for v in self.coordinator.data.get("power_schedule_kw", [])
+                -v for v in self.coordinator.data.get("power_schedule_kw", [])[:cap]
             ],
-            "mode_schedule": self.coordinator.data.get("mode_schedule", []),
-            "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", []),
+            "mode_schedule": self.coordinator.data.get("mode_schedule", [])[:cap],
+            "soc_schedule_kwh": self.coordinator.data.get("soc_schedule_kwh", [])[:cap],
         }
         if result is not None:
-            attrs["grid_price_forecast"] = result.price_forecast
-            attrs["pv_forecast_kw"] = result.pv_forecast
-            attrs["consumption_forecast_kw"] = result.consumption_forecast
+            attrs["grid_price_forecast"] = result.price_forecast[:cap]
+            attrs["pv_forecast_kw"] = result.pv_forecast[:cap]
+            attrs["consumption_forecast_kw"] = result.consumption_forecast[:cap]
         price_forecast_model = self.coordinator.data.get("price_forecast_model")
         if price_forecast_model is not None:
-            attrs["grid_price_forecast_predicted"] = price_forecast_model
+            attrs["grid_price_forecast_predicted"] = price_forecast_model[:cap]
         feed_in_price_forecast = self.coordinator.data.get("feed_in_price_forecast")
         if feed_in_price_forecast is not None:
-            attrs["feed_in_price_forecast"] = feed_in_price_forecast
+            attrs["feed_in_price_forecast"] = feed_in_price_forecast[:cap]
         feed_in_price_forecast_model = self.coordinator.data.get(
             "feed_in_price_forecast_model"
         )
         if feed_in_price_forecast_model is not None:
-            attrs["feed_in_price_forecast_predicted"] = feed_in_price_forecast_model
+            attrs["feed_in_price_forecast_predicted"] = feed_in_price_forecast_model[
+                :cap
+            ]
         return attrs
 
 
@@ -1102,4 +1109,10 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
             "samples": self.coordinator.pv_sample_count(self._subentry_id),
             "applied": self.coordinator.pv_correction_applied(self._subentry_id),
             "last_result": self.coordinator.pv_last_result(self._subentry_id),
+            "band_corrections": {
+                str(b): round(c, 4)
+                for b, c in self.coordinator.pv_band_corrections(
+                    self._subentry_id
+                ).items()
+            },
         }

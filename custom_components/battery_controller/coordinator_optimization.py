@@ -368,6 +368,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # (0.1 kWh on a 10 kWh pack).
         self._energy_counter_snapshot: dict[str, dict[str, float | None]] = {}
         self._soc_snapshot_kwh: dict[str, float] = {}
+        self._soc_snapshot_time: datetime | None = None
         # The setpoint each battery was given for the step being scored. The
         # dispatcher concentrates on one pack at a time, so this is what says
         # whose plan the measured throughput belongs to.
@@ -1570,6 +1571,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         subentry_data: dict[str, Any],
         battery_config: BatteryConfig,
         fallback_soc_percent: float = 50.0,
+        subentry_id: str = "",
     ) -> BatteryState:
         """Read state for one battery subentry."""
         soc_sensor = subentry_data.get(CONF_BATTERY_SOC_SENSOR)
@@ -1615,11 +1617,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 else:
                     self._warn_unit_once(power_sensor, unit, "treating value as kW")
 
+        # Use the previous run's setpoint for mode classification. The power
+        # sensor convention (positive = charge or positive = discharge) varies
+        # by inverter; the setpoint sign convention is always positive = charge.
+        setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
         return BatteryState(
             soc_kwh=soc_kwh,
             soc_percent=soc_percent,
             power_kw=power_kw,
-            mode=_mode_from_power_kw(power_kw),
+            mode=_mode_from_power_kw(setpoint_kw),
         )
 
     def get_current_battery_state(self) -> BatteryState:
@@ -1645,7 +1651,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             cached = self._per_battery_states.get(sid)
             fallback = cached.soc_percent if cached else 50.0
 
-            state = self._read_battery_state(subentry_data, battery_config, fallback)
+            state = self._read_battery_state(
+                subentry_data, battery_config, fallback, sid
+            )
             per_battery[sid] = state
             total_soc_kwh += state.soc_kwh
             total_power_kw += state.power_kw
@@ -1658,11 +1666,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             if total_capacity_kwh > 0
             else 50.0
         )
+        # Use the combined setpoint for fleet-level mode (same sign convention).
+        total_setpoint_kw = (
+            sum(self._last_battery_setpoints.values())
+            if self._last_battery_setpoints
+            else 0.0
+        )
         return BatteryState(
             soc_kwh=total_soc_kwh,
             soc_percent=combined_soc_percent,
             power_kw=total_power_kw,
-            mode=_mode_from_power_kw(total_power_kw),
+            mode=_mode_from_power_kw(total_setpoint_kw),
         )
 
     def _split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
@@ -3158,9 +3172,22 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # step, per battery. The setpoints themselves are snapshotted further
         # down, once the split is known.
         self._energy_counter_snapshot = energy_totals_now
-        self._soc_snapshot_kwh = {
-            sid: state.soc_kwh for sid, state in self._per_battery_states.items()
-        }
+        # Only refresh the SoC snapshot once per price step so the calibration
+        # can measure a full step's worth of energy delta. Running the optimizer
+        # more frequently than the price interval (e.g. a mid-period correction
+        # run) must not reset the baseline, or the measured delta covers less
+        # than one full step and the calibration under-reports throughput.
+        step_seconds = price_interval * 60
+        snapshot_age = (
+            (now_utc - self._soc_snapshot_time).total_seconds()
+            if self._soc_snapshot_time is not None
+            else float("inf")
+        )
+        if snapshot_age >= step_seconds * 0.9:
+            self._soc_snapshot_kwh = {
+                sid: state.soc_kwh for sid, state in self._per_battery_states.items()
+            }
+            self._soc_snapshot_time = now_utc
 
         # Get current grid power: prefer real sensor, fall back to estimate
         realtime_grid_w = self._get_realtime_grid_w()
