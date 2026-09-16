@@ -1531,6 +1531,7 @@ def test_read_battery_state_charging_mode_w_unit(hass):
     }
     hass.states.async_set("sensor.soc", "50")
     hass.states.async_set("sensor.power_w", "1500", {"unit_of_measurement": "W"})
+    coord._last_battery_setpoints[""] = 1.5  # simulate previous run setpoint
 
     state = coord._read_battery_state(subentry_data, cfg, 50.0)
     assert state.mode == "charging"
@@ -1556,6 +1557,7 @@ def test_read_battery_state_discharging_mode_kw_unit(hass):
     }
     hass.states.async_set("sensor.soc", "50")
     hass.states.async_set("sensor.power_kw", "-2.5", {"unit_of_measurement": "kW"})
+    coord._last_battery_setpoints[""] = -2.5  # simulate previous run setpoint
 
     state = coord._read_battery_state(subentry_data, cfg, 50.0)
     assert state.mode == "discharging"
@@ -1603,6 +1605,7 @@ def test_get_current_battery_state_charging_mode(hass):
     )
     coord._individual_battery_configs = [("bat1", cfg)]
     coord._battery_subentries = [("bat1", {CONF_BATTERY_SOC_SENSOR: "sensor.soc"})]
+    coord._last_battery_setpoints = {"bat1": 2.0}  # simulate previous run setpoint
 
     hass.states.async_set("sensor.soc", "50")
     # Simulate charging: positive power_kw (internal convention positive=charge)
@@ -1638,6 +1641,7 @@ def test_get_current_battery_state_discharging_mode(hass):
     )
     coord._individual_battery_configs = [("bat1", cfg)]
     coord._battery_subentries = [("bat1", {CONF_BATTERY_SOC_SENSOR: "sensor.soc"})]
+    coord._last_battery_setpoints = {"bat1": -2.0}  # simulate previous run setpoint
     hass.states.async_set("sensor.soc", "50")
 
     with patch.object(
@@ -5115,3 +5119,48 @@ def test_an_unmeasured_battery_does_not_dilute_a_measured_one(hass):
     measured.correction = 0.80
 
     assert coord.charge_eff_correction == pytest.approx(0.80)
+
+
+# ---------------------------------------------------------------------------
+# SoC snapshot timing — only refreshed once per price step
+# ---------------------------------------------------------------------------
+
+
+def test_soc_snapshot_not_refreshed_on_mid_step_rerun(hass):
+    """_soc_snapshot_kwh must not reset on a mid-step optimizer re-run."""
+    coord = _make_coordinator(hass)
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+    # Simulate first run: snapshot should be taken (age = inf).
+    coord._per_battery_states = {"bat1": MagicMock(soc_kwh=5.0)}
+    coord._soc_snapshot_time = None
+    price_interval = 15  # 15-minute steps
+
+    # First snapshot: age is inf → should refresh.
+    step_seconds = price_interval * 60
+    snapshot_age = float("inf")
+    assert snapshot_age >= step_seconds * 0.9
+    coord._soc_snapshot_kwh = {
+        sid: state.soc_kwh for sid, state in coord._per_battery_states.items()
+    }
+    coord._soc_snapshot_time = now
+
+    assert coord._soc_snapshot_kwh["bat1"] == 5.0
+
+    # Mid-step re-run at +7 minutes: should NOT refresh.
+    mid_step = now + timedelta(minutes=7)
+    coord._per_battery_states = {"bat1": MagicMock(soc_kwh=5.3)}
+    snapshot_age = (mid_step - coord._soc_snapshot_time).total_seconds()
+    assert snapshot_age < step_seconds * 0.9
+    # Snapshot must retain the original value.
+    assert coord._soc_snapshot_kwh["bat1"] == 5.0
+
+    # Full step later at +15 minutes: should refresh.
+    full_step = now + timedelta(minutes=15)
+    snapshot_age = (full_step - coord._soc_snapshot_time).total_seconds()
+    assert snapshot_age >= step_seconds * 0.9
+    coord._soc_snapshot_kwh = {
+        sid: state.soc_kwh for sid, state in coord._per_battery_states.items()
+    }
+    coord._soc_snapshot_time = full_step
+    assert coord._soc_snapshot_kwh["bat1"] == 5.3
