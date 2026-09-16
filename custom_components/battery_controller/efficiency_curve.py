@@ -106,8 +106,10 @@ def representative_efficiency(curve: EfficiencyCurve, max_power_kw: float) -> fl
     """Reduce a curve to one scalar describing its typical operating efficiency.
 
     Used wherever a single efficiency number is needed instead of the full
-    curve: the oscillation-filter arbitrage threshold, the hybrid-mode shadow
-    price comparisons and the derived ``round_trip_efficiency``.
+    curve: the oscillation-filter arbitrage threshold, the thresholds published
+    on the shadow price sensor and the derived ``round_trip_efficiency``.  The
+    hybrid-mode decisions interpolate the curve at the power under
+    consideration instead, and only fall back to this scalar at zero power.
 
     The value is the arithmetic mean of the curve sampled at 5 %..95 % of
     nominal power.  Sampling at zero power instead would pick the single worst

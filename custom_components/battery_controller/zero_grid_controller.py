@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .battery_model import BatteryConfig
-from .const import ACTION_CHARGING, ACTION_DISCHARGING, ACTION_IDLE
+from .const import (
+    ACTION_CHARGING,
+    ACTION_DISCHARGING,
+    ACTION_IDLE,
+    ZERO_GRID_LOOP_GAIN,
+)
 from .helpers import clamp
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,6 +29,9 @@ class ZeroGridControllerConfig:
 
     deadband_w: float = 50.0  # Hysteresis to prevent oscillation
     response_time_s: float = 5.0  # Update interval
+    # Integrator gain; must stay below 1. See ZERO_GRID_LOOP_GAIN in const.py
+    # for why, and for the settling times behind this value.
+    loop_gain: float = ZERO_GRID_LOOP_GAIN
 
 
 class ZeroGridController:
@@ -32,10 +40,15 @@ class ZeroGridController:
     This controller runs every second/minute to minimize grid exchange
     by using the battery as a buffer. Works together with the DP optimizer.
 
-    Modes:
+    Modes accepted by calculate_battery_setpoint:
     - zero_grid: Pure zero-grid operation, compensate grid fully
-    - follow_schedule: Follow DP optimization schedule exactly
-    - hybrid: Follow schedule but correct real-time deviations
+    - idle: Hold the battery still
+    - follow_schedule: Follow the DP optimization schedule exactly
+    - manual: Follow the user's setpoint, with SoC and power limits
+
+    The user-facing control modes (hybrid, hybrid+) are NOT among them: the
+    coordinator resolves those into one of the four above per step, before
+    calling this class.
     """
 
     def __init__(
@@ -47,7 +60,6 @@ class ZeroGridController:
         self.config = config
         self.battery_config = battery_config
         self._last_target_w = 0.0
-        self._setpoint_w = 0.0  # Target grid power (0 = zero-grid)
 
     @property
     def last_target_w(self) -> float:
@@ -62,7 +74,6 @@ class ZeroGridController:
         rejected.
         """
         self._last_target_w = value_w
-        self._setpoint_w = value_w
 
     def calculate_battery_setpoint(
         self,
@@ -77,23 +88,29 @@ class ZeroGridController:
             current_grid_w: Current grid power in W (positive = import)
             current_soc_kwh: Current battery SoC in kWh
             dp_schedule_w: What the DP optimizer recommends in W
-            mode: Control mode ('zero_grid', 'follow_schedule', 'hybrid')
+            mode: One of 'zero_grid', 'idle', 'follow_schedule', 'manual'.
+                The user-facing 'hybrid' / 'hybrid_plus' modes are resolved by
+                the coordinator before they reach this method.
 
         Returns:
             Desired battery power in W (positive = charge, negative = discharge)
         """
         if mode == "zero_grid":
             return self._calculate_zero_grid(current_grid_w, current_soc_kwh)
-        elif mode == "idle":
+        elif mode == ACTION_IDLE:
             return self._calculate_idle(current_grid_w, current_soc_kwh)
-        elif mode == "follow_schedule":
+        elif mode in ("follow_schedule", "manual"):
+            # Manual mode: follow the user-supplied setpoint, same SoC/power limits
             return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
-        elif mode == "manual":
-            # Manual mode: follow user-supplied setpoint with SoC/power limits
-            return self._calculate_follow_schedule(dp_schedule_w, current_soc_kwh)
-        else:
-            # Unknown mode - safe fallback: no battery action
-            return 0.0
+        # Unknown mode — safe fallback: no battery action. Warn rather than fail
+        # silently: an unresolved mode (e.g. 'hybrid' passed straight through)
+        # would otherwise look like a deliberate decision to hold the battery.
+        _LOGGER.warning(
+            "Unknown zero-grid controller mode '%s'; holding the battery at 0 W. "
+            "Expected one of: zero_grid, idle, follow_schedule, manual",
+            mode,
+        )
+        return 0.0
 
     def _calculate_zero_grid(
         self,
@@ -110,11 +127,16 @@ class ZeroGridController:
             Battery power setpoint in W
         """
         # Use previous target rather than actual battery power to avoid oscillation.
-        # Formula: target = last_target - grid_error
-        # This is equivalent to target = -(load - pv) = pv - load, but
-        # remains stable because it does not include the actual battery power
-        # reading (which would cancel itself out each cycle via the grid meter).
-        target_battery_w = self._last_target_w - current_grid_w
+        # Formula: target = last_target - gain x grid_error
+        # This converges on target = -(load - pv) = pv - load, but does not
+        # include the actual battery power reading (which would cancel itself
+        # out each cycle via the grid meter).
+        #
+        # The gain has to stay below 1: at exactly 1 the loop only settles when
+        # the meter already reflects the previous tick's setpoint, and one tick
+        # of delay turns it into a permanent six-tick oscillation. See
+        # ZERO_GRID_LOOP_GAIN.
+        target_battery_w = self._last_target_w - self.config.loop_gain * current_grid_w
 
         # Apply battery limits (SoC-dependent: e.g. BMS absorption near full/empty)
         target_battery_w = clamp(

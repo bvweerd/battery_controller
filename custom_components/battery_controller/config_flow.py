@@ -16,13 +16,17 @@ import voluptuous as vol
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
+    CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+    CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
     CONF_BATTERY_POWER_SENSOR,
     CONF_NAME,
     CONF_BATTERY_SOC_SENSOR,
     CONF_CAPACITY_KWH,
-    CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_ELECTRICITY_CONSUMPTION_SENSORS,
     CONF_ELECTRICITY_PRODUCTION_SENSORS,
+    CONF_GRID_EXPORT_SENSORS,
+    CONF_GRID_IMPORT_SENSORS,
+    CONF_GROSS_LOAD_SENSORS,
     CONF_FEED_IN_PRICE_SENSOR,
     CONF_PV_PRODUCTION_SENSORS,
     CONF_FIXED_FEED_IN_PRICE,
@@ -33,7 +37,6 @@ from .const import (
     CONF_MAX_CHARGE_POWER_KW,
     CONF_MAX_DISCHARGE_POWER_KW,
     CONF_MAX_SOC_PERCENT,
-    CONF_MIN_PRICE_SPREAD,
     CONF_MIN_SOC_PERCENT,
     CONF_POWER_CONSUMPTION_SENSORS,
     CONF_POWER_PRODUCTION_SENSORS,
@@ -42,9 +45,9 @@ from .const import (
     CONF_PRICE_SENSOR,
     CONF_PV_DC_EFFICIENCY,
     CONF_PV_FORECAST_SENSORS,
+    CONF_PV_MEASURED_PRODUCTION_SENSOR,
     CONF_ROUND_TRIP_EFFICIENCY,
     CONF_MAX_GRID_POWER_KW,
-    CONF_ZERO_GRID_DEADBAND_W,
     CONF_ZERO_GRID_ENABLED,
     CONF_ZERO_GRID_RESPONSE_TIME_S,
     DEFAULT_CAPACITY_KWH,
@@ -66,6 +69,7 @@ from .const import (
     DEFAULT_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_RESPONSE_TIME_S,
     DOMAIN,
+    ENTITY_MANAGED_OPTIONS,
     PV_SUBENTRY_TYPE,
 )
 from .efficiency_curve import parse_efficiency_curve
@@ -141,6 +145,18 @@ def _build_battery_subentry_schema(
                 CONF_BATTERY_POWER_SENSOR,
                 description={"suggested_value": d.get(CONF_BATTERY_POWER_SENSOR)},
             ): selector({"entity": {"domain": "sensor", "device_class": "power"}}),
+            vol.Optional(
+                CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_CHARGED_SENSOR)
+                },
+            ): selector({"entity": {"domain": "sensor", "device_class": "energy"}}),
+            vol.Optional(
+                CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
+                description={
+                    "suggested_value": d.get(CONF_BATTERY_ENERGY_DISCHARGED_SENSOR)
+                },
+            ): selector({"entity": {"domain": "sensor", "device_class": "energy"}}),
             vol.Optional(
                 CONF_PV_DC_EFFICIENCY,
                 default=d.get(CONF_PV_DC_EFFICIENCY, DEFAULT_PV_DC_EFFICIENCY),
@@ -225,8 +241,13 @@ def _validate_battery_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     )
-    if validated.get(CONF_BATTERY_POWER_SENSOR):
-        result[CONF_BATTERY_POWER_SENSOR] = validated[CONF_BATTERY_POWER_SENSOR]
+    for optional_sensor in (
+        CONF_BATTERY_POWER_SENSOR,
+        CONF_BATTERY_ENERGY_CHARGED_SENSOR,
+        CONF_BATTERY_ENERGY_DISCHARGED_SENSOR,
+    ):
+        if validated.get(optional_sensor):
+            result[optional_sensor] = validated[optional_sensor]
     # SoC-dependent derating: only store when explicitly provided
     for key, default in (
         (CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT, DEFAULT_HIGH_SOC_CHARGE_THRESHOLD_PCT),
@@ -285,6 +306,12 @@ def _build_pv_subentry_schema(defaults: dict[str, Any] | None = None) -> vol.Sch
                 CONF_PV_FORECAST_SENSORS,
                 description={"suggested_value": d.get(CONF_PV_FORECAST_SENSORS)},
             ): selector({"entity": {"domain": "sensor", "multiple": True}}),
+            vol.Optional(
+                CONF_PV_MEASURED_PRODUCTION_SENSOR,
+                description={
+                    "suggested_value": d.get(CONF_PV_MEASURED_PRODUCTION_SENSOR)
+                },
+            ): selector({"entity": {"domain": "sensor", "device_class": "energy"}}),
         }
     )
 
@@ -330,20 +357,20 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 description={"suggested_value": d.get(CONF_POWER_PRODUCTION_SENSORS)},
             ): power_selector,
             vol.Optional(
-                CONF_ELECTRICITY_CONSUMPTION_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS)
-                },
+                CONF_GRID_IMPORT_SENSORS,
+                description={"suggested_value": d.get(CONF_GRID_IMPORT_SENSORS)},
             ): energy_selector,
             vol.Optional(
-                CONF_ELECTRICITY_PRODUCTION_SENSORS,
-                description={
-                    "suggested_value": d.get(CONF_ELECTRICITY_PRODUCTION_SENSORS)
-                },
+                CONF_GRID_EXPORT_SENSORS,
+                description={"suggested_value": d.get(CONF_GRID_EXPORT_SENSORS)},
             ): energy_selector,
             vol.Optional(
                 CONF_PV_PRODUCTION_SENSORS,
                 description={"suggested_value": d.get(CONF_PV_PRODUCTION_SENSORS)},
+            ): energy_selector,
+            vol.Optional(
+                CONF_GROSS_LOAD_SENSORS,
+                description={"suggested_value": d.get(CONF_GROSS_LOAD_SENSORS)},
             ): energy_selector,
         }
     )
@@ -407,12 +434,9 @@ def _extract_main_data(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_FEED_IN_PRICE_SENSOR: _g(opt, CONF_FEED_IN_PRICE_SENSOR),
         CONF_POWER_CONSUMPTION_SENSORS: _g(opt, CONF_POWER_CONSUMPTION_SENSORS, []),
         CONF_POWER_PRODUCTION_SENSORS: _g(opt, CONF_POWER_PRODUCTION_SENSORS, []),
-        CONF_ELECTRICITY_CONSUMPTION_SENSORS: _g(
-            opt, CONF_ELECTRICITY_CONSUMPTION_SENSORS, []
-        ),
-        CONF_ELECTRICITY_PRODUCTION_SENSORS: _g(
-            opt, CONF_ELECTRICITY_PRODUCTION_SENSORS, []
-        ),
+        CONF_GRID_IMPORT_SENSORS: _g(opt, CONF_GRID_IMPORT_SENSORS, []),
+        CONF_GRID_EXPORT_SENSORS: _g(opt, CONF_GRID_EXPORT_SENSORS, []),
+        CONF_GROSS_LOAD_SENSORS: _g(opt, CONF_GROSS_LOAD_SENSORS, []),
         CONF_PV_PRODUCTION_SENSORS: _g(opt, CONF_PV_PRODUCTION_SENSORS, []),
         # Advanced
         CONF_FIXED_FEED_IN_PRICE: float(
@@ -552,6 +576,10 @@ def _validate_pv_subentry(user_input: dict[str, Any]) -> dict[str, Any]:
     )
     if validated.get(CONF_PV_FORECAST_SENSORS):
         result[CONF_PV_FORECAST_SENSORS] = list(validated[CONF_PV_FORECAST_SENSORS])
+    if validated.get(CONF_PV_MEASURED_PRODUCTION_SENSOR):
+        result[CONF_PV_MEASURED_PRODUCTION_SENSOR] = validated[
+            CONF_PV_MEASURED_PRODUCTION_SENSOR
+        ]
     return result
 
 
@@ -608,7 +636,7 @@ async def async_migrate_entry(
 
     from homeassistant.config_entries import ConfigSubentry
 
-    if config_entry.version > 5:
+    if config_entry.version > 6:
         # Downgrade from a future version is not supported.
         return False
 
@@ -658,13 +686,47 @@ async def async_migrate_entry(
             version=5,
         )
 
+    if config_entry.version == 5:
+        # v5 -> v6: household load became a derived quantity. The old
+        # electricity_consumption_sensors field meant grid import when
+        # electricity_production_sensors was also set, and gross household load
+        # when it was not — the same branch the consumption model took, so the
+        # split is exact rather than a guess.
+        legacy = (
+            CONF_ELECTRICITY_CONSUMPTION_SENSORS,
+            CONF_ELECTRICITY_PRODUCTION_SENSORS,
+        )
+        merged = {**config_entry.data, **config_entry.options}
+        old_consumption = merged.get(CONF_ELECTRICITY_CONSUMPTION_SENSORS) or []
+        old_production = merged.get(CONF_ELECTRICITY_PRODUCTION_SENSORS) or []
+
+        migrated: dict[str, Any] = {}
+        if old_production:
+            migrated[CONF_GRID_EXPORT_SENSORS] = old_production
+        if old_consumption:
+            if old_production:
+                migrated[CONF_GRID_IMPORT_SENSORS] = old_consumption
+            else:
+                migrated[CONF_GROSS_LOAD_SENSORS] = old_consumption
+
+        data = {k: v for k, v in config_entry.data.items() if k not in legacy}
+        options = {k: v for k, v in config_entry.options.items() if k not in legacy}
+        options.update(migrated)
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=data,
+            options=options,
+            version=6,
+        )
+
     return True
 
 
 class BatteryControllerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Battery Controller."""
 
-    VERSION = 5
+    VERSION = 6
 
     @classmethod
     @callback
@@ -726,12 +788,11 @@ class BatteryControllerOptionsFlowHandler(config_entries.OptionsFlow):
             if not data.get(CONF_PRICE_SENSOR):
                 errors["base"] = "missing_required"
             else:
-                # Preserve number entity values managed outside the config flow
-                for key in (
-                    CONF_DEGRADATION_COST_PER_CYCLE,
-                    CONF_MIN_PRICE_SPREAD,
-                    CONF_ZERO_GRID_DEADBAND_W,
-                ):
+                # Preserve the options that entities own (see
+                # ENTITY_MANAGED_OPTIONS). This form does not render them, so
+                # without this they would be dropped from the rebuilt options
+                # and silently revert to their defaults.
+                for key in ENTITY_MANAGED_OPTIONS:
                     if key in self.config_entry.options:
                         data.setdefault(key, self.config_entry.options[key])
                 return self.async_create_entry(title="", data=data)
