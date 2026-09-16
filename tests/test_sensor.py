@@ -1236,7 +1236,7 @@ async def test_sensor_async_setup_entry_device_migration():
     }  # has None association
 
     mock_dr = MagicMock()
-    mock_dr.async_get_device = MagicMock(return_value=mock_dev)
+    mock_dr.async_get_device_by_identifier = MagicMock(return_value=mock_dev)  # new API
     mock_dr.async_update_device = MagicMock()
 
     def _add(entities, **kwargs):
