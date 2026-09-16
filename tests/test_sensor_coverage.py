@@ -832,7 +832,7 @@ async def test_sensor_async_setup_entry_no_subentries():
 
     # Main entity list added
     assert len(added_calls) >= 1
-    assert len(added_calls[0][0]) == 16  # 16 main sensors
+    assert len(added_calls[0][0]) == 18  # 18 main sensors
 
 
 @pytest.mark.asyncio
@@ -883,7 +883,7 @@ async def test_sensor_async_setup_entry_with_battery_subentry():
         (c for c in added_calls if c[1].get("config_subentry_id") == "sub1"), None
     )
     assert battery_call is not None
-    assert len(battery_call[0]) == 2
+    assert len(battery_call[0]) == 4
 
 
 @pytest.mark.asyncio
@@ -931,7 +931,7 @@ async def test_sensor_async_setup_entry_with_pv_subentry():
         (c for c in added_calls if c[1].get("config_subentry_id") == "pv1"), None
     )
     assert pv_call is not None
-    assert len(pv_call[0]) == 1
+    assert len(pv_call[0]) == 2
 
 
 @pytest.mark.asyncio
@@ -970,7 +970,7 @@ async def test_sensor_async_setup_entry_device_migration():
     }  # has None association
 
     mock_dr = MagicMock()
-    mock_dr.async_get_device = MagicMock(return_value=mock_dev)
+    mock_dr.async_get_device_by_identifier = MagicMock(return_value=mock_dev)
     mock_dr.async_update_device = MagicMock()
 
     def _add(entities, **kwargs):
