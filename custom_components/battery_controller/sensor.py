@@ -156,7 +156,7 @@ async def async_setup_entry(
     # appear in both "not under a sub-item" and the correct subentry in the HA UI.
     device_registry = dr.async_get(hass)
     for sid in list(battery_devices) + list(pv_devices):
-        dev = device_registry.async_get_device_by_identifier((DOMAIN, sid))
+        dev = device_registry.async_get_device_by_identifier((DOMAIN, sid), entry.entry_id)
         if dev and None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,

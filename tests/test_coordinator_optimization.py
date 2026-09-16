@@ -1531,6 +1531,7 @@ def test_read_battery_state_charging_mode_w_unit(hass):
     }
     hass.states.async_set("sensor.soc", "50")
     hass.states.async_set("sensor.power_w", "1500", {"unit_of_measurement": "W"})
+    coord._last_battery_setpoints[""] = 1.5  # simulate previous run setpoint
 
     state = coord._read_battery_state(subentry_data, cfg, 50.0)
     assert state.mode == "charging"
@@ -1556,6 +1557,7 @@ def test_read_battery_state_discharging_mode_kw_unit(hass):
     }
     hass.states.async_set("sensor.soc", "50")
     hass.states.async_set("sensor.power_kw", "-2.5", {"unit_of_measurement": "kW"})
+    coord._last_battery_setpoints[""] = -2.5  # simulate previous run setpoint
 
     state = coord._read_battery_state(subentry_data, cfg, 50.0)
     assert state.mode == "discharging"
@@ -1603,6 +1605,7 @@ def test_get_current_battery_state_charging_mode(hass):
     )
     coord._individual_battery_configs = [("bat1", cfg)]
     coord._battery_subentries = [("bat1", {CONF_BATTERY_SOC_SENSOR: "sensor.soc"})]
+    coord._last_battery_setpoints = {"bat1": 2.0}  # simulate previous run setpoint
 
     hass.states.async_set("sensor.soc", "50")
     # Simulate charging: positive power_kw (internal convention positive=charge)
@@ -1638,6 +1641,7 @@ def test_get_current_battery_state_discharging_mode(hass):
     )
     coord._individual_battery_configs = [("bat1", cfg)]
     coord._battery_subentries = [("bat1", {CONF_BATTERY_SOC_SENSOR: "sensor.soc"})]
+    coord._last_battery_setpoints = {"bat1": -2.0}  # simulate previous run setpoint
     hass.states.async_set("sensor.soc", "50")
 
     with patch.object(

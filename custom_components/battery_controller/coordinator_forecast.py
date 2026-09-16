@@ -493,16 +493,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
             elevation_deg = snapshot.get("elevation_deg")
             if elevation_deg is not None:
                 band = _pv_elevation_band(elevation_deg)
-                band_samples = self._pv_cal_band_samples.setdefault(
-                    sid, {}
-                ).setdefault(band, deque(maxlen=PV_CALIBRATION_WINDOW))
+                band_samples = self._pv_cal_band_samples.setdefault(sid, {}).setdefault(
+                    band, deque(maxlen=PV_CALIBRATION_WINDOW)
+                )
                 band_samples.append((measured_kwh, planned_kwh))
                 b_m = sum(m for m, _ in band_samples)
                 b_f = sum(f for _, f in band_samples)
-                if (
-                    len(band_samples) >= _PV_CALIBRATION_BAND_MIN_SAMPLES
-                    and b_f > 0
-                ):
+                if len(band_samples) >= _PV_CALIBRATION_BAND_MIN_SAMPLES and b_f > 0:
                     self._pv_cal_band_corrections.setdefault(sid, {})[band] = max(
                         PV_CALIBRATION_APPLY_MIN,
                         min(PV_CALIBRATION_APPLY_MAX, b_m / b_f),
