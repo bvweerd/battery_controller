@@ -29,8 +29,8 @@ jobs:
           ascending: false
 
           stale-issue-message: |
-            This issue has been inactive for 60 days and is marked as **stale**.
-            If there is no new activity within 14 days it will be closed automatically.
+            This issue has been inactive for 14 days and is marked as **stale**.
+            If there is no new activity within 7 days it will be closed automatically.
             Please add an update or label with `never-stale` to keep it open.
           close-issue-message: |
             This issue was automatically closed due to inactivity.
@@ -39,8 +39,8 @@ jobs:
           days-before-pr-stale: 14
           days-before-pr-close: 7
           stale-pr-message: |
-            This pull request has been inactive for 30 days and is marked as **stale**.
-            Please respond or push new commits within 10 days to prevent closing.
+            This pull request has been inactive for 14 days and is marked as **stale**.
+            Please respond or push new commits within 7 days to prevent closing.
             Label with `never-stale` to exclude.
           close-pr-message: |
             This pull request was automatically closed due to inactivity.
