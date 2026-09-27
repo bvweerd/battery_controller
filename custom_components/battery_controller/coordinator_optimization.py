@@ -30,6 +30,7 @@ from .efficiency_calibration import (
     CALIBRATION_NO_SOC_SOURCE,
     CALIBRATION_NOT_DISPATCHED,
     CALIBRATION_PLAN_NOT_EXECUTED,
+    CALIBRATION_SAMPLED,
     CALIBRATION_STEP_INCOMPLETE,
     CHARGE_CALIBRATION,
     DISCHARGE_CALIBRATION,
@@ -2218,7 +2219,12 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
         actual_delta = max(0.0, measured)
 
-        if calibration.record(planned_delta, actual_delta, "SoC delta"):
+        moved = calibration.record(planned_delta, actual_delta, "SoC delta")
+        # Always persist after a sample, not only when the correction moves.
+        # When the correction is at the cap (1.05) every new sample is added to
+        # the rolling window but never triggers a save, so the file on disk stays
+        # in the old raw_ratio format and is re-migrated on every restart.
+        if moved or calibration.last_result == CALIBRATION_SAMPLED:
             self.hass.async_create_task(calibration.async_save())
 
     def _update_charge_eff_calibration(
