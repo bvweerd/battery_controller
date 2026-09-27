@@ -366,15 +366,45 @@ Venus E's 7 W — seventy times less — yet its operating overhead is only 1.8�
 
 | System | Provenance |
 | --- | --- |
-| Marstek Venus A | **User-measured**, two independent owners: a wall-meter test at 100/200 W plus ~300 kWh of counter data at 1200 W — the best-constrained curve here |
+| Marstek Venus A (community) | **User-measured**, two independent owners: a wall-meter test at 100/200 W plus ~300 kWh of counter data at 1200 W — the best-constrained curve here |
+| Marstek Venus A (production) | Community curve ×1.0492, derived from HA recorder data on two Venus A units (SoC calibration + dispatch fidelity, Sept 2026) |
 | Marstek Venus E | **User-measured** charge curve; discharge scaled to the measured full-power RTE |
 | Zendure, HomeWizard | RTE anchor is measured; the *shape* is borrowed from the Marstek fit |
 
 **Marstek Venus A** — 1500 W bidirectional, overhead 30 W, plateau 500–800 W
+
+Two variants are available. The **community curve** is the baseline from forum
+and review measurements. The **production-measured curve** is the community
+curve scaled by the correction factor measured from HA recorder data on two
+Venus A units over several weeks of normal operation (×1.0492, see
+`efficiency-analysis-from-db.md` for methodology). Both units consistently
+showed efficiency factors > 1.0 (battery beats the community curve), so the
+production curve is the better prior for these specific units.
+
+*Community curve (baseline):*
 ```
 charge:    0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878
 discharge: 0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, 0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878
 ```
+
+*Production-measured curve (×1.0492, two units, Sept 2026):*
+```
+charge:    0.05:0.654, 0.1:0.802, 0.2:0.899, 0.3:0.934, 0.5:0.954, 0.8:0.953, 1.2:0.936, 1.5:0.921
+discharge: 0.05:0.654, 0.1:0.802, 0.2:0.899, 0.3:0.934, 0.5:0.954, 0.8:0.953, 1.2:0.936, 1.5:0.921
+```
+
+| AC power | RTE (community) | RTE (production-measured) |
+|---:|---:|---:|
+| 100 W | 58 % | 64 % |
+| 300 W | 79 % | 87 % |
+| 500 W | 83 % | 91 % |
+| 800 W | 82 % | 91 % |
+| 1200 W | 80 % | 88 % |
+| 1500 W | 77 % | 85 % |
+
+If the integration's `discharge_efficiency_correction` sensor shows
+`applied: False` for your Venus A units, use the production curve — the
+battery is already performing at that level.
 Set both power limits to 1.5 kW. The derived `round_trip_efficiency` the integration
 reports from this curve is 0.765 — the mean over 5–95 % of rated power, which sits below
 the 0.83 plateau because it includes the poor bottom end.
