@@ -151,5 +151,5 @@ The dashed arrow is the part you build yourself — see
 
 ## License
 
-Battery Controller is released under the Apache License 2.0. See
-[LICENSE](https://github.com/bvweerd/battery_controller/blob/dev/LICENSE) for details.
+Battery Controller is released under the GNU General Public License v3.0. See
+[LICENSE](https://github.com/bvweerd/battery_controller/blob/main/LICENSE) for details.
