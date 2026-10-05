@@ -1972,20 +1972,21 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         """Return whether the previous run's planned first step was commanded as-is.
 
         The DP plan is not always what gets executed: hybrid mode can resolve a
-        planned charge/discharge to zero_grid, the commitment filter can lock a
-        different power, and zero_grid/manual control modes ignore the schedule
-        entirely. Efficiency calibration must only sample steps where the plan
-        was sent to the controller unchanged — otherwise the actual SoC delta
-        reflects the mode resolution, not battery efficiency.
+        planned charge/discharge to zero_grid, and zero_grid/manual control modes
+        ignore the schedule entirely. Efficiency calibration must only sample steps
+        where the correct direction was sent to the controller — otherwise the actual
+        SoC delta reflects the mode resolution, not battery efficiency.
+
+        The commitment filter may lock a different power level within the same price
+        period, but the direction is unchanged and the per-battery planned_delta
+        already uses the committed setpoint from _last_battery_setpoints, so a power
+        mismatch here does not invalidate the measurement.
         """
         if self._effective_mode != planned_action:
             return False
-        if self._last_result is None or not self._last_result.power_schedule_kw:
+        if self._last_result is None:
             return False
-        planned_kw = self._last_result.power_schedule_kw[0]
-        executed_kw = self._controller_schedule_w / 1000
-        tolerance_kw = max(0.05, 0.1 * abs(planned_kw))
-        return abs(executed_kw - planned_kw) <= tolerance_kw
+        return True
 
     def _fleet_calibration_block(self, action: str) -> str | None:
         """Why no battery can be sampled for ``action`` this run, if any.
