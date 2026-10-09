@@ -1260,8 +1260,10 @@ async def test_sensor_async_setup_entry_device_migration():
 
     hass = MagicMock()
 
-    # Mock device registry returning a device with None subentry association
-    mock_dev = MagicMock()
+    # Mock device registry returning a device with None subentry association.
+    # The spec leaves out config_entry_id: this is the multi-entry device model of
+    # Home Assistant before 2026.10.
+    mock_dev = MagicMock(spec=["id", "config_entries_subentries"])
     mock_dev.id = "dev_id_1"
     mock_dev.config_entries_subentries = {
         entry.entry_id: {None}
@@ -1279,6 +1281,50 @@ async def test_sensor_async_setup_entry_device_migration():
 
     # Should call async_update_device to remove the None association
     mock_dr.async_update_device.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_subentry_id", "expect_move"),
+    [(None, True), ("sub1", False)],
+)
+async def test_sensor_async_setup_entry_device_migration_single_owner(
+    config_subentry_id, expect_move
+):
+    """On the single config entry device model, a main-entry device is moved."""
+
+    opt_coord = _make_opt_coord()
+    forecast_coord = _make_forecast_coord()
+
+    runtime_data = MagicMock()
+    runtime_data.optimization_coordinator = opt_coord
+    runtime_data.forecast_coordinator = forecast_coord
+    runtime_data.device = DeviceInfo(identifiers={(DOMAIN, "test")})
+    runtime_data.battery_devices = {"sub1": DeviceInfo(identifiers={(DOMAIN, "sub1")})}
+    runtime_data.pv_devices = {}
+
+    entry = _make_entry()
+    entry.runtime_data = runtime_data
+    entry.subentries = {}
+
+    mock_dev = MagicMock(spec=["id", "config_entry_id", "config_subentry_id"])
+    mock_dev.id = "dev_id_1"
+    mock_dev.config_entry_id = entry.entry_id
+    mock_dev.config_subentry_id = config_subentry_id
+
+    mock_dr = MagicMock()
+    mock_dr.async_get_device_by_identifier = MagicMock(return_value=mock_dev)
+    mock_dr.async_update_device = MagicMock()
+
+    with patch.object(dr, "async_get", return_value=mock_dr):
+        await async_setup_entry(MagicMock(), entry, lambda entities, **kwargs: None)
+
+    if expect_move:
+        mock_dr.async_update_device.assert_called_once_with(
+            "dev_id_1", new_config_subentry_id="sub1"
+        )
+    else:
+        mock_dr.async_update_device.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

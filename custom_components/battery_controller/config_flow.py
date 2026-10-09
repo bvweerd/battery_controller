@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import aiohttp
@@ -12,7 +12,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import selector
-import voluptuous as vol
 
 from .const import (
     BATTERY_SUBENTRY_TYPE,
@@ -73,6 +72,14 @@ from .const import (
     PV_SUBENTRY_TYPE,
 )
 from .efficiency_curve import parse_efficiency_curve
+
+if TYPE_CHECKING:
+    # Home Assistant 2026.10+ validates with probatio and aliases voluptuous to it
+    # at runtime, so Core's signatures expect probatio types. Older releases still
+    # ship voluptuous, which is why the runtime import stays as it is.
+    import probatio as vol
+else:
+    import voluptuous as vol
 
 
 def _build_battery_subentry_schema(
