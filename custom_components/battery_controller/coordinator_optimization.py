@@ -2015,16 +2015,40 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     def _previous_step_hours(self) -> float:
         """Length of the step being scored, in hours.
 
-        Falls back to the coordinator's own interval when the plan carried no
-        timing metadata — the same fallback _previous_step_complete makes.
+        Normally returns the first-step duration from the last published run.
+        When a mid-period correction run has overwritten self.data with a shorter
+        partial step, the SoC snapshot age gives the correct measurement window
+        instead: the snapshot is taken once per price step, so the elapsed time
+        since the last snapshot equals the full step that the measurement covers.
+
+        Example: optimizer runs every 7.5 min within a 15-min price period.
+        At t=7.5 the mid-period run writes step_durations[0]=0.125 h. At t=15
+        _previous_step_complete fires and calibration runs. data_hours=0.125 h,
+        but the snapshot is 15 min old (0.25 h). Using 0.125 h would halve the
+        planned_delta and push it below the step_too_small_to_measure threshold
+        even though the actual measurement window is a full price step.
+
+        The snapshot age is only preferred when it exceeds the data-derived value,
+        so tests and startup cases that have no snapshot still work correctly.
         """
+        data_hours: float | None = None
         if isinstance(self.data, dict):
             durations = self.data.get("step_durations_hours")
             if durations:
                 try:
-                    return float(durations[0])
+                    data_hours = float(durations[0])
                 except (TypeError, ValueError, IndexError):
                     pass
+
+        if self._soc_snapshot_time is not None and data_hours is not None:
+            elapsed = (
+                dt_util.utcnow() - self._soc_snapshot_time
+            ).total_seconds() / 3600
+            if elapsed > data_hours:
+                return elapsed
+
+        if data_hours is not None:
+            return data_hours
         return (
             float(self.config.get(CONF_TIME_STEP_MINUTES, DEFAULT_TIME_STEP_MINUTES))
             / 60.0

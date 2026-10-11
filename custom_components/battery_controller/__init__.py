@@ -8,9 +8,8 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
@@ -46,6 +45,14 @@ from .coordinator import (
 # (this module), not on config_flow — without this re-export, entries from
 # older config versions fail setup with "Migration handler not found".
 from .config_flow import async_migrate_entry  # noqa: F401
+
+if TYPE_CHECKING:
+    # Home Assistant 2026.10+ validates with probatio and aliases voluptuous to it
+    # at runtime, so Core's signatures expect probatio types. Older releases still
+    # ship voluptuous, which is why the runtime import stays as it is.
+    import probatio as vol
+else:
+    import voluptuous as vol
 
 _LOGGER = logging.getLogger(__name__)
 

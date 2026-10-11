@@ -162,7 +162,15 @@ async def async_setup_entry(
         else:
             # Fallback for HA versions before async_get_device_by_identifier.
             dev = device_registry.async_get_device(identifiers={(DOMAIN, sid)})
-        if dev and None in dev.config_entries_subentries.get(entry.entry_id, set()):
+        if dev is None:
+            continue
+        if hasattr(dev, "config_entry_id"):
+            # Home Assistant 2026.10+: a device belongs to exactly one config entry
+            # and subentry. Removing the main-entry link would delete the device, so
+            # a device still outside its subentry is moved into it instead.
+            if dev.config_entry_id == entry.entry_id and dev.config_subentry_id is None:
+                device_registry.async_update_device(dev.id, new_config_subentry_id=sid)
+        elif None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,
                 remove_config_entry_id=entry.entry_id,
