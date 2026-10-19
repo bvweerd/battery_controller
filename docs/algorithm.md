@@ -178,11 +178,14 @@ discharging: new_soc = soc − |action_w| × dt / dis_eff
 
 **Boundary actions** (drain to min / fill to max) solve for the boundary power by fixed-point iteration on the curve (see §3).
 
-**Multi-battery aggregation**: curves are indexed by power, so they are combined on the power axis rather than averaged at the same absolute power. Each battery carries a share of the aggregate power proportional to its own rating and is evaluated at `share_i × P`; the aggregated curve spans 0..Σ max_power. The two directions combine differently because efficiency enters the SoC transition differently:
+**Multi-battery aggregation**: curves are indexed by power, so they are combined on the power axis rather than averaged at the same absolute power, and each battery is evaluated at the power it actually carries. That follows the dispatcher: a balanced fleet concentrates the setpoint on one pack (the *winner*) up to its rating `max_w`, and spreads only the overflow over the other packs in proportion to their ratings. With `p_i(w, P)` the power of pack i when w wins:
 ```
-charge:    eff(P) = Σ share_i × eff_i(share_i × P)
-discharge: eff(P) = 1 / Σ share_i / eff_i(share_i × P)
+p_w = min(P, max_w);   p_i = (P − p_w) × max_i / Σ_{j≠w} max_j
+
+charge:    eff_w(P) = Σ p_i × eff_i(p_i) / P
+discharge: eff_w(P) = P / Σ p_i / eff_i(p_i)
 ```
+Which pack wins depends on SoC at dispatch time, so the fleet curve is the expectation over all winners — arithmetic mean of `eff_w` when charging, harmonic when discharging (because stored = P × eff, drawn = P / eff). The curve spans 0..Σ max_power and is sampled at every pack's breakpoints plus a 40-point grid over the overflow region. A single battery's curve is used unchanged.
 
 **Calibration**: runtime efficiency corrections are applied as scalar multipliers to each curve point:
 ```

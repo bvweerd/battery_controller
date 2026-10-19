@@ -2054,6 +2054,39 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             / 60.0
         )
 
+    def _refresh_step_baseline(
+        self,
+        now_utc: datetime,
+        price_interval: float,
+        energy_totals_now: dict[str, dict[str, float | None]] | None,
+    ) -> None:
+        """Snapshot each pack's SoC and energy counters at the start of a step.
+
+        The next scoring run measures throughput against this baseline, so it
+        is only refreshed once per price step: a mid-period correction run
+        must not reset it, or the measured delta covers only the part of the
+        step since that run while the commanded energy covers all of it.
+
+        The counters and the SoC share one baseline for that reason. The
+        counters used to be refreshed on every run, so with the mid-period run
+        at half the price interval they only saw the second half of each step
+        and the published dispatch fidelity sat at ~0.5 on a pack that was
+        following its setpoint exactly.
+        """
+        step_seconds = price_interval * 60
+        snapshot_age = (
+            (now_utc - self._soc_snapshot_time).total_seconds()
+            if self._soc_snapshot_time is not None
+            else float("inf")
+        )
+        if snapshot_age < step_seconds * 0.9:
+            return
+        self._energy_counter_snapshot = energy_totals_now or {}
+        self._soc_snapshot_kwh = {
+            sid: state.soc_kwh for sid, state in self._per_battery_states.items()
+        }
+        self._soc_snapshot_time = now_utc
+
     def _planned_battery_delta_kwh(
         self, spec: CalibrationSpec, setpoint_kw: float, cfg: BatteryConfig
     ) -> float:
@@ -3198,27 +3231,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         )
 
         self._last_result = result
-        # Snapshot the counters and each pack's SoC alongside the plan they
-        # belong to, so the next run can measure the throughput of exactly this
-        # step, per battery. The setpoints themselves are snapshotted further
-        # down, once the split is known.
-        self._energy_counter_snapshot = energy_totals_now
-        # Only refresh the SoC snapshot once per price step so the calibration
-        # can measure a full step's worth of energy delta. Running the optimizer
-        # more frequently than the price interval (e.g. a mid-period correction
-        # run) must not reset the baseline, or the measured delta covers less
-        # than one full step and the calibration under-reports throughput.
-        step_seconds = price_interval * 60
-        snapshot_age = (
-            (now_utc - self._soc_snapshot_time).total_seconds()
-            if self._soc_snapshot_time is not None
-            else float("inf")
-        )
-        if snapshot_age >= step_seconds * 0.9:
-            self._soc_snapshot_kwh = {
-                sid: state.soc_kwh for sid, state in self._per_battery_states.items()
-            }
-            self._soc_snapshot_time = now_utc
+        # The setpoints themselves are snapshotted further down, once the split
+        # is known.
+        self._refresh_step_baseline(now_utc, price_interval, energy_totals_now)
 
         # Get current grid power: prefer real sensor, fall back to estimate
         realtime_grid_w = self._get_realtime_grid_w()

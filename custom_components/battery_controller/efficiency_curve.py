@@ -206,3 +206,103 @@ def aggregate_curves(
         combined.append((p, min(1.0, eff)))
 
     return combined
+
+
+# Extra samples across the overflow region of a concentrated fleet curve. Up to
+# the winner's rating the curve is exactly the winner's own; above it two packs
+# run at different powers and their combined efficiency is a ratio rather than
+# a linear blend of breakpoints, so it is sampled on a grid as well.
+_CONCENTRATED_GRID_POINTS = 40
+
+
+def aggregate_curves_concentrated(
+    curves: list[EfficiencyCurve],
+    max_powers: list[float],
+    *,
+    direction: str = "charge",
+) -> EfficiencyCurve:
+    """Combine per-battery curves for a fleet that concentrates its setpoint.
+
+    This mirrors BatteryDispatcher._concentrate, which is how a balanced fleet
+    is actually driven: the whole setpoint goes to one pack up to its rating,
+    and only the overflow is spread over the others (in proportion to their
+    ratings here, since their SoC is not known at planning time). A fleet at
+    0.5 kW therefore runs one pack at 0.5 kW, not every pack at 0.5/N kW,
+    which on a realistic curve is the difference between the plateau and the
+    steep idle-loss end.
+
+    Which pack wins depends on SoC at dispatch time, so the curve is the
+    expectation over every pack being the winner: an arithmetic mean of the
+    efficiencies when charging (stored = P * eff) and a harmonic one when
+    discharging (drawn = P / eff), the same combination rule as
+    aggregate_curves.
+
+    A single curve is returned unchanged.
+    """
+    if not curves:
+        raise ValueError("At least one curve is required")
+    if len(curves) != len(max_powers):
+        raise ValueError("curves and max_powers must have the same length")
+    if direction not in ("charge", "discharge"):
+        raise ValueError(
+            f"direction must be 'charge' or 'discharge', got {direction!r}"
+        )
+    if len(curves) == 1:
+        return list(curves[0])
+
+    total_power = sum(max_powers)
+    if total_power <= 0:
+        return aggregate_curves(curves, max_powers, direction=direction)
+
+    def _powers(winner: int, power: float) -> list[float]:
+        """Per-pack power when ``winner`` carries the setpoint first."""
+        powers = [0.0] * len(curves)
+        powers[winner] = min(power, max_powers[winner])
+        overflow = power - powers[winner]
+        others_rating = total_power - max_powers[winner]
+        if overflow > 0 and others_rating > 0:
+            for i, rating in enumerate(max_powers):
+                if i != winner:
+                    powers[i] = overflow * rating / others_rating
+        return powers
+
+    def _efficiency(winner: int, power: float) -> float:
+        powers = _powers(winner, power)
+        if power <= 0:
+            return interpolate_efficiency(curves[winner], 0.0)
+        if direction == "charge":
+            stored = sum(
+                p * interpolate_efficiency(c, p) for c, p in zip(curves, powers) if p
+            )
+            return stored / power
+        drawn = sum(
+            p / interpolate_efficiency(c, p) for c, p in zip(curves, powers) if p
+        )
+        return power / drawn if drawn > 0 else 1.0
+
+    # Breakpoints: every pack's own points (it may be the winner), its rating
+    # (where overflow starts), each pack's points mapped onto the overflow
+    # axis behind every possible winner, and a grid for the overflow region.
+    points: set[float] = {0.0, total_power}
+    for winner, w_max in enumerate(max_powers):
+        points.add(w_max)
+        points.update(p for p, _ in curves[winner] if 0.0 < p < w_max)
+        others_rating = total_power - w_max
+        for i, curve in enumerate(curves):
+            if i == winner or others_rating <= 0:
+                continue
+            share = max_powers[i] / others_rating
+            if share > 0:
+                points.update(w_max + p / share for p, _ in curve)
+    step = total_power / _CONCENTRATED_GRID_POINTS
+    points.update(step * k for k in range(1, _CONCENTRATED_GRID_POINTS))
+
+    combined: EfficiencyCurve = []
+    for p in sorted(x for x in points if 0.0 <= x <= total_power):
+        effs = [_efficiency(w, p) for w in range(len(curves))]
+        if direction == "charge":
+            eff = sum(effs) / len(effs)
+        else:
+            eff = len(effs) / sum(1.0 / e for e in effs if e > 0)
+        combined.append((p, min(1.0, eff)))
+    return combined

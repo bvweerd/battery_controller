@@ -4790,6 +4790,48 @@ def test_energy_counter_is_published_as_dispatch_fidelity(hass):
     assert _calibration(coord, ACTION_DISCHARGING).samples[0] == pytest.approx(1 / 0.95)
 
 
+def test_mid_period_run_keeps_the_step_baseline(hass):
+    """Counters and SoC share one baseline per price step.
+
+    The mid-period correction run used to re-snapshot the counters while the
+    SoC baseline stayed put, so the counters only saw the second half of every
+    step and the published dispatch fidelity read ~0.5 for a pack that followed
+    its setpoint exactly.
+    """
+    coord = _make_coordinator(hass)
+    coord._per_battery_states = {
+        "bat1": BatteryState(soc_kwh=5.0, soc_percent=50.0, power_kw=0.0, mode="idle")
+    }
+    start = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+    coord._refresh_step_baseline(
+        start, 15, {"bat1": {"charged": 100.0, "discharged": 50.0}}
+    )
+
+    coord._per_battery_states["bat1"] = BatteryState(
+        soc_kwh=4.5, soc_percent=45.0, power_kw=1.2, mode="discharging"
+    )
+    coord._refresh_step_baseline(
+        start + timedelta(minutes=7.5),
+        15,
+        {"bat1": {"charged": 100.0, "discharged": 50.3}},
+    )
+
+    assert coord._soc_snapshot_time == start
+    assert coord._soc_snapshot_kwh == {"bat1": 5.0}
+    assert coord._energy_counter_snapshot == {
+        "bat1": {"charged": 100.0, "discharged": 50.0}
+    }
+
+    # The next step's run moves both baselines together.
+    coord._refresh_step_baseline(
+        start + timedelta(minutes=15),
+        15,
+        {"bat1": {"charged": 100.0, "discharged": 50.6}},
+    )
+    assert coord._soc_snapshot_kwh == {"bat1": 4.5}
+    assert coord._energy_counter_snapshot["bat1"]["discharged"] == 50.6
+
+
 def test_counter_without_a_soc_reading_takes_no_sample(hass):
     """A counter alone cannot calibrate, and says so rather than sampling."""
     coord = _coordinator_with_counters(hass)

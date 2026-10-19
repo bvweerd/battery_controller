@@ -13,7 +13,7 @@ from .const import (
 )
 from .efficiency_curve import (
     EfficiencyCurve,
-    aggregate_curves,
+    aggregate_curves_concentrated,
     parse_efficiency_curve,
     representative_efficiency,
 )
@@ -255,8 +255,9 @@ class BatteryConfig:
 def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     """Aggregate multiple BatteryConfigs into one combined config for the optimizer.
 
-    Capacity and power limits are summed.  Efficiency curves are
-    capacity-weighted averages.  SoC limits are capacity-weighted so the
+    Capacity and power limits are summed.  Efficiency curves are combined on
+    the power axis the way the dispatcher drives the fleet (see
+    aggregate_curves_concentrated).  SoC limits are capacity-weighted so the
     aggregate SoC constraints (in kWh) equal the sum of the individual ones.
     """
     if not configs:
@@ -270,14 +271,17 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     total_cap = sum(c.capacity_kwh for c in configs)
 
     # Efficiency curves are indexed by power, so they are combined on the power
-    # axis: each battery carries a share of the aggregate power proportional to
-    # its own rating and is evaluated at that share, not at the fleet total.
-    combined_charge_curve = aggregate_curves(
+    # axis, evaluating each battery at the power it actually carries. A balanced
+    # fleet concentrates the setpoint on one pack and spills only the overflow
+    # onto the others (BatteryDispatcher._concentrate); modelling an even split
+    # instead put every pack on the steep low-power end of its curve and made
+    # part-load steps look far more lossy than they are.
+    combined_charge_curve = aggregate_curves_concentrated(
         [c.charge_efficiency_curve_parsed for c in configs],
         [c.max_charge_power_kw for c in configs],
         direction="charge",
     )
-    combined_discharge_curve = aggregate_curves(
+    combined_discharge_curve = aggregate_curves_concentrated(
         [c.discharge_efficiency_curve_parsed for c in configs],
         [c.max_discharge_power_kw for c in configs],
         direction="discharge",
