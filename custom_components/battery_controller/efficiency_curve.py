@@ -229,7 +229,10 @@ def aggregate_curves_concentrated(
     ratings here, since their SoC is not known at planning time). A fleet at
     0.5 kW therefore runs one pack at 0.5 kW, not every pack at 0.5/N kW,
     which on a realistic curve is the difference between the plateau and the
-    steep idle-loss end.
+    steep idle-loss end. Near rated power the opposite holds — a curve that
+    falls off towards its rating loses less on two packs at half power — and
+    the dispatcher then splits proportionally, so each point takes whichever
+    of the two is more efficient.
 
     Which pack wins depends on SoC at dispatch time, so the curve is the
     expectation over every pack being the winner: an arithmetic mean of the
@@ -297,6 +300,11 @@ def aggregate_curves_concentrated(
     step = total_power / _CONCENTRATED_GRID_POINTS
     points.update(step * k for k in range(1, _CONCENTRATED_GRID_POINTS))
 
+    # The dispatcher splits proportionally instead whenever that loses less,
+    # so the even split's breakpoints belong on the axis too.
+    proportional = aggregate_curves(curves, max_powers, direction=direction)
+    points.update(p for p, _ in proportional)
+
     combined: EfficiencyCurve = []
     for p in sorted(x for x in points if 0.0 <= x <= total_power):
         effs = [_efficiency(w, p) for w in range(len(curves))]
@@ -304,5 +312,8 @@ def aggregate_curves_concentrated(
             eff = sum(effs) / len(effs)
         else:
             eff = len(effs) / sum(1.0 / e for e in effs if e > 0)
+        # At a fixed power a higher efficiency is a lower loss in both
+        # directions, which is exactly the dispatcher's comparison.
+        eff = max(eff, interpolate_efficiency(proportional, p))
         combined.append((p, min(1.0, eff)))
     return combined

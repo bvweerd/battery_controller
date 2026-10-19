@@ -114,6 +114,9 @@ _LOGGER = logging.getLogger(__name__)
 # this fraction of the planned charge power. Below it, the DP evidently wants
 # grid charging beyond the surplus and the schedule is followed instead.
 _SURPLUS_COVERS_PLAN_FRACTION = 0.8
+# Energy commanded in the opposite direction within a scored step, as a
+# fraction of the direction being scored, above which the step is not sampled.
+_MIXED_STEP_TOLERANCE = 0.02
 
 
 def _mode_from_power_kw(power_kw: float) -> str:
@@ -374,6 +377,14 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # dispatcher concentrates on one pack at a time, so this is what says
         # whose plan the measured throughput belongs to.
         self._last_battery_setpoints: dict[str, float] = {}
+        # Commanded energy per battery since the current step baseline, built
+        # from every setpoint actually dispatched (full runs and real-time
+        # ticks alike), so a power change inside a step is scored segment by
+        # segment instead of crediting the last setpoint with the whole step.
+        self._active_setpoints: dict[str, float] = {}
+        self._active_since: datetime | None = None
+        self._commanded: dict[str, dict[str, float]] = {}
+        self._commanded_since: datetime | None = None
 
     def _build_battery_calibration(
         self, subentry_id: str, data: dict[str, Any]
@@ -1149,6 +1160,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         battery_setpoints = self._split_setpoint(
             control_action["target_power_kw"], self._control_mode
         )
+        self._record_dispatched_setpoints(battery_setpoints, dt_util.utcnow())
         self.async_set_updated_data(
             {
                 **self.data,
@@ -2086,6 +2098,71 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             sid: state.soc_kwh for sid, state in self._per_battery_states.items()
         }
         self._soc_snapshot_time = now_utc
+        self._accumulate_commanded(now_utc)
+        self._commanded = {}
+        self._commanded_since = now_utc
+
+    @staticmethod
+    def _battery_efficiency(cfg: BatteryConfig, action: str, power_kw: float) -> float:
+        """This pack's own efficiency for ``action`` at ``power_kw``."""
+        if action == ACTION_CHARGING:
+            curve, scalar = cfg.charge_efficiency_curve_parsed, cfg.charge_efficiency
+        else:
+            curve = cfg.discharge_efficiency_curve_parsed
+            scalar = cfg.discharge_efficiency
+        return interpolate_efficiency(curve, power_kw) if curve else float(scalar)
+
+    def _accumulate_commanded(self, now: datetime) -> None:
+        """Credit the setpoints in force since the last call to the step totals.
+
+        Per battery and direction this keeps the commanded AC energy and the
+        SoC change that energy should have produced at that pack's efficiency
+        for that power, so a step that ran at two power levels is planned as
+        the sum of both instead of the last one held for the whole step.
+        """
+        since, self._active_since = self._active_since, now
+        if since is None:
+            return
+        hours = (now - since).total_seconds() / 3600
+        if hours <= 0:
+            return
+        for sid, cfg in self._individual_battery_configs:
+            setpoint_kw = self._active_setpoints.get(sid, 0.0)
+            if abs(setpoint_kw) < 1e-6:
+                continue
+            action = ACTION_CHARGING if setpoint_kw > 0 else ACTION_DISCHARGING
+            energy_kwh = abs(setpoint_kw) * hours
+            efficiency = self._battery_efficiency(cfg, action, abs(setpoint_kw))
+            if efficiency <= 0:
+                continue
+            totals = self._commanded.setdefault(sid, {})
+            totals[action] = totals.get(action, 0.0) + energy_kwh
+            totals[f"{action}_soc"] = totals.get(f"{action}_soc", 0.0) + (
+                energy_kwh * efficiency
+                if action == ACTION_CHARGING
+                else energy_kwh / efficiency
+            )
+
+    def _record_dispatched_setpoints(
+        self, setpoints: dict[str, float], now: datetime
+    ) -> None:
+        """Close the running segment and start one at the new setpoints."""
+        self._accumulate_commanded(now)
+        self._active_setpoints = dict(setpoints)
+
+    def _step_commanded(self, subentry_id: str) -> dict[str, float] | None:
+        """Commanded totals for the step being scored, if they cover all of it.
+
+        None when accumulation did not start together with the current
+        baseline (startup, or state set up without it); the caller then falls
+        back to the last setpoint held for the whole step.
+        """
+        if (
+            self._commanded_since is None
+            or self._commanded_since != self._soc_snapshot_time
+        ):
+            return None
+        return self._commanded.get(subentry_id, {})
 
     def _planned_battery_delta_kwh(
         self, spec: CalibrationSpec, setpoint_kw: float, cfg: BatteryConfig
@@ -2100,19 +2177,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         1.2 kW is not modelled by the fleet's 2.4 kW point.
         """
         energy_kwh = abs(setpoint_kw) * self._previous_step_hours()
-        curve = (
-            cfg.charge_efficiency_curve_parsed
-            if spec.action == ACTION_CHARGING
-            else cfg.discharge_efficiency_curve_parsed
-        )
-        scalar = (
-            cfg.charge_efficiency
-            if spec.action == ACTION_CHARGING
-            else cfg.discharge_efficiency
-        )
-        efficiency = (
-            interpolate_efficiency(curve, abs(setpoint_kw)) if curve else float(scalar)
-        )
+        efficiency = self._battery_efficiency(cfg, spec.action, abs(setpoint_kw))
         if efficiency <= 0:
             return 0.0
         # Charging puts less into the pack than it draws; discharging takes more
@@ -2194,16 +2259,34 @@ class OptimizationCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Fold one battery's outcome for one direction into its correction."""
         spec = calibration.spec
-        setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
-        # Setpoints are positive for charge, negative for discharge.
-        dispatched = (
-            setpoint_kw > 0 if spec.action == ACTION_CHARGING else setpoint_kw < 0
-        )
-        if not dispatched:
-            calibration.last_result = CALIBRATION_NOT_DISPATCHED
-            return
-
-        planned_delta = self._planned_battery_delta_kwh(spec, setpoint_kw, cfg)
+        commanded = self._step_commanded(subentry_id)
+        if commanded is not None:
+            commanded_kwh = commanded.get(spec.action, 0.0)
+            opposite = (
+                ACTION_DISCHARGING
+                if spec.action == ACTION_CHARGING
+                else ACTION_CHARGING
+            )
+            if commanded_kwh <= 0:
+                calibration.last_result = CALIBRATION_NOT_DISPATCHED
+                return
+            if commanded.get(opposite, 0.0) > _MIXED_STEP_TOLERANCE * commanded_kwh:
+                # The pack ran both ways within the step; its net SoC change
+                # says nothing about either direction's efficiency.
+                calibration.last_result = CALIBRATION_PLAN_NOT_EXECUTED
+                return
+            planned_delta = commanded.get(f"{spec.action}_soc", 0.0)
+        else:
+            setpoint_kw = self._last_battery_setpoints.get(subentry_id, 0.0)
+            # Setpoints are positive for charge, negative for discharge.
+            dispatched = (
+                setpoint_kw > 0 if spec.action == ACTION_CHARGING else setpoint_kw < 0
+            )
+            if not dispatched:
+                calibration.last_result = CALIBRATION_NOT_DISPATCHED
+                return
+            commanded_kwh = abs(setpoint_kw) * self._previous_step_hours()
+            planned_delta = self._planned_battery_delta_kwh(spec, setpoint_kw, cfg)
         prev_soc = self._soc_snapshot_kwh.get(subentry_id)
         planned_next_soc: float | None = None
         if prev_soc is not None:
@@ -2230,9 +2313,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             else None
         )
         if counter_delta is not None:
-            calibration.record_dispatch(
-                abs(setpoint_kw) * self._previous_step_hours(), counter_delta
-            )
+            calibration.record_dispatch(commanded_kwh, counter_delta)
 
         if planned_delta < min_planned_delta_kwh(
             self._battery_soc_quantum_kwh(data, cfg)
@@ -3157,6 +3238,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # Cumulative throughput counters, read once: they close the previous
         # planned step and open the new one at the same instant.
         energy_totals_now = self._read_energy_totals()
+        self._accumulate_commanded(dt_util.utcnow())
 
         # Charge efficiency calibration: compare the previous plan against what
         # each battery actually moved, to detect systematic over-estimation of
@@ -3399,6 +3481,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # step on the next run. The dispatcher concentrates on one battery at a
         # time, so without this the fleet plan would be credited to every pack.
         self._last_battery_setpoints = dict(battery_setpoints)
+        self._record_dispatched_setpoints(battery_setpoints, dt_util.utcnow())
 
         return {
             "optimization_result": result,

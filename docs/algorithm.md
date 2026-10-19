@@ -185,7 +185,7 @@ p_w = min(P, max_w);   p_i = (P − p_w) × max_i / Σ_{j≠w} max_j
 charge:    eff_w(P) = Σ p_i × eff_i(p_i) / P
 discharge: eff_w(P) = P / Σ p_i / eff_i(p_i)
 ```
-Which pack wins depends on SoC at dispatch time, so the fleet curve is the expectation over all winners — arithmetic mean of `eff_w` when charging, harmonic when discharging (because stored = P × eff, drawn = P / eff). The curve spans 0..Σ max_power and is sampled at every pack's breakpoints plus a 40-point grid over the overflow region. A single battery's curve is used unchanged.
+Which pack wins depends on SoC at dispatch time, so the fleet curve is the expectation over all winners — arithmetic mean of `eff_w` when charging, harmonic when discharging (because stored = P × eff, drawn = P / eff). Where the dispatcher would split proportionally instead (because that loses less, see [Section 12](#12-multi-battery-dispatch)), the point takes the rating-proportional efficiency `Σ share_i × eff_i(share_i × P)` (harmonic for discharge) — at a fixed power the higher efficiency is the lower loss, which is the dispatcher's own comparison. The curve spans 0..Σ max_power and is sampled at every pack's breakpoints plus a 40-point grid over the overflow region. A single battery's curve is used unchanged.
 
 **Calibration**: runtime efficiency corrections are applied as scalar multipliers to each curve point:
 ```
@@ -544,7 +544,7 @@ It used to be stored as the raw `measured / planned` ratio, which means opposite
 
 **One calibration per battery.** Each pack keeps its own window, its own storage key and its own pair of diagnostic sensors, and is scored against the setpoint *it* was given (`battery_setpoints`) rather than against the fleet plan. The dispatcher concentrates a setpoint on one battery at a time (see [Section 12](#12-multi-battery-dispatch)), so a single fleet-wide ratio measures whichever pack happened to be picked and then attributes it to all of them: a pack that is losing capacity is invisible, dragging the shared number down and having its healthy sibling planned pessimistically. A pack that was not dispatched in this direction reports `battery_not_dispatched` and takes no sample.
 
-The planned SoC change per pack is `|setpoint| × step_hours × charge_eff(|setpoint|)` for charging and `|setpoint| × step_hours / discharge_eff(|setpoint|)` for discharging, using that battery's own curve at its own power — the curves are power-dependent, so a pack running at 1.2 kW is not described by the fleet's 2.4 kW point. The derating guard likewise uses the pack's own threshold and its own SoC.
+The planned SoC change per pack is integrated over every setpoint actually dispatched to it during the step — full optimizer runs, the mid-period correction run and the real-time ticks alike: each segment contributes `|setpoint| × segment_hours × charge_eff(|setpoint|)` when charging and `|setpoint| × segment_hours / discharge_eff(|setpoint|)` when discharging, using that battery's own curve at its own power. Crediting the last setpoint with the whole step planned a power change halfway through as if it had lasted the full step. A pack that was commanded both ways within one step (more than 2 % of the scored direction's energy in the other) reports `plan_not_executed`: its net SoC change prices neither direction. The commanded energy from the same integration is the denominator of `dispatch_fidelity`, and the counters, SoC and commanded energy all share one baseline per price step — the counters used to be re-snapshotted on every run, so with the mid-period run at half the interval they saw only half the step and fidelity read ~0.5 on packs that followed their setpoint exactly — the curves are power-dependent, so a pack running at 1.2 kW is not described by the fleet's 2.4 kW point. The derating guard likewise uses the pack's own threshold and its own SoC.
 
 The DP plans one SoC for the whole fleet, so it is handed the **capacity-weighted aggregate** of the per-battery corrections, taken over the packs that have actually measured something. A pack the dispatcher has never used carries no evidence, and averaging its nominal 1.0 in would report half the derating that was observed — an unmeasured pack is therefore assumed to behave like the measured ones rather than like the datasheet. The fleet sensors publish that aggregate; the per-battery sensors publish the individual measurements. On upgrade, a battery with nothing of its own seeds from the old fleet-wide store: that value is no longer the answer, but it is a better prior than nominal and each new sample replaces more of it.
 
@@ -791,10 +791,12 @@ gap = max(rel_soc) − min(rel_soc)
 
 | Gap | Strategy |
 |-----|----------|
-| `gap < 0.10` | **Concentrate** on one battery |
+| `gap < 0.10` | **Concentrate** on one battery — unless a proportional split loses less (see below) |
 | `gap ≥ 0.10` | **Proportional split** to rebalance |
 
 **Why concentration at low gap:** splitting a small setpoint (e.g. 100 W) across two inverters results in each receiving ~50 W. Most home battery inverters are inefficient at very low power (high fixed conversion losses relative to throughput). Concentrating on one inverter avoids this and provides more stable real-time tracking in zero-grid mode.
+
+**Efficiency split in a balanced fleet:** concentration is only the better choice at part load. On a realistic curve the resistive losses climb again towards rated power, so two packs at half power can lose less than one at full (a Venus A: one pack at 1.2 kW is 0.892 one-way, two at 0.6 kW are 0.909). In the concentration branch the dispatcher therefore also computes the proportional split and compares the conversion loss of both from each pack's own curve at its own power — `P × (1 − eff)` charging, `P × (1/eff − 1)` discharging — and takes the split when it loses less. `_EFFICIENCY_SPLIT_MARGIN = 0.005` (as a fraction of the setpoint) is the hysteresis in both directions, so a setpoint at the crossover does not hand power back and forth between one and two inverters. Flat curves lose the same either way and always concentrate, as before.
 
 **Why proportional split at high gap:** when SoC has diverged, one battery is being disproportionately cycled. Proportional splitting (weighted by available headroom/energy) rebalances the SoC levels over time.
 

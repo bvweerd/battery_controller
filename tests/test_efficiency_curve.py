@@ -333,3 +333,14 @@ class TestAggregateCurvesConcentrated:
             aggregate_curves_concentrated(
                 [self.CURVE, self.CURVE], [5.0, 5.0], direction="up"
             )
+
+    def test_takes_the_split_where_it_loses_less(self):
+        """Mirrors the dispatcher: near rated power two half-loaded packs win."""
+        curve = [(0.1, 0.76), (0.5, 0.91), (0.8, 0.91), (1.2, 0.89)]
+        result = aggregate_curves_concentrated(
+            [curve, curve], [1.2, 1.2], direction="discharge"
+        )
+        # 1.2 kW: one pack at 1.2 (0.89) vs two at 0.6 (0.91)
+        assert interpolate_efficiency(result, 1.2) == pytest.approx(0.91)
+        # 0.5 kW: one pack at 0.5 (0.91) beats two at 0.25
+        assert interpolate_efficiency(result, 0.5) == pytest.approx(0.91)

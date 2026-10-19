@@ -4832,6 +4832,84 @@ def test_mid_period_run_keeps_the_step_baseline(hass):
     assert coord._energy_counter_snapshot["bat1"]["discharged"] == 50.6
 
 
+def _start_commanded_window(coord, start):
+    """Open a step baseline whose commanded energy is tracked segment by segment."""
+    coord._soc_snapshot_time = start
+    coord._commanded_since = start
+    coord._commanded = {}
+    coord._active_since = start
+
+
+def test_setpoint_change_within_a_step_is_planned_per_segment(hass):
+    """A mid-step power change is scored as two segments, not the last one.
+
+    Crediting the final setpoint with the whole step planned 1.5 kW for an
+    hour when the pack ran half an hour at 0.5 kW, and read the shortfall as
+    a bad efficiency.
+    """
+    coord = _make_coordinator(hass)
+    sid = _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=None)
+    cfg = dict(coord._individual_battery_configs)[sid]
+    start = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+    _start_commanded_window(coord, start)
+
+    coord._record_dispatched_setpoints({sid: 0.5}, start)
+    coord._record_dispatched_setpoints({sid: 1.5}, start + timedelta(minutes=30))
+    coord._accumulate_commanded(start + timedelta(minutes=60))
+
+    eff_low = coord._battery_efficiency(cfg, ACTION_CHARGING, 0.5)
+    eff_high = coord._battery_efficiency(cfg, ACTION_CHARGING, 1.5)
+    planned = 0.25 * eff_low + 0.75 * eff_high
+    totals = coord._step_commanded(sid)
+    assert totals[ACTION_CHARGING] == pytest.approx(1.0)
+    assert totals[f"{ACTION_CHARGING}_soc"] == pytest.approx(planned)
+
+    coord._per_battery_states[sid] = BatteryState(
+        soc_kwh=5.0 + planned, soc_percent=50.0, power_kw=1.5, mode=ACTION_CHARGING
+    )
+    coord._update_charge_eff_calibration()
+
+    assert _calibration(coord).samples[-1] == pytest.approx(1.0)
+
+
+def test_step_run_in_both_directions_is_not_sampled(hass):
+    """A net SoC change across a charge and a discharge prices neither."""
+    coord = _make_coordinator(hass)
+    sid = _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=0.5)
+    start = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+    _start_commanded_window(coord, start)
+
+    coord._record_dispatched_setpoints({sid: 1.0}, start)
+    coord._record_dispatched_setpoints({sid: -1.0}, start + timedelta(minutes=40))
+    coord._accumulate_commanded(start + timedelta(minutes=60))
+    coord._update_charge_eff_calibration()
+
+    assert _calibration(coord).sample_count == 0
+    assert _calibration(coord).last_result == CALIBRATION_PLAN_NOT_EXECUTED
+
+
+def test_dispatch_fidelity_uses_the_commanded_segments(hass):
+    """Fidelity divides by what was actually commanded over the step."""
+    coord = _coordinator_with_counters(hass)
+    sid = _plan_battery_step(coord, planned_delta_kwh=1.0, actual_delta_kwh=None)
+    start = datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)
+    _start_commanded_window(coord, start)
+    coord._energy_counter_snapshot = {sid: {"charged": 100.0, "discharged": 50.0}}
+
+    coord._record_dispatched_setpoints({sid: 0.0}, start)
+    coord._record_dispatched_setpoints({sid: 1.2}, start + timedelta(minutes=30))
+    coord._accumulate_commanded(start + timedelta(minutes=60))
+    hass.states.async_set("sensor.bat_charged", "100.6", {"unit_of_measurement": "kWh"})
+    hass.states.async_set(
+        "sensor.bat_discharged", "50.0", {"unit_of_measurement": "kWh"}
+    )
+
+    coord._update_charge_eff_calibration(coord._read_energy_totals())
+
+    fidelity, _samples = coord.battery_dispatch_fidelity(sid, ACTION_CHARGING)
+    assert fidelity == pytest.approx(1.0)
+
+
 def test_counter_without_a_soc_reading_takes_no_sample(hass):
     """A counter alone cannot calibrate, and says so rather than sampling."""
     coord = _coordinator_with_counters(hass)
