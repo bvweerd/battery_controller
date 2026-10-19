@@ -158,16 +158,29 @@ Do not invert discharge samples: only a payload **without** a `schema` key
 holds raw ratios, and the coordinator migrates those on load.
 
 **Never read one direction on its own.** The correction is measured against a
-plan denominated in SoC, so a configured capacity that is too large makes the
-pack look better than its curve on charge (SoC rises faster than planned) and
-worse on discharge (SoC falls faster). The capacity error cancels in the
-**product** of the two corrections; that product is the round-trip deviation
-from the curve:
+plan denominated in SoC, and several things push the two directions apart in
+opposite ways — charge looking better than its curve, discharge worse:
+
+- a configured capacity larger than the pack's real (or BMS-assumed) capacity
+  — SoC moves faster than planned both ways;
+- a curve that is in reality asymmetric (charge more efficient than
+  discharge) while it is configured symmetric;
+- a BMS SoC estimate that drifts with direction (LFP's flat voltage curve
+  makes the estimate coulomb-counted and slow to correct).
+
+The SoC data cannot tell these apart. All of them cancel in the **product**
+of the two corrections, which is why that product — and not either
+direction — is the round-trip deviation from the curve:
 
 ```
 measured RTE ≈ curve RTE × charge_correction × discharge_correction
-capacity ratio ≈ sqrt(charge_correction / discharge_correction)   # >1: pack smaller than configured
 ```
+
+The ratio `charge_correction / discharge_correction` only says that one of
+the causes above is present. To settle capacity, measure it directly: one full
+discharge at constant power from 100 % to the minimum SoC, and compare the
+discharge counter (AC side, divided by the discharge efficiency at that power)
+with the SoC drop.
 
 A charge correction at the `1.05` clamp makes the product a lower bound only.
 
@@ -180,8 +193,12 @@ A charge correction at the `1.05` clamp makes the product a lower bound only.
 
 **Efficiency conclusion**: the raised curve overstates the round trip by
 9–12 %; the delivered round trip is ≈ 80–82 %, i.e. the community curve.
-Marstek 1's ratio (`sqrt(1.05/0.838)` ≈ 1.12) also points at a usable
-capacity of about 3.8 kWh rather than the configured 4.24 kWh.
+Marstek 1 additionally shows a charge/discharge split (1.05 clamped vs
+0.838) that Marstek 2, the same model, does not. That rules out a
+model-wide curve asymmetry as the main cause and points at something
+specific to that unit (its BMS SoC estimate or its capacity), but which one
+needs the full-discharge test above; the data here cannot decide it, and the
+charge value being clamped makes the split itself uncertain.
 
 The September 2026 analysis in an earlier version of this page reached the
 opposite conclusion and raised the curve by ×1.05. It inverted the discharge
@@ -198,7 +215,7 @@ corrections as evidence of efficiency; see the withdrawn production curve in
 | Dispatch fidelity ≈ 0.94–1.0 | Battery delivers what it is told | Normal |
 | Dispatch fidelity ≈ 0.5 on every pack | Counter baseline shorter than the step (fixed in the coordinator: counters now share the per-step SoC baseline) | Update the integration |
 | charge × discharge correction < 1 | Round trip worse than the curve | Lower the curve by that product (split evenly over both directions) |
-| charge × discharge correction ≈ 1, charge ≫ discharge | Capacity configured too large | Lower `capacity_kwh` |
+| charge × discharge correction ≈ 1, charge ≫ discharge | Capacity, curve asymmetry or BMS SoC drift (indistinguishable here) | Run a full-discharge capacity test before changing `capacity_kwh` |
 | Charge fidelity 89 % at SoC > 90 % | CV-phase taper near full charge | Normal LFP behaviour; calibration skips samples that cross the high-SoC derate threshold |
 
 ---
