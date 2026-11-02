@@ -8,5 +8,5 @@
 # so no separate mermaid plugin is needed.
 
 mkdocs>=1.6.1
-mkdocs-material>=9.7.7
+mkdocs-material>=9.8.0
 pymdown-extensions>=12.2
