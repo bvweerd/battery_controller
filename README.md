@@ -2,9 +2,11 @@
 
 **Home battery cost optimization for Home Assistant**
 
+<!-- ha-marketplace:exclude-start -->
 [![GitHub Release](https://img.shields.io/github/release/bvweerd/battery_controller.svg?style=flat-square)](https://github.com/bvweerd/battery_controller/releases)
 [![License](https://img.shields.io/github/license/bvweerd/battery_controller.svg?style=flat-square)](LICENSE)
-[![hacs](https://img.shields.io/badge/HACS-Default-orange.svg?style=flat-square)](https://hacs.xyz)
+[![Marketplace](https://img.shields.io/badge/Marketplace-Default-orange.svg?style=flat-square)](https://www.home-assistant.io/blog/2026/11/04/release-202611/)
+<!-- ha-marketplace:exclude-end -->
 
 ---
 
@@ -22,7 +24,7 @@ algorithm, an FAQ built from real issue reports, and troubleshooting.
 
 | | |
 |---|---|
-| [Installation](https://bvweerd.github.io/battery_controller/installation/) | Prerequisites, verifying your price and consumption sensors, HACS setup |
+| [Installation](https://bvweerd.github.io/battery_controller/installation/) | Prerequisites, verifying your price and consumption sensors, Marketplace / HACS setup |
 | [Configuration reference](https://bvweerd.github.io/battery_controller/configuration/) | Every option in the main entry, battery subentries and PV arrays |
 | [Control modes](https://bvweerd.github.io/battery_controller/control-modes/) | Zero-grid, follow-schedule, hybrid, hybrid+, manual |
 | [Connecting your inverter](https://bvweerd.github.io/battery_controller/inverter-control/) | Which sensor to read, sign conventions, example automation |
@@ -78,17 +80,21 @@ Battery Controller works with any battery inverter and electricity meter — it 
 
 ## Quick start
 
+<!-- ha-marketplace:exclude-start -->
+**Install** via Settings → Marketplace → search for **Battery Controller** → Install
+(Home Assistant 2026.11+). On 2026.10 and older, use HACS: HACS → Integrations → search
+for **Battery Controller** → Download, then restart Home Assistant.
+
+<!-- ha-marketplace:exclude-end -->
+
 1. **Check your sensors first.** A price sensor needs forecast attributes; an energy
    sensor needs `state_class: total_increasing`. See
    [Installation](https://bvweerd.github.io/battery_controller/installation/).
-2. **Install via HACS**: HACS → Integrations → three dots → Custom repositories → add
-   `https://github.com/bvweerd/battery_controller` as an **Integration**. Restart Home
-   Assistant.
-3. **Add the integration**: Settings → Devices & Services → Add Integration → Battery
+2. **Add the integration**: Settings → Devices & Services → Add Integration → Battery
    Controller.
-4. **Add your hardware as subentries**: at least one **Battery**, plus a **PV Array** per
+3. **Add your hardware as subentries**: at least one **Battery**, plus a **PV Array** per
    roof orientation.
-5. **Wire it to your inverter** with an automation that reads
+4. **Wire it to your inverter** with an automation that reads
    `sensor.battery_controller_battery_setpoint`. See
    [Connecting your inverter](https://bvweerd.github.io/battery_controller/inverter-control/).
 
