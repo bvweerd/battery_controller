@@ -40,7 +40,7 @@ three-dot menu → Download diagnostics**.
 
 -   :material-download: **[Installation](installation.md)**
 
-    Prerequisites, verifying your price and consumption sensors, HACS setup.
+    Prerequisites, verifying your price and consumption sensors, Marketplace / HACS setup.
 
 -   :material-tune: **[Configuration reference](configuration.md)**
 
