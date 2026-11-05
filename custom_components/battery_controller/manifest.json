@@ -2,6 +2,7 @@
   "domain": "battery_controller",
   "name": "Battery Controller",
   "after_dependencies": ["recorder"],
+  "categories": ["energy.solar_batteries", "energy.energy_prices"],
   "codeowners": [
     "@bvweerd"
   ],

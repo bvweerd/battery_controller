@@ -7,7 +7,7 @@ battery efficiency against the configured values.
 
 ## 1. What you want to know
 
-The battery controller uses an efficiency curve (RTE, e.g. 91 %) as input for
+The battery controller uses an efficiency curve (RTE, e.g. 82 %) as input for
 the DP. If the actual battery performs better or worse than that curve, you
 either miss opportunities or plan too optimistically.
 
@@ -151,24 +151,60 @@ for label, fname in files.items():
 For **discharge** in old format: `efficiency_factor = 1 / raw_ratio`
 (when discharging, less SoC drop per commanded kWh means better efficiency).
 
-### Results (September 2026)
+### Reading the results
 
-| Battery | Direction | Raw ratio | Efficiency factor | Applied |
-|---|---|---|---|---|
-| Marstek 1 | charge | 1.050 (capped) | 1.050 | False |
-| Marstek 1 | discharge | 0.796 | **1.256** | False |
-| Marstek 2 | charge | 1.048 | 1.048 | False |
-| Marstek 2 | discharge | 0.920 | **1.087** | False |
+The stored samples are efficiency factors (< 1.0 = worse than configured).
+Do not invert discharge samples: only a payload **without** a `schema` key
+holds raw ratios, and the coordinator migrates those on load.
 
-`applied: False` because efficiency_factor ≥ `CALIBRATION_APPLY_THRESHOLD`
-(0.995): the battery performs at or above the configured curve, so the
-correction is not applied — the optimizer is never made more optimistic than
-the values the user entered.
+**Never read one direction on its own.** The correction is measured against a
+plan denominated in SoC, and several things push the two directions apart in
+opposite ways — charge looking better than its curve, discharge worse:
 
-**Efficiency conclusion**: the configured curve is conservative. Both batteries
-store more energy per commanded kWh and lose less SoC per commanded discharge
-kWh than planned. The corrections are capped at 105 % (CALIBRATION_APPLY_MAX)
-and not passed to the DP.
+- a configured capacity larger than the pack's real (or BMS-assumed) capacity
+  — SoC moves faster than planned both ways;
+- a curve that is in reality asymmetric (charge more efficient than
+  discharge) while it is configured symmetric;
+- a BMS SoC estimate that drifts with direction (LFP's flat voltage curve
+  makes the estimate coulomb-counted and slow to correct).
+
+The SoC data cannot tell these apart. All of them cancel in the **product**
+of the two corrections, which is why that product — and not either
+direction — is the round-trip deviation from the curve:
+
+```
+measured RTE ≈ curve RTE × charge_correction × discharge_correction
+```
+
+The ratio `charge_correction / discharge_correction` only says that one of
+the causes above is present. To settle capacity, measure it directly: one full
+discharge at constant power from 100 % to the minimum SoC, and compare the
+discharge counter (AC side, divided by the discharge efficiency at that power)
+with the SoC drop.
+
+A charge correction at the `1.05` clamp makes the product a lower bound only.
+
+### Results (October 2026, two Venus A units on the curve ×1.0492)
+
+| Battery | charge | discharge | product |
+|---|---:|---:|---:|
+| Marstek 1 | 1.050 (clamped) | 0.838 | ≥ 0.88 |
+| Marstek 2 | 0.960 | 0.945 | 0.91 |
+
+**Efficiency conclusion**: the raised curve overstates the round trip by
+9–12 %; the delivered round trip is ≈ 80–82 %, i.e. the community curve.
+Marstek 1 additionally shows a charge/discharge split (1.05 clamped vs
+0.838) that Marstek 2, the same model, does not. That rules out a
+model-wide curve asymmetry as the main cause and points at something
+specific to that unit (its BMS SoC estimate or its capacity), but which one
+needs the full-discharge test above; the data here cannot decide it, and the
+charge value being clamped makes the split itself uncertain.
+
+The September 2026 analysis in an earlier version of this page reached the
+opposite conclusion and raised the curve by ×1.05. It inverted the discharge
+samples (they were already efficiency factors) and took the clamped charge
+corrections as evidence of efficiency; see the withdrawn production curve in
+`efficiency-curves.md`.
 
 ---
 
@@ -176,13 +212,11 @@ and not passed to the DP.
 
 | Finding | Meaning | Action |
 |---|---|---|
-| Dispatch fidelity 94 % | Battery delivers slightly less than commanded | Normal for Marstek; confirmed by `dispatch_fidelity` sensor |
-| Efficiency factor > 1 | Battery outperforms configured curve | No automatic correction (by design) — consider raising the curve manually |
+| Dispatch fidelity ≈ 0.94–1.0 | Battery delivers what it is told | Normal |
+| Dispatch fidelity ≈ 0.5 on every pack | Counter baseline shorter than the step (fixed in the coordinator: counters now share the per-step SoC baseline) | Update the integration |
+| charge × discharge correction < 1 | Round trip worse than the curve | Lower the curve by that product (split evenly over both directions) |
+| charge × discharge correction ≈ 1, charge ≫ discharge | Capacity, curve asymmetry or BMS SoC drift (indistinguishable here) | Run a full-discharge capacity test before changing `capacity_kwh` |
 | Charge fidelity 89 % at SoC > 90 % | CV-phase taper near full charge | Normal LFP behaviour; calibration skips samples that cross the high-SoC derate threshold |
-
-To raise the curve: multiply every point in the configured curve by 1.05
-(the measured but capped correction factor). See the updated curves in
-`efficiency-curves.md` §6.
 
 ---
 

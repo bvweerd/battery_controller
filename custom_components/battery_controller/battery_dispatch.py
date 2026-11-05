@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .battery_model import BatteryConfig, BatteryState
 from .const import MODE_HYBRID, MODE_HYBRID_PLUS, MODE_ZERO_GRID
+from .efficiency_curve import interpolate_efficiency
 
 # When the relative-SoC gap between batteries is below _SOC_SPLIT_THRESHOLD,
 # concentrate the full setpoint on one battery (better tracking, avoids
@@ -21,6 +22,12 @@ _SOC_SPLIT_THRESHOLD = 0.10
 # there is a middle zone [_SOC_HYSTERESIS, _SOC_SPLIT_THRESHOLD) where a switch
 # to a clearly better battery happens before proportional splitting kicks in.
 _SOC_HYSTERESIS = 0.05
+# Concentrating keeps a pack off the steep idle-loss end of its curve, but near
+# rated power the resistive losses climb again and two packs at half power lose
+# less than one at full. A balanced fleet therefore splits whenever the curves
+# say splitting loses less, with this hysteresis (as a fraction of the setpoint)
+# so a setpoint hovering at the crossover does not hand power back and forth.
+_EFFICIENCY_SPLIT_MARGIN = 0.005
 
 
 class BatteryDispatcher:
@@ -41,6 +48,9 @@ class BatteryDispatcher:
         # determines the selection criterion.
         self.zero_grid_active: str | None = None
         self.scheduled_active: str | None = None
+        # Whether a balanced fleet is currently split for efficiency rather
+        # than concentrated; carries the hysteresis across calls.
+        self.efficiency_split = False
 
     def split_setpoint(self, total_kw: float, mode: str = "") -> dict[str, float]:
         """Split combined setpoint (kW, positive=charge) to per-battery setpoints.
@@ -55,7 +65,10 @@ class BatteryDispatcher:
         Uses SoC-gap triggered concentration:
         - Gap < _SOC_SPLIT_THRESHOLD: concentrate on one battery. Avoids
           splitting tiny setpoints across inverters and provides stable
-          single-inverter tracking for zero-grid corrections.
+          single-inverter tracking for zero-grid corrections. The exception
+          is a setpoint where the efficiency curves say a proportional split
+          loses less (high power on packs whose curve falls off towards their
+          rating); see _EFFICIENCY_SPLIT_MARGIN.
         - Gap >= _SOC_SPLIT_THRESHOLD: proportional split with iterative
           power-overflow redistribution to rebalance diverging SoC levels.
 
@@ -81,7 +94,40 @@ class BatteryDispatcher:
             return self._proportional_split(total_kw, self.configs)
 
         winner = self._select_active_battery(total_kw, rel_socs, mode)
-        return self._concentrate(total_kw, winner)
+        concentrated = self._concentrate(total_kw, winner)
+        if len(self.configs) < 2:
+            return concentrated
+        split = self._proportional_split(total_kw, self.configs)
+        margin = _EFFICIENCY_SPLIT_MARGIN * abs(total_kw)
+        concentrated_loss = self._conversion_loss_kw(concentrated)
+        split_loss = self._conversion_loss_kw(split)
+        if self.efficiency_split:
+            self.efficiency_split = split_loss <= concentrated_loss + margin
+        else:
+            self.efficiency_split = split_loss < concentrated_loss - margin
+        return split if self.efficiency_split else concentrated
+
+    def _conversion_loss_kw(self, setpoints: dict[str, float]) -> float:
+        """Conversion loss of a split, from each pack's own curve at its power.
+
+        Charging loses ``P * (1 - eff)`` of what the grid supplies; discharging
+        draws ``P / eff`` from the pack to deliver ``P``. Both are kW of energy
+        that never reaches its destination, so splits are compared on that.
+        """
+        loss = 0.0
+        for sid, cfg in self.configs:
+            power = setpoints.get(sid, 0.0)
+            if abs(power) < 1e-9:
+                continue
+            if power > 0:
+                eff = interpolate_efficiency(cfg.charge_efficiency_curve_parsed, power)
+                loss += power * (1.0 - eff)
+            else:
+                eff = interpolate_efficiency(
+                    cfg.discharge_efficiency_curve_parsed, -power
+                )
+                loss += -power * (1.0 / eff - 1.0) if eff > 0 else float("inf")
+        return loss
 
     def _compute_rel_socs(self) -> dict[str, float]:
         """Compute relative SoC position [0, 1] per battery within its usable range."""

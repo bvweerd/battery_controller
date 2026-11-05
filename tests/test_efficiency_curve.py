@@ -4,6 +4,7 @@ import pytest
 
 from custom_components.battery_controller.efficiency_curve import (
     aggregate_curves,
+    aggregate_curves_concentrated,
     interpolate_efficiency,
     parse_efficiency_curve,
     representative_efficiency,
@@ -273,3 +274,73 @@ class TestRepresentativeEfficiency:
     def test_zero_max_power_falls_back_to_zero_power_value(self):
         curve = [(0.0, 0.80), (10.0, 1.00)]
         assert representative_efficiency(curve, 0.0) == pytest.approx(0.80)
+
+
+class TestAggregateCurvesConcentrated:
+    """The fleet curve follows how the dispatcher drives a balanced fleet.
+
+    BatteryDispatcher._concentrate puts the whole setpoint on one pack up to
+    its rating and spreads only the overflow over the others, so at part load
+    one pack runs on its plateau instead of every pack on its idle-loss end.
+    """
+
+    CURVE = [(0.0, 0.50), (1.0, 0.70), (2.0, 0.90), (5.0, 0.95)]
+
+    def test_part_load_runs_one_pack(self):
+        result = aggregate_curves_concentrated([self.CURVE, self.CURVE], [5.0, 5.0])
+        # 2 kW on one pack: the curve at 2 kW, not at 1 kW
+        assert interpolate_efficiency(result, 2.0) == pytest.approx(0.90)
+
+    def test_overflow_spills_onto_the_other_pack(self):
+        result = aggregate_curves_concentrated([self.CURVE, self.CURVE], [5.0, 5.0])
+        # 7 kW: one pack at 5 kW (0.95), the other at 2 kW (0.90)
+        expected = (5.0 * 0.95 + 2.0 * 0.90) / 7.0
+        assert interpolate_efficiency(result, 7.0) == pytest.approx(expected)
+
+    def test_discharge_overflow_is_harmonic(self):
+        result = aggregate_curves_concentrated(
+            [self.CURVE, self.CURVE], [5.0, 5.0], direction="discharge"
+        )
+        expected = 7.0 / (5.0 / 0.95 + 2.0 / 0.90)
+        assert interpolate_efficiency(result, 7.0) == pytest.approx(expected)
+
+    def test_full_power_matches_the_even_split(self):
+        result = aggregate_curves_concentrated([self.CURVE, self.CURVE], [5.0, 5.0])
+        assert result[-1] == (10.0, pytest.approx(0.95))
+
+    def test_unknown_winner_is_averaged(self):
+        flat_a = [(0.0, 0.90), (5.0, 0.90)]
+        flat_b = [(0.0, 0.70), (5.0, 0.70)]
+        charge = aggregate_curves_concentrated([flat_a, flat_b], [5.0, 5.0])
+        assert interpolate_efficiency(charge, 2.0) == pytest.approx(0.80)
+        discharge = aggregate_curves_concentrated(
+            [flat_a, flat_b], [5.0, 5.0], direction="discharge"
+        )
+        assert interpolate_efficiency(discharge, 2.0) == pytest.approx(
+            2.0 / (1.0 / 0.90 + 1.0 / 0.70)
+        )
+
+    def test_single_curve_unchanged(self):
+        curve = [(0.0, 0.90), (5.0, 0.95)]
+        assert aggregate_curves_concentrated([curve], [5.0]) == curve
+
+    def test_rejects_bad_input(self):
+        with pytest.raises(ValueError):
+            aggregate_curves_concentrated([], [])
+        with pytest.raises(ValueError):
+            aggregate_curves_concentrated([self.CURVE], [1.0, 2.0])
+        with pytest.raises(ValueError):
+            aggregate_curves_concentrated(
+                [self.CURVE, self.CURVE], [5.0, 5.0], direction="up"
+            )
+
+    def test_takes_the_split_where_it_loses_less(self):
+        """Mirrors the dispatcher: near rated power two half-loaded packs win."""
+        curve = [(0.1, 0.76), (0.5, 0.91), (0.8, 0.91), (1.2, 0.89)]
+        result = aggregate_curves_concentrated(
+            [curve, curve], [1.2, 1.2], direction="discharge"
+        )
+        # 1.2 kW: one pack at 1.2 (0.89) vs two at 0.6 (0.91)
+        assert interpolate_efficiency(result, 1.2) == pytest.approx(0.91)
+        # 0.5 kW: one pack at 0.5 (0.91) beats two at 0.25
+        assert interpolate_efficiency(result, 0.5) == pytest.approx(0.91)

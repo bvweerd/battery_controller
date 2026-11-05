@@ -2,11 +2,12 @@
 
 ## Prerequisites
 
-- **Home Assistant 2025.1 or later**
+- **Home Assistant 2026.2 or later**
 - A dynamic electricity price sensor with forecast attributes (e.g. Nordpool, ENTSO-E,
   or the [Dynamic Energy Contract Calculator](https://github.com/bvweerd/dynamic_energy_contract_calculator))
 - Battery SoC sensor(s) from your inverter integration
-- [HACS](https://hacs.xyz/) installed in your Home Assistant (recommended)
+- On Home Assistant 2026.11 or later nothing else is needed: the built-in **Marketplace**
+  replaces HACS. On older versions, [HACS](https://hacs.xyz/) is recommended.
 
 !!! tip "Check your sensors before you install"
     Two sensor problems account for most of the "it does not work" reports: a price
@@ -134,11 +135,20 @@ data.
 
 ## Installing the integration
 
-=== "Via HACS (recommended)"
+=== "Via the Marketplace (2026.11+, recommended)"
 
-    1. Navigate to **HACS → Integrations → Three dots → Custom repositories**.
-    2. Add `https://github.com/bvweerd/battery_controller` as an **Integration**.
-    3. Install the "Battery Controller" integration and restart Home Assistant.
+    1. Navigate to **Settings → Marketplace**.
+    2. Search for **Battery Controller** and select **Install**.
+    3. A first install needs no restart; updates do, and a repair offers to restart for you.
+
+    If you installed through HACS before upgrading to 2026.11, nothing to do: the
+    installation is migrated to the Marketplace automatically and keeps receiving updates.
+
+=== "Via HACS (2026.10 and older)"
+
+    1. Navigate to **HACS → Integrations**.
+    2. Search for **Battery Controller** and download it.
+    3. Restart Home Assistant.
 
 === "Manual"
 

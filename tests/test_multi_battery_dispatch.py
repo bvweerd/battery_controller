@@ -272,3 +272,82 @@ def test_unrecognised_unit_is_dropped_and_warned_once(
     caplog.clear()
     assert coord._read_power_sensor_w("sensor.grid") is None
     assert caplog.text == ""
+
+
+# --------------------------------------------------------------------------
+# Efficiency-driven split
+#
+# A balanced fleet concentrates to keep packs off the idle-loss end of their
+# curve, but near rated power two packs at half power lose less than one at
+# full, and the dispatcher then splits.
+# --------------------------------------------------------------------------
+
+_VENUS_A = (
+    "0.05:0.623, 0.1:0.764, 0.2:0.857, 0.3:0.890, "
+    "0.5:0.909, 0.8:0.908, 1.2:0.892, 1.5:0.878"
+)
+
+
+def _curved_battery():
+    return BatteryConfig(
+        capacity_kwh=4.24,
+        max_charge_power_kw=1.2,
+        max_discharge_power_kw=1.2,
+        min_soc_percent=12.0,
+        max_soc_percent=100.0,
+        charge_efficiency_curve=_VENUS_A,
+        discharge_efficiency_curve=_VENUS_A,
+    )
+
+
+def _balanced_fleet():
+    return _with_batteries(
+        None, {"a": (_curved_battery(), 2.5), "b": (_curved_battery(), 2.5)}
+    )
+
+
+def test_part_load_stays_concentrated():
+    dispatcher = _balanced_fleet()
+    result = dispatcher.split_setpoint(-0.5, MODE_FOLLOW_SCHEDULE)
+    assert sorted(result.values()) == pytest.approx([-0.5, 0.0])
+    assert dispatcher.efficiency_split is False
+
+
+def test_high_power_splits_when_it_loses_less():
+    dispatcher = _balanced_fleet()
+    result = dispatcher.split_setpoint(-1.2, MODE_FOLLOW_SCHEDULE)
+    # 2 x 0.6 kW (0.909) beats 1 x 1.2 kW (0.892)
+    assert result["a"] == pytest.approx(-0.6)
+    assert result["b"] == pytest.approx(-0.6)
+    assert dispatcher.efficiency_split is True
+    assert sum(result.values()) == pytest.approx(-1.2)
+
+
+def test_flat_curves_never_split_for_efficiency():
+    """Equal losses either way: concentration, as before."""
+    dispatcher = _with_batteries(None, {"a": (_battery(), 5.0), "b": (_battery(), 5.0)})
+    result = dispatcher.split_setpoint(4.0, MODE_FOLLOW_SCHEDULE)
+    assert sorted(result.values()) == pytest.approx([0.0, 4.0])
+    assert dispatcher.efficiency_split is False
+
+
+def test_efficiency_split_has_hysteresis():
+    """At the crossover the current choice holds instead of flapping."""
+    dispatcher = _balanced_fleet()
+    dispatcher.split_setpoint(-1.2, MODE_FOLLOW_SCHEDULE)
+    assert dispatcher.efficiency_split is True
+    # Find a power where the two choices are within the margin of each other.
+    crossover = None
+    for step in range(60, 121):
+        kw = step / 100
+        conc = dispatcher._conversion_loss_kw({"a": -kw, "b": 0.0})
+        split = dispatcher._conversion_loss_kw({"a": -kw / 2, "b": -kw / 2})
+        if 0 < split - conc < 0.005 * kw:
+            crossover = kw
+            break
+    assert crossover is not None
+    dispatcher.split_setpoint(-crossover, MODE_FOLLOW_SCHEDULE)
+    assert dispatcher.efficiency_split is True
+    fresh = _balanced_fleet()
+    fresh.split_setpoint(-crossover, MODE_FOLLOW_SCHEDULE)
+    assert fresh.efficiency_split is False
