@@ -98,8 +98,8 @@ Both are suggestions, not actions. Wire them to an automation if you want them a
 
 | Entity | Range | Default | Description |
 |--------|-------|---------|-------------|
-| Degradation Cost | 0–1.00 EUR/cycle | 0.04 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
-| Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Minimum buy/sell spread required before arbitrage is scheduled |
+| Degradation Cost | 0–1.00 EUR/cycle | 0.42 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
+| Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Extra margin per kWh a cycle must earn *on top of* round-trip losses and degradation — not the minimum price difference itself |
 | Zero Grid Deadband | 0–500 W | 50 | Grid power tolerance; setpoints are not updated within this band |
 | Manual Power Setpoint | ±max power W | 0 | Target power in `manual` mode (positive = discharge, negative = charge) |
 

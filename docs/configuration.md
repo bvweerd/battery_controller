@@ -276,8 +276,8 @@ the UI or an automation without reloading the integration.
 
 | Entity | Range | Default | Description |
 |--------|-------|---------|-------------|
-| Degradation Cost | 0–1.00 EUR/cycle | 0.04 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
-| Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Minimum buy/sell spread required before arbitrage is scheduled |
+| Degradation Cost | 0–1.00 EUR/cycle | 0.42 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
+| Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Extra margin per kWh a cycle must earn *on top of* round-trip losses and degradation — not the minimum price difference itself |
 | Zero Grid Deadband | 0–500 W | 50 | Grid power tolerance; setpoints are not updated within this band |
 | Manual Power Setpoint | ±max power W | 0 | Target power in `manual` mode (positive = discharge, negative = charge) |
 
@@ -286,3 +286,14 @@ only scheduled when the price spread exceeds roughly
 `(2 × degradation + min_price_spread) / √RTE`. Raising either one makes the optimizer
 more conservative; setting both to zero makes it trade on any spread at all, including
 ones that cost you money in wear.
+
+**Minimum Price Spread is a margin, not the price difference.** The optimizer already
+subtracts round-trip losses and degradation from every cycle; this value is added on top
+(half on the energy going in, half on the energy coming out). A small value such as
+0.00–0.02 is usually enough. It is in the units of your price sensor, so if that sensor
+excludes VAT the bar is higher than it looks in consumer prices.
+
+Example: with a cheapest hour of €0.200 and a most expensive hour of €0.315 (spread
+€0.115), about 85 % RTE (≈ €0.047 losses) and the default degradation of €0.42/cycle
+(≈ €0.044 per kWh cycled for a typical pack), only ≈ €0.024 margin is left — so a Minimum
+Price Spread of 0.05 keeps the battery idle, while 0.02 lets it trade.

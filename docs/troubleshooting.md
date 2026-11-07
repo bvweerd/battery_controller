@@ -68,9 +68,17 @@ raises the staleness limit that goes with it (twice the response time, and never
 
 ## The optimizer always schedules idle / never does arbitrage
 
-- Ensure the price spread between cheap and expensive hours exceeds the **Minimum Price
-  Spread** number entity (default 0.05 EUR/kWh) plus twice the **Degradation Cost**
-  (default 0.04 EUR/cycle).
+- Ensure the price spread between cheap and expensive hours covers the round-trip losses,
+  the **Degradation Cost** (default 0.42 EUR/cycle) *and* the **Minimum Price Spread**
+  (default 0.05 EUR/kWh) together. Minimum Price Spread is extra margin on top of losses
+  and wear, so try 0.00–0.02 — see
+  [runtime tuning](configuration.md#runtime-tuning-number-entities).
+- **Upgraded from 2.10.x and trading stopped?** Nothing is broken. Since 2.11.0 Minimum
+  Price Spread is part of the optimizer's cost for every cycle (before, it was only used by
+  a post-filter that rarely triggered with hourly prices), and the default Degradation
+  Cost rose from 0.04 to 0.42 EUR/cycle. Entries without an explicit degradation value
+  picked up the new default. Lower Minimum Price Spread and set Degradation Cost to match
+  your battery.
 - Check that the feed-in price is not equal to the grid price. If they are identical,
   arbitrage is much less profitable. Configure a separate feed-in price sensor, or set
   the fixed feed-in price.
