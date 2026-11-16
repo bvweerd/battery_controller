@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.battery_controller import async_setup_entry, async_unload_entry
 from custom_components.battery_controller.__init__ import (
     BatteryControllerData,
     _async_handle_reset_charge_efficiency_calibration,
@@ -14,17 +16,15 @@ from custom_components.battery_controller.__init__ import (
     _link_to_hub,
     _update_listener,
 )
-from custom_components.battery_controller.const import DOMAIN
 from custom_components.battery_controller.const import (
+    BATTERY_SUBENTRY_TYPE,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_MANUAL_POWER_SETPOINT_W,
     CONF_MIN_PRICE_SPREAD,
     CONF_ZERO_GRID_DEADBAND_W,
+    DOMAIN,
 )
-from custom_components.battery_controller import async_setup_entry
-from custom_components.battery_controller import async_unload_entry
-from custom_components.battery_controller.const import BATTERY_SUBENTRY_TYPE
 
 
 def _make_entry(entry_id="test", data=None, options=None):
@@ -482,11 +482,8 @@ async def test_async_unload_entry_coordinator_shutdown_exception():
 
 
 def test_link_to_hub_sets_via_device():
-    """Child devices keep pointing at the hub entry.
-
-    The key lives outside the DeviceInfo TypedDict as of HA 2026.9, so it is
-    written through a dict view — this is what proves the link is still there.
-    """
+    """Without the hub's registry id the identifier tuple links the child
+    (Home Assistant releases before ``via_device_id``)."""
     from homeassistant.helpers.device_registry import DeviceInfo
 
     info = _link_to_hub(
@@ -496,3 +493,20 @@ def test_link_to_hub_sets_via_device():
 
     assert info["via_device"] == (DOMAIN, "parent_entry")
     assert (DOMAIN, "child") in info["identifiers"]
+
+
+def test_link_to_hub_prefers_the_registry_id():
+    """With the hub registered, the child links by ``via_device_id``, not the
+    deprecated identifier tuple (removed in Home Assistant 2027.8)."""
+    from homeassistant.helpers.device_registry import DeviceInfo
+
+    info = _link_to_hub(
+        DeviceInfo(identifiers={(DOMAIN, "child")}, name="Battery"),
+        (DOMAIN, "parent_entry"),
+        "hub-device-id",
+    )
+    if "via_device_id" in DeviceInfo.__annotations__:
+        assert cast(dict[str, Any], info)["via_device_id"] == "hub-device-id"
+        assert "via_device" not in info
+    else:
+        assert info["via_device"] == (DOMAIN, "parent_entry")

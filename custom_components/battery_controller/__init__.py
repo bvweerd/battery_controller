@@ -16,6 +16,10 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 
+# Home Assistant looks up async_migrate_entry on the integration package
+# (this module), not on config_flow — without this re-export, entries from
+# older config versions fail setup with "Migration handler not found".
+from .config_flow import async_migrate_entry  # noqa: F401
 from .const import (
     BATTERY_SUBENTRY_TYPE,
     CONF_CAPACITY_KWH,
@@ -36,15 +40,10 @@ from .const import (
     PV_SUBENTRY_TYPE,
 )
 from .coordinator import (
-    WeatherDataCoordinator,
     ForecastCoordinator,
     OptimizationCoordinator,
+    WeatherDataCoordinator,
 )
-
-# Home Assistant looks up async_migrate_entry on the integration package
-# (this module), not on config_flow — without this re-export, entries from
-# older config versions fail setup with "Migration handler not found".
-from .config_flow import async_migrate_entry  # noqa: F401
 
 if TYPE_CHECKING:
     # Home Assistant 2026.10+ validates with probatio and aliases voluptuous to it
@@ -196,24 +195,23 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
 
-def _link_to_hub(info: DeviceInfo, hub: tuple[str, str]) -> DeviceInfo:
+def _link_to_hub(
+    info: DeviceInfo, hub: tuple[str, str], hub_device_id: str | None = None
+) -> DeviceInfo:
     """Point a child device (battery, PV array) at the hub device it belongs to.
 
-    Home Assistant 2026.9 removed ``via_device`` from the ``DeviceInfo``
-    TypedDict in favour of ``via_device_id``, which takes the hub's
-    device-registry id rather than its identifier tuple — an id that does not
-    exist until the hub device has been registered. Runtime support for the old
-    key runs until HA 2027.8, and the 2026.2 line this integration still
-    supports has no ``via_device_id`` at all, so the link keeps being written as
-    ``via_device``, through a plain-dict view. That types clean against both
-    Home Assistant versions: a ``type: ignore`` would be an error itself
-    (unused, under strict mypy) on whichever of the two it is not run against.
-
-    Replace this with ``via_device_id`` — resolved from the device registry
-    once the hub device exists — when the supported floor reaches a Home
-    Assistant that has it, and before the key is removed in HA 2027.8.
+    Home Assistant 2026.9 replaced ``via_device`` (the hub's identifier tuple)
+    with ``via_device_id`` (its device-registry id); the old key stops working
+    in HA 2027.8. Where ``via_device_id`` exists and the hub is registered
+    (``hub_device_id``) that is used; on older releases, which this
+    integration still supports, the identifier tuple is written. Both go
+    through a plain-dict view so the code types clean against either version.
     """
-    cast(dict[str, Any], info)["via_device"] = hub
+    view = cast(dict[str, Any], info)
+    if hub_device_id is not None and "via_device_id" in DeviceInfo.__annotations__:
+        view["via_device_id"] = hub_device_id
+    else:
+        view["via_device"] = hub
     return info
 
 
@@ -297,6 +295,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model="Battery Optimization Controller",
         sw_version=_MANIFEST.get("version", "unknown"),
     )
+    # Register the hub first: children link to it by registry id where the
+    # running Home Assistant supports that (see _link_to_hub).
+    hub_device_id: str | None = None
+    if "via_device_id" in DeviceInfo.__annotations__:
+        hub_device_id = (
+            dr.async_get(hass)
+            .async_get_or_create(
+                config_entry_id=entry.entry_id, **cast(dict[str, Any], device)
+            )
+            .id
+        )
 
     battery_devices: dict[str, DeviceInfo] = {}
     for subentry_id, subentry_data in battery_subentries:
@@ -316,6 +325,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 model=f"{capacity_kwh} kWh Battery",
             ),
             (DOMAIN, entry.entry_id),
+            hub_device_id,
         )
 
     pv_devices: dict[str, DeviceInfo] = {}
@@ -330,6 +340,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     model=f"{kwp} kWp PV Array",
                 ),
                 (DOMAIN, entry.entry_id),
+                hub_device_id,
             )
 
     entry.runtime_data = BatteryControllerData(
