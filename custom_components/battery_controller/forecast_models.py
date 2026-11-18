@@ -36,6 +36,11 @@ def _get_season(month: int) -> int:
     ]
 
 
+# Share of the already learned (hour, weekday) buckets a rebuild must cover
+# before it replaces the pattern instead of only updating it.
+_PATTERN_REPLACE_COVERAGE = 0.75
+
+
 def _add_hours(start: datetime, hours: int) -> datetime:
     """``start`` plus a number of real hours, in ``start``'s own time zone.
 
@@ -448,21 +453,34 @@ class ConsumptionForecastModel:
                     MAX_PLAUSIBLE_CONSUMPTION_KW,
                 )
 
-            # Rebuilt rather than updated in place: a bucket whose samples
-            # have all aged out of the history window must not keep its old
-            # average forever. Only replaced once a rebuild produced data, so a
-            # recorder hiccup does not wipe a working pattern.
-            if hourly_values:
-                self._hourly_pattern = {
-                    h_key: sum(values) / len(values)
-                    for h_key, values in hourly_values.items()
-                    if values
-                }
-                self._seasonal_pattern = {
-                    s_key: sum(values) / len(values)
-                    for s_key, values in seasonal_values.items()
-                    if len(values) >= self._SEASONAL_MIN_SAMPLES
-                }
+            # Rebuilt rather than updated in place, so a bucket whose samples
+            # have all aged out of the history window does not keep its old
+            # average forever — but only when the rebuild covers most of what
+            # is already learned. A partial result (a meter replaced two days
+            # ago, a short recorder history) only updates the buckets it has
+            # data for; replacing wholesale there wiped the rest of the week.
+            new_hourly = {
+                h_key: sum(values) / len(values)
+                for h_key, values in hourly_values.items()
+                if values
+            }
+            new_seasonal = {
+                s_key: sum(values) / len(values)
+                for s_key, values in seasonal_values.items()
+                if len(values) >= self._SEASONAL_MIN_SAMPLES
+            }
+            if len(new_hourly) >= _PATTERN_REPLACE_COVERAGE * len(self._hourly_pattern):
+                self._hourly_pattern = new_hourly
+                self._seasonal_pattern = new_seasonal
+            else:
+                _LOGGER.debug(
+                    "Consumption history covers %d of %d learned buckets; "
+                    "updating those instead of replacing the pattern",
+                    len(new_hourly),
+                    len(self._hourly_pattern),
+                )
+                self._hourly_pattern.update(new_hourly)
+                self._seasonal_pattern.update(new_seasonal)
 
             _LOGGER.debug(
                 "Updated consumption pattern from %d energy sensors, "

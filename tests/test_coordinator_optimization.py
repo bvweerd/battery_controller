@@ -5298,7 +5298,13 @@ def test_controller_deadband_follows_the_live_option(hass, monkeypatch):
     live_entry.options = {CONF_ZERO_GRID_DEADBAND_W: 300.0}
     monkeypatch.setattr(hass.config_entries, "async_get_entry", lambda eid: live_entry)
 
-    coord._sync_controller_deadband()
+    coord._control_action(
+        current_grid_w=0.0,
+        current_soc_kwh=5.0,
+        current_battery_w=0.0,
+        dp_schedule_w=0.0,
+        mode="idle",
+    )
 
     assert coord.zero_grid_controller.config.deadband_w == 300.0
 
@@ -5528,3 +5534,28 @@ async def test_historical_price_fallback_is_anchored_on_the_hour(
 
     assert calls, "historical model was not consulted"
     assert calls[0].minute == 0 and calls[0].second == 0
+
+
+@pytest.mark.asyncio
+async def test_paused_optimizer_stands_down_cached_plan_without_realtime_loop(
+    hass, monkeypatch
+):
+    """With no real-time loop, a paused optimizer must not republish a charge."""
+    coord = _make_coordinator(hass)
+    coord.data = {
+        "control_action": {"target_power_w": 1200.0, "current_grid_w": 0.0},
+        "battery_state": BatteryState(soc_kwh=5.0, soc_percent=50.0),
+        "battery_setpoints": {"bat1": 1.2},
+        "optimal_mode": ACTION_CHARGING,
+        "optimal_power_kw": 1.2,
+    }
+    coord._effective_mode = ACTION_CHARGING
+    coord._controller_schedule_w = 1200.0
+    coord.zero_grid_controller.reset_setpoint(1200.0)
+    coord.optimization_enabled = False
+
+    data = await coord._async_update_data()
+
+    assert data["control_action"]["target_power_w"] == 0.0
+    assert data["optimal_mode"] == "idle"
+    assert data["battery_setpoints"] == {"bat1": 0.0}

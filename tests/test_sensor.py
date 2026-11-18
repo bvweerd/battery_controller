@@ -204,7 +204,7 @@ def _make_soc_sensor(subentry_id="sub1", battery_title="Main Battery"):
     coord = _make_optimization_coordinator()
     entry = _make_entry()
     device = _make_device()
-    return BatterySubentrySoCSensor(coord, device, entry, subentry_id, battery_title)
+    return BatterySubentrySoCSensor(coord, device, entry, subentry_id)
 
 
 def test_soc_sensor_returns_none_when_no_coordinator_data():
@@ -217,7 +217,7 @@ def test_soc_sensor_returns_none_when_subentry_not_in_per_states():
     coord = _make_optimization_coordinator(per_battery_states={})
     entry = _make_entry()
     device = _make_device()
-    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub_missing", "Batt")
+    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub_missing")
     assert sensor.native_value is None
 
 
@@ -231,7 +231,7 @@ def test_soc_sensor_returns_rounded_soc_percent():
     coord = _make_optimization_coordinator(per_battery_states={"sub1": state})
     entry = _make_entry()
     device = _make_device()
-    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub1", "Battery")
+    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub1")
 
     assert sensor.native_value == 72.3
 
@@ -246,7 +246,7 @@ def test_soc_sensor_extra_attributes_contain_kwh_power_mode():
     coord = _make_optimization_coordinator(per_battery_states={"sub1": state})
     entry = _make_entry()
     device = _make_device()
-    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub1", "Battery")
+    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub1")
     attrs = sensor.extra_state_attributes
 
     assert attrs["soc_kwh"] == 5.0
@@ -264,7 +264,7 @@ def test_soc_sensor_extra_attributes_empty_when_subentry_missing():
     coord = _make_optimization_coordinator(per_battery_states={})
     entry = _make_entry()
     device = _make_device()
-    sensor = BatterySubentrySoCSensor(coord, device, entry, "missing", "Batt")
+    sensor = BatterySubentrySoCSensor(coord, device, entry, "missing")
     assert sensor.extra_state_attributes == {}
 
 
@@ -273,7 +273,7 @@ def test_soc_sensor_unique_id_does_not_collide_with_global_soc():
     entry = _make_entry("eid")
     coord = _make_optimization_coordinator()
     device = _make_device()
-    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub42", "Batt")
+    sensor = BatterySubentrySoCSensor(coord, device, entry, "sub42")
     # Global SoC sensor uses key "soc" → unique_id "eid_soc"
     assert sensor.unique_id != "eid_soc"
     assert "sub42" in sensor.unique_id
@@ -300,7 +300,7 @@ def test_setpoint_sensor_uses_battery_device_not_main_device():
     coord = _make_optimization_coordinator()
     entry = _make_entry("entry1")
 
-    sensor = BatterySubentrySetpointSensor(coord, batt_device, entry, "sub1", "My Batt")
+    sensor = BatterySubentrySetpointSensor(coord, batt_device, entry, "sub1")
 
     assert sensor._attr_device_info is batt_device
     assert sensor._attr_device_info is not main_device
@@ -311,8 +311,8 @@ def test_setpoint_sensor_unique_id_stable():
     coord = _make_optimization_coordinator()
     entry = _make_entry("e1")
     device = _make_device()
-    s1 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ", "Batt")
-    s2 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ", "Batt")
+    s1 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ")
+    s2 = BatterySubentrySetpointSensor(coord, device, entry, "subXYZ")
     assert s1.unique_id == s2.unique_id
 
 
@@ -325,7 +325,7 @@ def _make_pv_sensor(subentry_id="pv1", array_title="South Array"):
     coord = _make_forecast_coordinator()
     entry = _make_entry()
     device = _make_device()
-    return PVArrayForecastSensor(coord, device, entry, subentry_id, array_title)
+    return PVArrayForecastSensor(coord, device, entry, subentry_id)
 
 
 def test_pv_array_sensor_returns_none_when_no_coordinator_data():
@@ -338,7 +338,7 @@ def test_pv_array_sensor_returns_first_forecast_value():
     coord = _make_forecast_coordinator(per_pv_array_forecasts={"pv1": [2.5, 3.0, 1.0]})
     entry = _make_entry()
     device = _make_device()
-    sensor = PVArrayForecastSensor(coord, device, entry, "pv1", "South")
+    sensor = PVArrayForecastSensor(coord, device, entry, "pv1")
     assert sensor.native_value == 2.5
 
 
@@ -346,7 +346,7 @@ def test_pv_array_sensor_returns_zero_for_empty_forecast():
     coord = _make_forecast_coordinator(per_pv_array_forecasts={"pv1": []})
     entry = _make_entry()
     device = _make_device()
-    sensor = PVArrayForecastSensor(coord, device, entry, "pv1", "South")
+    sensor = PVArrayForecastSensor(coord, device, entry, "pv1")
     assert sensor.native_value == 0.0
 
 
@@ -355,7 +355,7 @@ def test_pv_array_sensor_extra_attributes_contain_full_forecast():
     coord = _make_forecast_coordinator(per_pv_array_forecasts={"pv1": forecast})
     entry = _make_entry()
     device = _make_device()
-    sensor = PVArrayForecastSensor(coord, device, entry, "pv1", "South")
+    sensor = PVArrayForecastSensor(coord, device, entry, "pv1")
     assert sensor.extra_state_attributes["forecast_kw"] == forecast
 
 
@@ -968,7 +968,7 @@ class TestBatterySubentrySetpointSensor:
         coord = MagicMock()
         coord.data = None
         sensor = BatterySubentrySetpointSensor(
-            coord, _make_device(), _make_entry(), "sub1", "Batt"
+            coord, _make_device(), _make_entry(), "sub1"
         )
         assert sensor.native_value is None
 
@@ -977,7 +977,7 @@ class TestBatterySubentrySetpointSensor:
         coord.data = {"battery_setpoints": {"sub1": 1.5}, "per_battery_states": {}}
         # 1.5 kW charge → sensor = -1500W discharge convention
         sensor = BatterySubentrySetpointSensor(
-            coord, _make_device(), _make_entry(), "sub1", "Batt"
+            coord, _make_device(), _make_entry(), "sub1"
         )
         assert sensor.native_value == -1500.0
 
@@ -985,7 +985,7 @@ class TestBatterySubentrySetpointSensor:
         coord = MagicMock()
         coord.data = {"battery_setpoints": {}, "per_battery_states": {}}
         sensor = BatterySubentrySetpointSensor(
-            coord, _make_device(), _make_entry(), "sub1", "Batt"
+            coord, _make_device(), _make_entry(), "sub1"
         )
         assert sensor.extra_state_attributes == {}
 
@@ -996,7 +996,7 @@ class TestBatterySubentrySetpointSensor:
         coord = MagicMock()
         coord.data = {"battery_setpoints": {}, "per_battery_states": {"sub1": state}}
         sensor = BatterySubentrySetpointSensor(
-            coord, _make_device(), _make_entry(), "sub1", "Batt"
+            coord, _make_device(), _make_entry(), "sub1"
         )
         attrs = sensor.extra_state_attributes
         assert attrs["soc_percent"] == 60.0
@@ -1093,7 +1093,7 @@ class TestBatterySubentrySetpointSensorDataNone:
         )
 
         sensor = BatterySubentrySetpointSensor(
-            coord, _make_device(), _make_entry(), "sub1", "Batt"
+            coord, _make_device(), _make_entry(), "sub1"
         )
         assert sensor.extra_state_attributes == {}
 
@@ -1104,9 +1104,7 @@ class TestPVArrayForecastSensorDataNone:
     def test_extra_attrs_returns_empty_when_no_data(self):
 
         coord = _make_forecast_coord(data=None)
-        sensor = PVArrayForecastSensor(
-            coord, _make_device(), _make_entry(), "pv1", "Array 1"
-        )
+        sensor = PVArrayForecastSensor(coord, _make_device(), _make_entry(), "pv1")
         assert sensor.extra_state_attributes == {}
 
 
@@ -1486,11 +1484,9 @@ def test_per_battery_calibration_reads_its_own_battery(hass):
     entry = _make_entry()
 
     worked = BatterySubentryChargeCalibrationSensor(
-        coord, _make_device(), entry, "bat1", "Marstek"
+        coord, _make_device(), entry, "bat1"
     )
-    idle = BatterySubentryChargeCalibrationSensor(
-        coord, _make_device(), entry, "bat2", "Marstek 2"
-    )
+    idle = BatterySubentryChargeCalibrationSensor(coord, _make_device(), entry, "bat2")
 
     assert worked.native_value == pytest.approx(82.0)
     assert worked.extra_state_attributes["samples"] == 12
@@ -1508,10 +1504,10 @@ def test_per_battery_calibration_names_the_battery_and_direction():
     entry = _make_entry()
 
     charge = BatterySubentryChargeCalibrationSensor(
-        coord, _make_device(), entry, "bat1", "Marstek"
+        coord, _make_device(), entry, "bat1"
     )
     discharge = BatterySubentryDischargeCalibrationSensor(
-        coord, _make_device(), entry, "bat1", "Marstek"
+        coord, _make_device(), entry, "bat1"
     )
 
     assert charge.unique_id != discharge.unique_id
@@ -1534,7 +1530,7 @@ def _make_pv_calibration_coord(
 def test_pv_array_calibration_reports_percentage():
     """A array producing 12% above forecast reads as 112%."""
     sensor = PVArrayCalibrationSensor(
-        _make_pv_calibration_coord(1.12), _make_device(), _make_entry(), "pv1", "South"
+        _make_pv_calibration_coord(1.12), _make_device(), _make_entry(), "pv1"
     )
 
     assert sensor.native_value == pytest.approx(112.0)
@@ -1548,9 +1544,7 @@ def test_pv_array_calibration_explains_an_array_that_never_learns():
         applied=False,
         last_result="no_measured_production_sensor",
     )
-    sensor = PVArrayCalibrationSensor(
-        coord, _make_device(), _make_entry(), "pv1", "South"
-    )
+    sensor = PVArrayCalibrationSensor(coord, _make_device(), _make_entry(), "pv1")
 
     attrs = sensor.extra_state_attributes
 
@@ -1561,9 +1555,7 @@ def test_pv_array_calibration_explains_an_array_that_never_learns():
 def test_pv_array_calibration_is_scoped_to_its_own_array():
     """Each sensor must ask about its own subentry, not the first one."""
     coord = _make_pv_calibration_coord()
-    sensor = PVArrayCalibrationSensor(
-        coord, _make_device(), _make_entry(), "pv_east", "East"
-    )
+    sensor = PVArrayCalibrationSensor(coord, _make_device(), _make_entry(), "pv_east")
 
     sensor.native_value
 
@@ -1575,8 +1567,8 @@ def test_pv_array_calibration_sensors_have_distinct_unique_ids():
     coord = _make_pv_calibration_coord()
     entry = _make_entry()
 
-    east = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_east", "East")
-    west = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_west", "West")
+    east = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_east")
+    west = PVArrayCalibrationSensor(coord, _make_device(), entry, "pv_west")
 
     assert east.unique_id != west.unique_id
 

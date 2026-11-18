@@ -93,14 +93,12 @@ async def async_setup_entry(
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     BatterySubentrySoCSensor(
                         optimization_coordinator,
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     # Per-battery calibration: the fleet sensors average the
                     # packs together, which describes neither when they differ.
@@ -109,14 +107,12 @@ async def async_setup_entry(
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     BatterySubentryDischargeCalibrationSensor(
                         optimization_coordinator,
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -136,14 +132,12 @@ async def async_setup_entry(
                         pv_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     PVArrayCalibrationSensor(
                         forecast_coordinator,
                         pv_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -709,6 +703,10 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
     Positive = discharge, Negative = charge (sensor convention).
     """
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "battery_subentry_setpoint"
+
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -719,13 +717,9 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"setpoint_{subentry_id}")
         self._subentry_id = subentry_id
-        # Named through the translation key: the battery's own device carries
-        # its name, and has_entity_name prefixes it.
-        self._attr_translation_key = "battery_subentry_setpoint"
 
     @property
     def native_value(self) -> float | None:
@@ -755,6 +749,10 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
 class BatterySubentrySoCSensor(BatteryControllerSensor):
     """Per-battery state-of-charge sensor."""
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "battery_subentry_soc"
+
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -765,11 +763,9 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"soc_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_translation_key = "battery_subentry_soc"
 
     @property
     def native_value(self) -> float | None:
@@ -799,6 +795,10 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
 class PVArrayForecastSensor(BatteryForecastSensor):
     """Diagnostic sensor for a single PV array's expected output and forecast."""
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "pv_array_forecast"
+
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -811,11 +811,9 @@ class PVArrayForecastSensor(BatteryForecastSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        array_title: str,
     ):
         super().__init__(coordinator, device, entry, f"pv_array_forecast_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_translation_key = "pv_array_forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -1050,7 +1048,6 @@ class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
         self._subentry_id = subentry_id
@@ -1097,6 +1094,10 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
     sensor configured.
     """
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "pv_array_calibration"
+
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1108,11 +1109,9 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        array_title: str,
     ):
         super().__init__(coordinator, device, entry, f"pv_calibration_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_translation_key = "pv_array_calibration"
 
     @property
     def native_value(self) -> float:

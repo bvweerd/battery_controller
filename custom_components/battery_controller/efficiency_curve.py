@@ -7,6 +7,9 @@ import re
 
 _LOGGER = logging.getLogger(__name__)
 
+# Legacy-format curves already warned about (see parse_efficiency_curve_lenient).
+_WARNED_LEGACY_CURVES: set[str] = set()
+
 EfficiencyCurve = list[tuple[float, float]]
 """List of (power_kw, efficiency) tuples, sorted ascending by power."""
 
@@ -75,6 +78,12 @@ def parse_efficiency_curve_lenient(
             )
         except ValueError:
             raise strict_error from None
+        # Once per curve: BatteryConfig is rebuilt at the start of every
+        # optimization run, so warning on each parse repeated the same
+        # message every few minutes until the user re-entered the curve.
+        if raw in _WARNED_LEGACY_CURVES:
+            return curve
+        _WARNED_LEGACY_CURVES.add(raw)
         _LOGGER.warning(
             "Efficiency curve %r uses an ambiguous format and was read as %s. "
             "Re-enter it as power:efficiency pairs (e.g. '0:0.92, 5:0.95') in "

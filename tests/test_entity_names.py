@@ -83,7 +83,7 @@ async def test_english_names_and_no_repeated_device_name(hass: HomeAssistant):
         "Marstek Battery Setpoint"
     )
     assert _friendly_name(hass, "number", f"{eid}_degradation_cost") == (
-        "Battery Controller Degradation Cost"
+        "Battery Controller Degradation Cost per Cycle"
     )
 
 

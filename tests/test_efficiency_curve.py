@@ -367,3 +367,13 @@ class TestStrictPairGrammar:
 
         assert cfg.charge_efficiency_curve_parsed == [(0.0, 0.92), (5.0, 0.95)]
         assert "ambiguous format" in caplog.text
+
+    def test_legacy_curve_warning_is_logged_once(self, caplog):
+        """Configs are rebuilt every run; the warning must not repeat each time."""
+        from custom_components.battery_controller.battery_model import BatteryConfig
+
+        legacy = "0, 0.90, 4, 0.94"
+        BatteryConfig(charge_efficiency_curve=legacy)
+        BatteryConfig(charge_efficiency_curve=legacy)
+
+        assert caplog.text.count("ambiguous format") == 1

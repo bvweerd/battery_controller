@@ -1801,3 +1801,15 @@ def test_pv_band_correction_counts_as_applied(hass):
     coord._pv_cal_band_corrections[sid] = {2: 0.8}
 
     assert coord.pv_correction_applied(sid) is True
+
+
+def test_pv_global_correction_not_applied_when_every_band_overrides_it(hass):
+    """A significant global gain applies nowhere once all bands have their own."""
+    coord = _make_cal_coordinator(hass)
+    sid = coord.pv_calibrated_array_ids[0]
+    coord._pv_cal_correction[sid] = 1.15
+    assert coord.pv_correction_applied(sid) is True
+
+    coord._pv_cal_band_corrections[sid] = {band: 1.0 for band in range(5)}
+
+    assert coord.pv_correction_applied(sid) is False
