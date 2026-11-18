@@ -338,9 +338,10 @@ def aggregate_battery_configs(configs: list[BatteryConfig]) -> BatteryConfig:
     # of only the derated powers capped the whole fleet at one battery's
     # reduced rating — a 5 kW pack without derating lost 5 kW of charge power
     # because its neighbour throttles above 90 %.  Applying the first
-    # threshold to the summed per-battery limits is conservative in timing
-    # (derating may start slightly early for some packs) but never understates
-    # the power the fleet can deliver.
+    # threshold to the summed per-battery limits is conservative: between the
+    # first and a later threshold, a pack that derates only at that later
+    # threshold is already counted at its derated limit, so the fleet power is
+    # understated there — never overstated.
     charge_derated = [c for c in configs if c.high_soc_max_charge_kw > 0]
     if charge_derated:
         combined_high_threshold = min(

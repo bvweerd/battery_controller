@@ -290,7 +290,14 @@ class ForecastCoordinator(DataUpdateCoordinator):
         is only derived once PV_CALIBRATION_MIN_SAMPLES observations exist, so
         this stays False while the window fills.
         """
-        return _pv_gain_is_significant(self.pv_correction(subentry_id))
+        if _pv_gain_is_significant(self.pv_correction(subentry_id)):
+            return True
+        # Per-elevation-band gains are applied on their own sample floor, so an
+        # array can be corrected through a band before the global window fills.
+        return any(
+            _pv_gain_is_significant(gain)
+            for gain in self._pv_cal_band_corrections.get(subentry_id, {}).values()
+        )
 
     def pv_last_result(self, subentry_id: str) -> str:
         """What the last calibration attempt for one array did, and why."""
@@ -489,6 +496,10 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 sid, deque(maxlen=PV_CALIBRATION_WINDOW)
             )
             samples.append((measured_kwh, planned_kwh))
+            # Persist every accepted sample, not only a moved correction: the
+            # window and the per-band samples were otherwise lost on restart
+            # while they were still filling.
+            changed = True
             # Per-elevation-band calibration: same sample, split by sun angle.
             elevation_deg = snapshot.get("elevation_deg")
             if elevation_deg is not None:

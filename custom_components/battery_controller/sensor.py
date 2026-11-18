@@ -169,7 +169,12 @@ async def async_setup_entry(
             # and subentry. Removing the main-entry link would delete the device, so
             # a device still outside its subentry is moved into it instead.
             if dev.config_entry_id == entry.entry_id and dev.config_subentry_id is None:
-                device_registry.async_update_device(dev.id, new_config_subentry_id=sid)
+                # Passed as a mapping so the call type-checks against the
+                # older Home Assistant releases this integration supports,
+                # which do not have the keyword (the hasattr guard above keeps
+                # it from running there).
+                move: dict[str, Any] = {"new_config_subentry_id": sid}
+                device_registry.async_update_device(dev.id, **move)
         elif None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,

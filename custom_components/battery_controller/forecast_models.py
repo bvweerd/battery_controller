@@ -435,13 +435,21 @@ class ConsumptionForecastModel:
                     MAX_PLAUSIBLE_CONSUMPTION_KW,
                 )
 
-            for h_key, values in hourly_values.items():
-                if values:
-                    self._hourly_pattern[h_key] = sum(values) / len(values)
-
-            for s_key, values in seasonal_values.items():
-                if len(values) >= self._SEASONAL_MIN_SAMPLES:
-                    self._seasonal_pattern[s_key] = sum(values) / len(values)
+            # Rebuilt rather than updated in place: a bucket whose samples
+            # have all aged out of the history window must not keep its old
+            # average forever. Only replaced once a rebuild produced data, so a
+            # recorder hiccup does not wipe a working pattern.
+            if hourly_values:
+                self._hourly_pattern = {
+                    h_key: sum(values) / len(values)
+                    for h_key, values in hourly_values.items()
+                    if values
+                }
+                self._seasonal_pattern = {
+                    s_key: sum(values) / len(values)
+                    for s_key, values in seasonal_values.items()
+                    if len(values) >= self._SEASONAL_MIN_SAMPLES
+                }
 
             _LOGGER.debug(
                 "Updated consumption pattern from %d energy sensors, "

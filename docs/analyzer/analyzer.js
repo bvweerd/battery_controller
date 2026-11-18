@@ -235,7 +235,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
 
   // Arbitrage hurdle: half the configured spread per direction, so a full
   // cycle carries 2 * degradation + min_price_spread (mirrors optimizer.py).
-  const arbCostPerKwh = Math.max(0, minPriceSpread || 0) / 2;
+  const arbCostPerKwh = Math.max(0, minPriceSpread ?? 0.05) / 2;
   // Seed for the boundary-action fixed point (see solveFillW / solveDrainW)
   const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
   const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
@@ -436,7 +436,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
 
   // Arbitrage hurdle: half the configured spread per direction, so a full
   // cycle carries 2 * degradation + min_price_spread (mirrors optimizer.py).
-  const arbCostPerKwh = Math.max(0, minPriceSpread || 0) / 2;
+  const arbCostPerKwh = Math.max(0, minPriceSpread ?? 0.05) / 2;
   const chgEffSeed = representativeEfficiency(chargeCurve, cfg.maxChargeKw);
   const disEffSeed = representativeEfficiency(dischargeCurve, cfg.maxDischargeKw);
   const nSocStates   = socStates.length;
@@ -853,7 +853,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
 
   const oscResult = filterOscillations(
     powerKw, modes, cfg, priceFc, feedInFc || priceFc, pvFc, consumFc,
-    dp.stepDurations, degradCost, minPriceSpread || 0.05, pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
+    dp.stepDurations, degradCost, minPriceSpread ?? 0.05, pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
   );
   // Accept the filter only when it does not cost money. The arbitrage hurdle
   // now lives inside the DP objective, so the DP already returns the optimum
