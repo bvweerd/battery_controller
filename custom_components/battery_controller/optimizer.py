@@ -108,6 +108,47 @@ def compute_soc_resolution_wh(min_soc_wh: float, max_soc_wh: float) -> float:
     return max(float(SOC_RESOLUTION_WH), (max_soc_wh - min_soc_wh) / MAX_SOC_STATES)
 
 
+def n_states_below_min(
+    current_soc_wh: float, min_soc_wh: float, soc_resolution_wh: float
+) -> int:
+    """Return how many DP states the grid needs below min_soc.
+
+    Zero when the current SoC is at or above min_soc. Otherwise the smallest
+    count whose lowest state lies at or below the current SoC, so the grid
+    (still aligned on min_soc) covers it.
+    """
+    if current_soc_wh >= min_soc_wh or soc_resolution_wh <= 0:
+        return 0
+    # Small tolerance: a deficit of exactly k states must not round up to k+1.
+    return math.ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh - 1e-9)
+
+
+def deficit_penalty_per_kwh(
+    price_forecast: list[float],
+    feed_in_forecast: list[float],
+    charge_curve: EfficiencyCurve,
+    degradation_cost_per_kwh: float,
+    arbitrage_cost_per_kwh: float,
+) -> float:
+    """Return the terminal cost per kWh that the horizon ends below min_soc.
+
+    It must exceed the most expensive way to put one kWh into the battery
+    anywhere in the horizon: energy at the highest buy (or forgone feed-in)
+    price, divided by the worst charge efficiency, plus degradation and the
+    arbitrage hurdle. The DP then always refills to min_soc when it can,
+    choosing the cheapest steps, and the penalty itself never ends up in a
+    feasible schedule. A factor of 2 plus a fixed margin keeps it strictly
+    above that bound even for flat curves and zero prices.
+    """
+    max_energy_price = max([0.0, *price_forecast, *feed_in_forecast])
+    min_eff = min((eff for _, eff in charge_curve), default=1.0)
+    min_eff = max(0.05, min(1.0, min_eff))
+    worst_cost = (
+        max_energy_price + max(0.0, degradation_cost_per_kwh) + arbitrage_cost_per_kwh
+    ) / min_eff
+    return 2.0 * worst_cost + 0.10
+
+
 @dataclass
 class OptimizationResult:
     """Result of battery optimization."""
@@ -341,7 +382,11 @@ def _calculate_schedule_total_cost(
         )
 
     final_soc_kwh = soc_schedule_kwh[-1] if soc_schedule_kwh else 0.0
-    final_stored_kwh = max(0.0, final_soc_kwh - battery_config.min_soc_kwh)
+    # Linear in both directions: a schedule that starts below min_soc and ends
+    # there too is valued the same way as the initial SoC (see savings), so an
+    # idle schedule still reports zero savings and a refill is credited at the
+    # terminal price rather than counted as a pure loss.
+    final_stored_kwh = final_soc_kwh - battery_config.min_soc_kwh
     total_cost -= final_stored_kwh * terminal_price
     return total_cost
 
@@ -785,7 +830,20 @@ def optimize_battery_schedule(
         # not represent.  Shrinking the step instead of adding a state keeps the
         # MAX_SOC_STATES budget intact.
         soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)
-    soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
+
+    # A SoC below min_soc (BMS reserve, a lowered min_soc setting, self-
+    # discharge) must still be representable: without states below min_soc the
+    # current SoC snapped onto the min_soc state, every charge action that did
+    # not reach the next state was rejected as sub-resolution, and the whole
+    # schedule came out idle exactly when the battery needed charging (#215).
+    # Extend the grid downward with the same resolution so min_soc stays a
+    # grid point; those states are only reachable from a below-min start.
+    min_soc_idx = n_states_below_min(
+        current_soc_kwh * 1000.0, min_soc_wh, soc_resolution_wh
+    )
+    grid_floor_wh = min_soc_wh - min_soc_idx * soc_resolution_wh
+    n_soc_states += min_soc_idx
+    soc_states = [grid_floor_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     # Initialize value function (cost-to-go)
     # V[t][s] = minimum cost from time t to end, starting at SoC state s
@@ -831,9 +889,22 @@ def optimize_battery_schedule(
         terminal_price = max(0.0, min(feed_in_forecast[-1], avg_tail))
     else:
         terminal_price = 0.0
+    # Ending below min_soc costs more than refilling it anywhere in the horizon
+    # could, so the DP always restores min_soc when it physically can, at the
+    # cheapest moment. See deficit_penalty_per_kwh().
+    deficit_penalty = deficit_penalty_per_kwh(
+        price_forecast[:n_steps],
+        feed_in_forecast[:n_steps],
+        charge_curve,
+        degradation_cost_per_kwh,
+        arbitrage_cost_per_kwh,
+    )
     for s_idx, soc_wh in enumerate(soc_states):
         stored_kwh = (soc_wh - min_soc_wh) / 1000.0
-        V[n_steps][s_idx] = -stored_kwh * terminal_price
+        if stored_kwh >= 0:
+            V[n_steps][s_idx] = -stored_kwh * terminal_price
+        else:
+            V[n_steps][s_idx] = -stored_kwh * deficit_penalty
 
     # Power action space (discretized in W)
     max_charge_w = battery_config.max_charge_power_kw * 1000
@@ -1111,8 +1182,8 @@ def optimize_battery_schedule(
                     best_action = action_w
 
             # Boundary actions: exact power to reach min/max SoC in this step.
-            # new_soc_idx is known directly (0 or n_soc_states-1), avoiding the
-            # floating-point round-trip through the energy formula.
+            # new_soc_idx is known directly (min_soc_idx or n_soc_states-1),
+            # avoiding the floating-point round-trip through the energy formula.
             # Power estimate uses the zero-power transition scalar (hoisted
             # above the loops; second-order error).
             if soc_wh > min_soc_wh:
@@ -1133,7 +1204,7 @@ def optimize_battery_schedule(
                         pv_dc_production_w=pv_dc_w,
                         arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
-                    total_cost = step_cost + V_next[0]
+                    total_cost = step_cost + V_next[min_soc_idx]
                     if total_cost < best_cost:
                         best_cost = total_cost
                         best_action = -drain_w
@@ -1299,7 +1370,7 @@ def optimize_battery_schedule(
                     pv_dc_production_w=pv_dc_w,
                     arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
-                total_cost = step_cost + V[t + 1][0]
+                total_cost = step_cost + V[t + 1][min_soc_idx]
                 if total_cost < best_cost:
                     best_cost = total_cost
                     best_action = -drain_w
@@ -1424,8 +1495,23 @@ def optimize_battery_schedule(
     # The filter still earns its keep where it agrees with the cost model: it
     # removes churn the DP is indifferent about, which is real wear the cost
     # model prices only through degradation.
+    def _deficit_surcharge(soc_kwh: list[float]) -> float:
+        """Extra objective cost for ending below min_soc (zero otherwise).
+
+        Real money (_price_schedule) only charges the terminal price for a
+        deficit, so a filter that removes the refill charge would look cheaper
+        there. Adding the DP's deficit penalty keeps both guards from undoing
+        the refill that the DP planned on purpose.
+        """
+        deficit_kwh = battery_config.min_soc_kwh - (soc_kwh[-1] if soc_kwh else 0.0)
+        if deficit_kwh <= 1e-9:
+            return 0.0
+        return deficit_kwh * (deficit_penalty - terminal_price)
+
     osc_total_cost = _price_schedule(osc_power_kw, osc_soc_kwh)
-    if osc_total_cost <= raw_total_cost:
+    if osc_total_cost + _deficit_surcharge(
+        osc_soc_kwh
+    ) <= raw_total_cost + _deficit_surcharge(raw_soc_schedule_kwh):
         power_schedule_kw, mode_schedule, soc_schedule_kwh = (
             osc_power_kw,
             osc_mode_schedule,
@@ -1441,6 +1527,7 @@ def optimize_battery_schedule(
         )
 
     # Post-process: suppress micro-cycles (P5.1)
+    pre_micro = (power_schedule_kw, mode_schedule, soc_schedule_kwh)
     power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_micro_cycles(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
@@ -1456,6 +1543,11 @@ def optimize_battery_schedule(
         discharge_curve=discharge_curve,
         max_charge_power_kw=battery_config.max_charge_power_kw,
     )
+    # The micro-cycle filter is not cost-gated (unpriced wear), but it must not
+    # drop a small refill that is the only thing lifting the SoC back to
+    # min_soc: that would leave the battery below its reserve run after run.
+    if _deficit_surcharge(soc_schedule_kwh) > _deficit_surcharge(pre_micro[2]) + 1e-9:
+        power_schedule_kw, mode_schedule, soc_schedule_kwh = pre_micro
 
     # Shadow price: marginal value of 1 kWh stored at t=0, current SoC.
     # Computed after post-processing filters so it is consistent with the
@@ -1500,7 +1592,9 @@ def optimize_battery_schedule(
     # baseline_cost does not include any terminal value.
     # Subtracting the terminal value of the *initial* SoC makes savings = 0 when the
     # battery is idle, regardless of how much energy is already stored.
-    initial_stored_kwh = max(0.0, current_soc_kwh - battery_config.min_soc_kwh)
+    # Linear, like the final value in _calculate_schedule_total_cost: below
+    # min_soc this is negative, so a refill is not reported as lost savings.
+    initial_stored_kwh = current_soc_kwh - battery_config.min_soc_kwh
     initial_terminal_value = initial_stored_kwh * terminal_price
     raw_savings = baseline_cost - initial_terminal_value - raw_total_cost
     total_cost = _price_schedule(power_schedule_kw, soc_schedule_kwh)

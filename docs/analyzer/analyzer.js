@@ -223,6 +223,22 @@ function findNearestSocIdx(socWh, socStates) {
   return Math.max(0, Math.min(idx, socStates.length - 1));
 }
 
+/** Number of DP states below min SoC (mirrors optimizer.n_states_below_min). */
+function nStatesBelowMin(currentSocWh, minSocWh, socResWh) {
+  if (currentSocWh >= minSocWh || socResWh <= 0) return 0;
+  return Math.ceil((minSocWh - currentSocWh) / socResWh - 1e-9);
+}
+
+/** Terminal cost per kWh below min SoC (mirrors optimizer.deficit_penalty_per_kwh). */
+function deficitPenaltyPerKwh(priceFc, feedInFc, chargeCurve, degradCost, arbCostPerKwh) {
+  const maxEnergyPrice = Math.max(0, ...priceFc, ...feedInFc);
+  let minEff = chargeCurve && chargeCurve.length
+    ? Math.min(...chargeCurve.map(([, e]) => e)) : 1.0;
+  minEff = Math.max(0.05, Math.min(1.0, minEff));
+  const worstCost = (maxEnergyPrice + Math.max(0, degradCost || 0) + arbCostPerKwh) / minEff;
+  return 2.0 * worstCost + 0.10;
+}
+
 function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
                stepDurations, degradCost, minPriceSpread, pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride) {
 
@@ -258,13 +274,18 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const alignedStepW = socResTargetWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
-  const nSocStates = Math.round((maxSocWh - minSocWh) / socResTargetWh) + 1;
+  const nUsableStates = Math.round((maxSocWh - minSocWh) / socResTargetWh) + 1;
   // Exact-fit grid so the top state IS maxSocWh (mirrors optimizer.py).
-  const socResWh = nSocStates > 1
-    ? (maxSocWh - minSocWh) / (nSocStates - 1)
+  const socResWh = nUsableStates > 1
+    ? (maxSocWh - minSocWh) / (nUsableStates - 1)
     : socResTargetWh;
+  // Extend the grid below min SoC when the current SoC lies there, so a
+  // below-min start can be charged back up (mirrors optimizer.py, #215).
+  const minSocIdx  = nStatesBelowMin(currentSocKwh * 1000, minSocWh, socResWh);
+  const gridFloorWh = minSocWh - minSocIdx * socResWh;
+  const nSocStates = nUsableStates + minSocIdx;
   const socStates  = [];
-  for (let i = 0; i < nSocStates; i++) socStates.push(minSocWh + i * socResWh);
+  for (let i = 0; i < nSocStates; i++) socStates.push(gridFloorWh + i * socResWh);
 
   // Terminal value: clipped tail average (each tail price capped at median)
   let terminalPrice;
@@ -286,9 +307,17 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
     V.push(new Float64Array(nSocStates).fill(Infinity));
     if (t < nSteps) policy.push(new Float32Array(nSocStates));
   }
+  // Ending below min SoC is penalised above any refill cost (mirrors
+  // optimizer.py deficit_penalty_per_kwh).
+  const deficitPenalty = deficitPenaltyPerKwh(
+    priceFc.slice(0, nSteps), feedInFc.slice(0, nSteps), chargeCurve,
+    degradCost, arbCostPerKwh
+  );
   for (let s = 0; s < nSocStates; s++) {
     const storedKwh = (socStates[s] - minSocWh) / 1000;
-    V[nSteps][s] = -storedKwh * terminalPrice;
+    V[nSteps][s] = storedKwh >= 0
+      ? -storedKwh * terminalPrice
+      : -storedKwh * deficitPenalty;
   }
 
   const maxChargeW     = Math.round(cfg.maxChargeKw * 1000);
@@ -397,7 +426,7 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
             cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
             null, null, arbCostPerKwh, cfg.maxChargeKw
           );
-          const totalCost = stepCost + Vnext[0];
+          const totalCost = stepCost + Vnext[minSocIdx];
           if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; }
         }
       }
@@ -420,12 +449,12 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   }
 
   return { V, policy, socStates, socResWh, powerStepW, stepDurations, minSocWh, maxSocWh,
-           terminalPrice, nSteps, minPriceSpread };
+           terminalPrice, nSteps, minPriceSpread, minSocIdx, deficitPenalty };
 }
 
 function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurveOverride, dischargeEffCurveOverride) {
   const { V, socStates, stepDurations, minSocWh, maxSocWh, nSteps, powerStepW,
-          minPriceSpread } = dpResult;
+          minPriceSpread, minSocIdx = 0 } = dpResult;
   const { priceFc, feedInFc, pvFc, consumFc, degradCost } = inputs;
   // Overrides apply to SoC TRANSITIONS only; costs use the nominal curves
   // (mirrors optimizer.py).
@@ -529,7 +558,7 @@ function forwardPass(dpResult, cfg, currentSocKwh, pvDcFc, inputs, chargeEffCurv
           cfg.pvDcCoupled, pvDcW, cfg.pvDcEfficiency, cfg.maxGridPowerKw, maxSocWh,
           null, null, arbCostPerKwh, cfg.maxChargeKw
         );
-        const totalCost = stepCost + V[t + 1][0];
+        const totalCost = stepCost + V[t + 1][minSocIdx];
         if (totalCost < bestCost) { bestCost = totalCost; bestAction = -drainW; bestNewSoc = minSocWh; }
       }
     }
@@ -805,10 +834,12 @@ function computeScheduleCost(powerKw, socKwh, inputs, cfg, terminalPrice) {
       null, null, 0, cfg.maxChargeKw
     );
   }
-  // Terminal value: stored energy above min SoC at end of horizon is worth terminalPrice
+  // Terminal value: stored energy relative to min SoC at end of horizon is
+  // worth terminalPrice. Linear in both directions, so a deficit below min SoC
+  // is valued like the initial SoC in savings (mirrors optimizer.py).
   if (terminalPrice > 0 && socKwh.length > powerKw.length) {
     const finalSoc      = socKwh[socKwh.length - 1];
-    const finalStoredKwh = Math.max(0, finalSoc - cfg.minSocKwh);
+    const finalStoredKwh = finalSoc - cfg.minSocKwh;
     total -= finalStoredKwh * terminalPrice;
   }
   return total;
@@ -865,7 +896,15 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
     oscResult.powerKw, oscResult.modes, cfg, currentSocKwh, dp.stepDurations,
     pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
   );
-  if (computeScheduleCost(oscResult.powerKw, oscSocKwh, inputs, cfg, dp.terminalPrice) <= rawTotal) {
+  // Extra objective cost for ending below min SoC: real money only charges the
+  // terminal price for a deficit, so a filter that removes the refill would
+  // look cheaper. Mirrors optimizer.py _deficit_surcharge.
+  const deficitSurcharge = (soc) => {
+    const deficitKwh = cfg.minSocKwh - (soc.length ? soc[soc.length - 1] : 0);
+    return deficitKwh <= 1e-9 ? 0 : deficitKwh * (dp.deficitPenalty - dp.terminalPrice);
+  };
+  if (computeScheduleCost(oscResult.powerKw, oscSocKwh, inputs, cfg, dp.terminalPrice)
+      + deficitSurcharge(oscSocKwh) <= rawTotal + deficitSurcharge(rawSocKwh)) {
     powerKw = oscResult.powerKw;
     modes   = oscResult.modes;
   }
@@ -875,8 +914,20 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
     chargeEffCurveOverride ?? cfg.chargeCurve,
     dischargeEffCurveOverride ?? cfg.dischargeCurve
   );
-  powerKw = mcResult.powerKw;
-  modes   = mcResult.modes;
+  // Not cost-gated, but it must not drop the refill back to min SoC
+  // (mirrors optimizer.py).
+  const preMcSoc = rebuildSoc(
+    powerKw, modes, cfg, currentSocKwh, dp.stepDurations, pvDcFc,
+    chargeEffCurveOverride, dischargeEffCurveOverride
+  );
+  const mcSoc = rebuildSoc(
+    mcResult.powerKw, mcResult.modes, cfg, currentSocKwh, dp.stepDurations,
+    pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
+  );
+  if (deficitSurcharge(mcSoc) <= deficitSurcharge(preMcSoc) + 1e-9) {
+    powerKw = mcResult.powerKw;
+    modes   = mcResult.modes;
+  }
 
   // Rebuild SoC from filtered schedule
   const socKwh = rebuildSoc(
@@ -893,7 +944,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   // Subtract initial terminal value so savings = 0 when battery is idle,
   // regardless of how much energy is already stored.
   // Mirrors: savings = baseline - initial_terminal_value - total_cost
-  const initialStoredKwh = Math.max(0, currentSocKwh - cfg.minSocKwh);
+  const initialStoredKwh = currentSocKwh - cfg.minSocKwh;  // linear, see computeScheduleCost
   const savings = baseline - initialStoredKwh * dp.terminalPrice - total;
 
   return {

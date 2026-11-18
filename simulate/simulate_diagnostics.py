@@ -516,6 +516,30 @@ def _find_nearest_soc_idx(soc_wh, soc_states):
     return max(0, min(idx, len(soc_states) - 1))
 
 
+def _n_states_below_min(current_soc_wh, min_soc_wh, soc_resolution_wh):
+    """Number of DP states below min_soc (mirrors optimizer.n_states_below_min)."""
+    if current_soc_wh >= min_soc_wh or soc_resolution_wh <= 0:
+        return 0
+    return math.ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh - 1e-9)
+
+
+def _deficit_penalty_per_kwh(
+    price_forecast,
+    feed_in_forecast,
+    charge_curve,
+    degradation_cost_per_kwh,
+    arbitrage_cost_per_kwh,
+):
+    """Terminal cost per kWh below min_soc (mirrors optimizer.py)."""
+    max_energy_price = max([0.0, *price_forecast, *feed_in_forecast])
+    min_eff = min((eff for _, eff in charge_curve), default=1.0)
+    min_eff = max(0.05, min(1.0, min_eff))
+    worst_cost = (
+        max_energy_price + max(0.0, degradation_cost_per_kwh) + arbitrage_cost_per_kwh
+    ) / min_eff
+    return 2.0 * worst_cost + 0.10
+
+
 def run_dp(
     battery_config,
     current_soc_kwh,
@@ -588,7 +612,14 @@ def run_dp(
     if n_soc_states > 1:
         # Exact-fit grid so the top state IS max_soc_wh (mirrors optimizer.py).
         soc_resolution_wh = (max_soc_wh - min_soc_wh) / (n_soc_states - 1)
-    soc_states = [min_soc_wh + i * soc_resolution_wh for i in range(n_soc_states)]
+    # Extend the grid below min_soc when the current SoC lies there, so a
+    # below-min start can be charged back up (mirrors optimizer.py, #215).
+    min_soc_idx = _n_states_below_min(
+        current_soc_kwh * 1000.0, min_soc_wh, soc_resolution_wh
+    )
+    grid_floor_wh = min_soc_wh - min_soc_idx * soc_resolution_wh
+    n_soc_states += min_soc_idx
+    soc_states = [grid_floor_wh + i * soc_resolution_wh for i in range(n_soc_states)]
 
     INF = float("inf")
     V = [[INF] * n_soc_states for _ in range(n_steps + 1)]
@@ -604,9 +635,21 @@ def run_dp(
         terminal_price = max(0.0, min(feed_in_forecast[-1], avg_tail))
     else:
         terminal_price = 0.0
+    # Ending below min_soc is penalised above any refill cost (mirrors
+    # optimizer.py deficit_penalty_per_kwh).
+    deficit_penalty = _deficit_penalty_per_kwh(
+        price_forecast[:n_steps],
+        feed_in_forecast[:n_steps],
+        charge_curve,
+        degradation_cost_per_kwh,
+        arbitrage_cost_per_kwh,
+    )
     for s_idx, soc_wh in enumerate(soc_states):
         stored_kwh = (soc_wh - min_soc_wh) / 1000.0
-        V[n_steps][s_idx] = -stored_kwh * terminal_price
+        if stored_kwh >= 0:
+            V[n_steps][s_idx] = -stored_kwh * terminal_price
+        else:
+            V[n_steps][s_idx] = -stored_kwh * deficit_penalty
 
     max_charge_w = battery_config.max_charge_power_kw * 1000
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
@@ -758,7 +801,7 @@ def run_dp(
                         pv_dc_production_w=pv_dc_w,
                         arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                     )
-                    total_cost = step_cost + V[t + 1][0]
+                    total_cost = step_cost + V[t + 1][min_soc_idx]
                     if total_cost < best_cost:
                         best_cost = total_cost
                         best_action = -drain_w
@@ -851,6 +894,8 @@ def forward_pass(
         discharge_curve, battery_config.max_discharge_power_kw
     )
     n_soc_states = len(soc_states)
+    # The grid may extend below min_soc (see run_dp); min_soc is a grid point.
+    min_soc_idx = _find_nearest_soc_idx(min_soc_wh, soc_states)
 
     max_charge_w = battery_config.max_charge_power_kw * 1000
     max_discharge_w = battery_config.max_discharge_power_kw * 1000
@@ -1002,7 +1047,7 @@ def forward_pass(
                     pv_dc_production_w=pv_dc_w,
                     arbitrage_cost_per_kwh=arbitrage_cost_per_kwh,
                 )
-                total_cost = step_cost + V[t + 1][0]
+                total_cost = step_cost + V[t + 1][min_soc_idx]
                 if total_cost < best_cost:
                     best_cost = total_cost
                     best_action = -drain_w

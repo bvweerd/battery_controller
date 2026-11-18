@@ -24,6 +24,8 @@ from custom_components.battery_controller.optimizer import (
     _find_nearest_soc_idx,
     calculate_step_cost,
     compute_soc_resolution_wh,
+    deficit_penalty_per_kwh,
+    n_states_below_min,
     optimize_battery_schedule,
 )
 
@@ -3387,3 +3389,88 @@ class TestOscillationFilterCostGuard:
             assert result.savings <= result.raw_savings + 1e-9, (
                 f"trial {trial}: filtering somehow gained value, check the pricing"
             )
+
+
+class TestBelowMinSoc:
+    """Issue #215: a SoC below min_soc must be charged back, never left idle."""
+
+    PRICES = [0.30] * 8 + [0.12] * 8 + [0.35] * 16
+
+    def _run(self, config: BatteryConfig, soc_kwh: float, prices=None):
+        prices = prices or self.PRICES
+        n = len(prices)
+        return optimize_battery_schedule(
+            battery_config=config,
+            current_soc_kwh=soc_kwh,
+            price_forecast=prices,
+            feed_in_forecast=[0.07] * n,
+            pv_forecast=[0.0] * n,
+            consumption_forecast=[0.3] * n,
+            step_durations_hours=[0.25] * n,
+            degradation_cost_per_kwh=0.03,
+            min_price_spread=0.05,
+        )
+
+    def test_far_below_min_is_not_idle(self, battery_config):
+        """Gap larger than one step of charging: used to yield an all-idle plan."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=1.0,
+            max_discharge_power_kw=1.0,
+            min_soc_percent=20.0,
+            max_soc_percent=90.0,
+        )
+        result = self._run(config, 0.5)
+        assert "charging" in result.mode_schedule
+        assert result.soc_schedule_kwh[0] == pytest.approx(0.5)
+        assert max(result.soc_schedule_kwh) >= config.min_soc_kwh - 1e-6
+
+    def test_refill_without_arbitrage_uses_cheapest_steps(self):
+        """Flat expensive prices with one cheap block: refill only in that block."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=3.0,
+            max_discharge_power_kw=3.0,
+            min_soc_percent=20.0,
+            max_soc_percent=90.0,
+        )
+        prices = [0.25] * 8 + [0.20] * 8 + [0.30] * 16
+        result = self._run(config, 0.5, prices)
+        for t, mode in enumerate(result.mode_schedule):
+            if mode == "charging":
+                assert prices[t] == pytest.approx(0.20), t
+        assert result.soc_schedule_kwh[-1] >= config.min_soc_kwh - 1e-6
+
+    def test_never_discharges_below_min(self, battery_config):
+        result = self._run(battery_config, 0.4)
+        soc = result.soc_schedule_kwh
+        for t, power in enumerate(result.power_schedule_kw):
+            if power < 0:
+                assert soc[t + 1] >= battery_config.min_soc_kwh - 1e-6
+
+    def test_at_min_is_unchanged(self, battery_config):
+        """The grid extension only applies below min_soc."""
+        assert n_states_below_min(1000.0, 1000.0, 10.0) == 0
+        assert n_states_below_min(1500.0, 1000.0, 10.0) == 0
+        assert n_states_below_min(990.0, 1000.0, 10.0) == 1
+        assert n_states_below_min(985.0, 1000.0, 10.0) == 2
+
+    def test_idle_below_min_has_zero_savings(self):
+        """No charge possible (zero charge power): idle reports zero savings."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=0.0,
+            max_discharge_power_kw=1.0,
+            min_soc_percent=20.0,
+            max_soc_percent=90.0,
+        )
+        result = self._run(config, 0.5)
+        assert set(result.mode_schedule) == {"idle"}
+        assert result.savings == pytest.approx(0.0, abs=1e-9)
+
+    def test_deficit_penalty_exceeds_worst_refill_cost(self):
+        curve = [(0.0, 0.9), (5.0, 0.95)]
+        penalty = deficit_penalty_per_kwh([0.1, 0.4], [0.05], curve, 0.03, 0.025)
+        assert penalty > (0.4 + 0.03 + 0.025) / 0.9
+        # Zero prices still give a strictly positive penalty.
+        assert deficit_penalty_per_kwh([0.0], [0.0], curve, 0.0, 0.0) > 0

@@ -115,6 +115,14 @@ soc_states[i]    = min_soc_wh + i × soc_resolution_wh
 - Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
 - The resolution is shrunk so the grid divides the usable range exactly, making the top state exactly `max_soc_wh`. With a fixed resolution a range that is not a whole multiple of it left the last few Wh unreachable, and the fill-to-max boundary action then charged to a SoC that the state it was credited to did not represent. Shrinking the step rather than adding a state keeps the `MAX_SOC_STATES` budget intact.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
+- **Below-min start.** When the current SoC lies below `min_soc` (BMS reserve, a raised `min_soc` setting, self-discharge), the grid is extended downward with the same resolution so that `min_soc` stays a grid point and the current SoC is covered:
+
+  ```
+  min_soc_idx  = ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh)   # 0 when at/above min
+  soc_states[i] = min_soc_wh + (i - min_soc_idx) × soc_resolution_wh
+  ```
+
+  These states are reachable only from a below-min start: discharging is still forbidden whenever it would end below `min_soc`, and the drain-to-min boundary action targets `soc_states[min_soc_idx]`. Without these states the current SoC snapped onto the `min_soc` state, every charge step too small to reach the next state was rejected as sub-resolution, and the whole schedule came out idle exactly when the battery needed charging (issue #215).
 
 ### 3.2 Power Action Grid
 
@@ -331,6 +339,16 @@ V[T][s] = -(stored_kwh × terminal_price)
 ```
 
 where `stored_kwh = (soc_wh - min_soc_wh) / 1000`.
+
+For states below `min_soc` (`stored_kwh < 0`, see §3.1) the deficit is charged at a penalty instead:
+
+```
+V[T][s] = -stored_kwh × deficit_penalty          # stored_kwh < 0
+deficit_penalty = 2 × (max(0, max buy price, max feed-in price) + degradation + arbitrage_hurdle)
+                    / min(charge efficiency curve) + 0.10
+```
+
+The penalty exceeds the most expensive way to store one kWh anywhere in the horizon, so the DP always refills to `min_soc` when it physically can — at the cheapest steps — and the penalty never ends up in a feasible schedule. The shadow price at a below-min SoC therefore reflects the marginal refill cost, not the penalty.
 
 The negative sign is because `V` represents cost — more stored energy means lower cost (more future value).
 
@@ -684,6 +702,7 @@ The **baseline cost** represents the electricity cost without any battery. In th
 - `total_cost`: Recalculated from the filtered schedule via `_calculate_schedule_total_cost`
 - The difference shows the impact of post-processing filters (typically < 0.01 EUR when no actions are filtered, due to floating-point differences in SoC reconstruction)
 - `savings = baseline_cost - initial_terminal_value - total_cost`
+- Both terminal values are linear in `soc - min_soc`, also below `min_soc`, so an idle schedule reports zero savings and a refill from below `min_soc` is credited at `terminal_price`. Real money therefore values a deficit only at `terminal_price`; the oscillation-filter cost guard and the micro-cycle filter add the difference to `deficit_penalty` before comparing, so neither filter can remove the refill the DP planned.
 
 ---
 
