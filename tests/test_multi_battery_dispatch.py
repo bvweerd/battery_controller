@@ -351,3 +351,50 @@ def test_efficiency_split_has_hysteresis():
     fresh = _balanced_fleet()
     fresh.split_setpoint(-crossover, MODE_FOLLOW_SCHEDULE)
     assert fresh.efficiency_split is False
+
+
+def test_proportional_split_never_exceeds_a_packs_rating():
+    """Overflow handed out in a later round respects what a pack already got.
+
+    Each round used to clamp against the full rating, so a pack that took part
+    of the setpoint in round one could be handed its full rating again in round
+    two: here A (2 kW) ended up at 3.375 kW.
+    """
+    a = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=2.0)
+    b = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=0.5)
+    d = BatteryConfig(capacity_kwh=10.0, max_charge_power_kw=10.0)
+    configs = [("A", a), ("B", b), ("D", d)]
+    dispatcher = BatteryDispatcher(configs)
+    # Headroom weights 3 / 6 / 1 kWh.
+    dispatcher.states = {
+        "A": BatteryState(soc_kwh=6.0),
+        "B": BatteryState(soc_kwh=3.0),
+        "D": BatteryState(soc_kwh=8.0),
+    }
+
+    split = dispatcher._proportional_split(5.0, configs)
+
+    assert split["A"] <= 2.0 + 1e-9
+    assert split["B"] <= 0.5 + 1e-9
+    assert sum(split.values()) == pytest.approx(5.0)
+
+
+def test_proportional_split_discharge_never_exceeds_a_packs_rating():
+    """The same bound holds for discharge (negative setpoints)."""
+    a = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=2.0)
+    b = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=0.5)
+    d = BatteryConfig(capacity_kwh=10.0, max_discharge_power_kw=10.0)
+    configs = [("A", a), ("B", b), ("D", d)]
+    dispatcher = BatteryDispatcher(configs)
+    # Energy weights 3 / 6 / 1 kWh above the 1 kWh floor.
+    dispatcher.states = {
+        "A": BatteryState(soc_kwh=4.0),
+        "B": BatteryState(soc_kwh=7.0),
+        "D": BatteryState(soc_kwh=2.0),
+    }
+
+    split = dispatcher._proportional_split(-5.0, configs)
+
+    assert split["A"] >= -2.0 - 1e-9
+    assert split["B"] >= -0.5 - 1e-9
+    assert sum(split.values()) == pytest.approx(-5.0)

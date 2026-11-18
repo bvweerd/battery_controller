@@ -32,8 +32,14 @@
       "optimization_enabled": { "default": "mdi:battery-sync-outline" }
     },
     "binary_sensor": {
-      "pv_curtailment": { "default": "mdi:solar-power-variant-outline" },
-      "use_max_power": { "default": "mdi:lightning-bolt-circle" }
+      "pv_curtailment": {
+        "default": "mdi:solar-power-variant-outline",
+        "state": { "on": "mdi:solar-power-variant" }
+      },
+      "use_max_power": {
+        "default": "mdi:lightning-bolt-outline",
+        "state": { "on": "mdi:lightning-bolt-circle" }
+      }
     }
   }
 }

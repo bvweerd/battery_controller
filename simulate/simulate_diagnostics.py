@@ -1097,6 +1097,674 @@ def forward_pass(
 
 
 # ---------------------------------------------------------------------------
+# Post-DP filters (verbatim copies of optimizer.py, no HA imports)
+#
+# Generated from optimizer.py with only these substitutions: the *_parsed
+# curve attributes, the efficiency helpers' leading underscore and the
+# ACTION_* string constants. Keep them identical when optimizer.py changes;
+# tests/test_cross_impl.py checks the outcome against the integration.
+# ---------------------------------------------------------------------------
+
+
+def _rebuild_charge_budget_wh(
+    max_charge_power_kw: float, step_hours: float, ac_stored_wh: float
+) -> float:
+    """:func:`charge_budget_wh`, with 0 kW meaning "no rating known, no bound"."""
+    if max_charge_power_kw <= 0:
+        return float("inf")
+    return charge_budget_wh(max_charge_power_kw, step_hours, ac_stored_wh)
+
+
+def _rebuild_schedule(
+    power_schedule_kw: list[float],
+    step_durations_hours: list[float],
+    initial_soc_kwh: float,
+    min_soc_kwh: float,
+    max_soc_kwh: float,
+    charge_curve: EfficiencyCurve,
+    discharge_curve: EfficiencyCurve,
+    pv_dc_forecast: list[float] | None = None,
+    pv_dc_coupled: bool = False,
+    pv_dc_efficiency: float = 0.97,
+    max_charge_power_kw: float = 0.0,
+) -> tuple[list[float], list[str], list[float]]:
+    """Rebuild schedule after post-processing so SoC stays physically consistent.
+
+    ``max_charge_power_kw`` bounds the passive DC MPPT path the same way the DP
+    does; 0 disables that bound so callers without a rating keep the previous
+    headroom-only behaviour.
+    """
+    rebuilt_power = list(power_schedule_kw)
+    rebuilt_mode: list[str] = []
+    soc_schedule = [initial_soc_kwh]
+    current_soc_kwh = initial_soc_kwh
+
+    if pv_dc_forecast is None:
+        pv_dc_forecast = [0.0] * len(power_schedule_kw)
+
+    for t, commanded_power_kw in enumerate(rebuilt_power):
+        step_h = (
+            step_durations_hours[t]
+            if t < len(step_durations_hours)
+            else step_durations_hours[-1]
+        )
+        prev_soc_kwh = current_soc_kwh
+
+        if commanded_power_kw > 0:
+            _charge_eff = _interpolate_efficiency(charge_curve, abs(commanded_power_kw))
+            current_soc_kwh = min(
+                current_soc_kwh + commanded_power_kw * step_h * _charge_eff,
+                max_soc_kwh,
+            )
+            delta_soc = current_soc_kwh - prev_soc_kwh
+            actual_power_kw = delta_soc / (step_h * _charge_eff) if step_h > 0 else 0.0
+            if pv_dc_coupled and t < len(pv_dc_forecast) and pv_dc_forecast[t] > 0:
+                # Passive DC MPPT charging continues on top of the AC charge,
+                # sharing the step's charge-power budget with it.
+                headroom_kwh = max(0.0, max_soc_kwh - current_soc_kwh)
+                current_soc_kwh += (
+                    passive_dc_charge_wh(
+                        pv_dc_forecast[t] * 1000.0,
+                        pv_dc_efficiency,
+                        step_h,
+                        headroom_kwh * 1000.0,
+                        _rebuild_charge_budget_wh(
+                            max_charge_power_kw, step_h, delta_soc * 1000.0
+                        ),
+                    )
+                    / 1000.0
+                )
+        elif commanded_power_kw < 0:
+            _discharge_eff = _interpolate_efficiency(
+                discharge_curve, abs(commanded_power_kw)
+            )
+            # Floor at min_soc, but never above where the SoC already is: a
+            # discharge left in place while the SoC is below min_soc (after a
+            # filter removed the refill before it) must become idle, not a
+            # jump UP to min_soc.
+            current_soc_kwh = max(
+                current_soc_kwh - abs(commanded_power_kw) * step_h / _discharge_eff,
+                min(min_soc_kwh, current_soc_kwh),
+            )
+            delta_soc = current_soc_kwh - prev_soc_kwh
+            actual_power_kw = delta_soc * _discharge_eff / step_h if step_h > 0 else 0.0
+        else:
+            if pv_dc_coupled and t < len(pv_dc_forecast) and pv_dc_forecast[t] > 0:
+                headroom_kwh = max(0.0, max_soc_kwh - current_soc_kwh)
+                current_soc_kwh += (
+                    passive_dc_charge_wh(
+                        pv_dc_forecast[t] * 1000.0,
+                        pv_dc_efficiency,
+                        step_h,
+                        headroom_kwh * 1000.0,
+                        _rebuild_charge_budget_wh(max_charge_power_kw, step_h, 0.0),
+                    )
+                    / 1000.0
+                )
+            actual_power_kw = 0.0
+
+        rebuilt_power[t] = actual_power_kw
+        if actual_power_kw > POWER_IDLE_THRESHOLD_KW:
+            rebuilt_mode.append("charging")
+        elif actual_power_kw < -POWER_IDLE_THRESHOLD_KW:
+            rebuilt_mode.append("discharging")
+        else:
+            rebuilt_mode.append("idle")
+        soc_schedule.append(current_soc_kwh)
+
+    return rebuilt_power, rebuilt_mode, soc_schedule
+
+
+def _calculate_schedule_total_cost(
+    battery_config: BatteryConfig,
+    power_schedule_kw: list[float],
+    soc_schedule_kwh: list[float],
+    price_forecast: list[float],
+    feed_in_forecast: list[float],
+    pv_forecast: list[float],
+    consumption_forecast: list[float],
+    step_durations_hours: list[float],
+    degradation_cost_per_kwh: float,
+    terminal_price: float,
+    pv_dc_forecast: list[float] | None = None,
+) -> float:
+    """Calculate total cost for the final post-processed schedule.
+
+    Note: This rebuilds SoC step-by-step from the post-processed power schedule,
+    which may differ slightly from the DP's internal SoC due to floating-point
+    arithmetic. The difference is typically < 0.001 EUR and is inherent to the
+    discretisation — it cannot be eliminated without re-running the DP itself.
+    """
+    if pv_dc_forecast is None:
+        pv_dc_forecast = [0.0] * len(power_schedule_kw)
+
+    total_cost = 0.0
+    for t, power_kw in enumerate(power_schedule_kw):
+        total_cost += calculate_step_cost(
+            time_step_hours=step_durations_hours[t],
+            soc_wh=soc_schedule_kwh[t] * 1000,
+            action_w=power_kw * 1000,
+            grid_price=price_forecast[t],
+            feed_in_price=feed_in_forecast[t]
+            if t < len(feed_in_forecast)
+            else price_forecast[t],
+            pv_production_w=(pv_forecast[t] if t < len(pv_forecast) else 0.0) * 1000,
+            consumption_w=(
+                consumption_forecast[t] if t < len(consumption_forecast) else 0.0
+            )
+            * 1000,
+            charge_curve=battery_config.charge_efficiency_curve,
+            discharge_curve=battery_config.discharge_efficiency_curve,
+            degradation_cost_per_kwh=degradation_cost_per_kwh,
+            battery_config=battery_config,
+            pv_dc_production_w=(pv_dc_forecast[t] if t < len(pv_dc_forecast) else 0.0)
+            * 1000,
+        )
+
+    final_soc_kwh = soc_schedule_kwh[-1] if soc_schedule_kwh else 0.0
+    # Linear in both directions: a schedule that starts below min_soc and ends
+    # there too is valued the same way as the initial SoC (see savings), so an
+    # idle schedule still reports zero savings and a refill is credited at the
+    # terminal price rather than counted as a pure loss.
+    # Same Wh-rounded min_soc as the DP grid, so a schedule that drains exactly
+    # to the DP's min_soc is not valued as a tiny deficit.
+    final_stored_kwh = final_soc_kwh - round(battery_config.min_soc_kwh * 1000) / 1000
+    total_cost -= final_stored_kwh * terminal_price
+    return total_cost
+
+
+def _filter_oscillations(
+    power_schedule_kw: list[float],
+    mode_schedule: list[str],
+    initial_soc_kwh: float,
+    price_forecast: list[float],
+    min_price_spread: float,
+    degradation_cost_per_kwh: float,
+    step_durations_hours: list[float],
+    min_soc_kwh: float,
+    max_soc_kwh: float,
+    charge_curve: EfficiencyCurve,
+    discharge_curve: EfficiencyCurve,
+    pv_forecast: list[float] | None = None,
+    consumption_forecast: list[float] | None = None,
+    feed_in_forecast: list[float] | None = None,
+    oscillation_window_hours: float = 2.0,
+    pv_dc_forecast: list[float] | None = None,
+    pv_dc_coupled: bool = False,
+    pv_dc_efficiency: float = 0.97,
+    cost_charge_curve: EfficiencyCurve | None = None,
+    cost_discharge_curve: EfficiencyCurve | None = None,
+    max_charge_power_kw: float = 0.0,
+    max_discharge_power_kw: float = 0.0,
+) -> tuple[list[float], list[str], list[float]]:
+    """Filter out unprofitable oscillations from the schedule.
+
+    charge_curve/discharge_curve are the (possibly calibration-overridden)
+    transition curves used to rebuild the SoC schedule.  The profitability
+    threshold is economic and uses cost_charge_curve/cost_discharge_curve
+    (the nominal curves); they default to the transition curves when absent.
+
+    Removes rapid charge/discharge switches that don't have sufficient
+    price spread to justify the round-trip efficiency losses and degradation.
+
+    Takes into account PV surplus opportunity cost (feed-in price) when
+    evaluating charging profitability.
+
+    Args:
+        power_schedule_kw: Power schedule in kW
+        mode_schedule: Mode schedule
+        initial_soc_kwh: Initial SoC in kWh (only element [0] of soc_schedule is needed)
+        price_forecast: Grid buy price forecast in EUR/kWh
+        min_price_spread: Minimum price spread required
+        degradation_cost_per_kwh: Degradation cost
+        step_durations_hours: Per-step duration in hours
+        min_soc_kwh: Minimum SoC
+        max_soc_kwh: Maximum SoC
+        pv_forecast: PV production forecast in kW (optional)
+        consumption_forecast: Consumption forecast in kW (optional)
+        feed_in_forecast: Feed-in price forecast in EUR/kWh (optional)
+
+    Returns:
+        Filtered (power_schedule, mode_schedule, soc_schedule)
+    """
+    if len(power_schedule_kw) == 0:
+        return power_schedule_kw, mode_schedule, [initial_soc_kwh]
+
+    # Reduce the curves to a representative operating efficiency for the
+    # arbitrage threshold.  Sampling at zero power instead would take the worst
+    # point of a realistic (part-load-limited) curve and inflate the threshold.
+    if cost_charge_curve is None:
+        cost_charge_curve = charge_curve
+    if cost_discharge_curve is None:
+        cost_discharge_curve = discharge_curve
+    _rte = _representative_efficiency(
+        cost_charge_curve, max_charge_power_kw
+    ) * _representative_efficiency(cost_discharge_curve, max_discharge_power_kw)
+    sqrt_rte = math.sqrt(_rte)
+    filtered_power = list(power_schedule_kw)
+    filtered_mode = list(mode_schedule)
+    # Minimum profitable price spread needed for arbitrage
+    # P_discharge * sqrt(rte) > P_charge / sqrt(rte) + 2 * degradation + min_spread
+    # => P_discharge > P_charge / rte + (2 * degradation + min_spread) / sqrt(rte)
+    min_arbitrage_spread = (2 * degradation_cost_per_kwh + min_price_spread) / sqrt_rte
+
+    def get_charge_cost(timestep: int, charge_power_kw: float) -> float:
+        """Get the marginal cost of charging for the actual commanded power.
+
+        The commanded power is the AC setpoint only: passive DC PV charging
+        happens regardless of the setpoint (also at idle), so it is never part
+        of the commanded power and needs no deduction here.
+        """
+        if (
+            charge_power_kw <= 0
+            or not pv_forecast
+            or not consumption_forecast
+            or not feed_in_forecast
+        ):
+            return price_forecast[timestep]
+
+        pv_surplus_kw = max(0.0, pv_forecast[timestep] - consumption_forecast[timestep])
+        from_pv_kw = min(charge_power_kw, pv_surplus_kw)
+        from_grid_kw = max(0.0, charge_power_kw - from_pv_kw)
+        total_kw = from_pv_kw + from_grid_kw
+        if total_kw <= 0:
+            return price_forecast[timestep]
+        return (
+            from_pv_kw * feed_in_forecast[timestep]
+            + from_grid_kw * price_forecast[timestep]
+        ) / total_kw
+
+    def get_discharge_value(timestep: int, discharge_power_kw: float) -> float:
+        """Get the marginal value of discharging for the actual commanded power.
+
+        For DC-coupled PV: discharging displaces energy that would otherwise come
+        from passive DC PV charging (opportunity cost). The effective value is
+        reduced by the portion that merely offsets free DC PV.
+        """
+        if discharge_power_kw <= 0:
+            return price_forecast[timestep]
+        if not pv_forecast or not consumption_forecast or not feed_in_forecast:
+            return price_forecast[timestep]
+
+        residual_load_kw = max(
+            0.0, consumption_forecast[timestep] - pv_forecast[timestep]
+        )
+        to_self_kw = min(discharge_power_kw, residual_load_kw)
+        to_export_kw = max(0.0, discharge_power_kw - to_self_kw)
+        total_kw = to_self_kw + to_export_kw
+        if total_kw <= 0:
+            return price_forecast[timestep]
+        return (
+            to_self_kw * price_forecast[timestep]
+            + to_export_kw * feed_in_forecast[timestep]
+        ) / total_kw
+
+    # Lookahead window: use the full interval step (index 1), not the partial
+    # first step (index 0).  The first step is artificially shortened to align
+    # with the current price-period boundary (e.g. 1 minute when running just
+    # before a 15-min tick).  Using it would inflate lookahead_steps by up to
+    # 15× for quarter-hour data (round(2.0 / 0.017) = 120 instead of 8),
+    # causing the filter to scan the entire 36-h horizon and pair charge steps
+    # with distant, unrelated discharge steps — incorrectly suppressing whole
+    # charge blocks.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
+    lookahead_steps = max(1, round(oscillation_window_hours / ref_step_h))
+
+    # Iterative scan: repeat until convergence so that suppressing one step
+    # also triggers re-evaluation of any steps that depended on it (orphaned
+    # discharge after paired charge is suppressed, and vice-versa).
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(filtered_mode) - 1:
+            if filtered_mode[i] == "charging":
+                # Look ahead for a discharge within the oscillation window.
+                # Evaluate ALL discharges in the window: only suppress the
+                # charge if every discharge found is unprofitable.  Stopping
+                # at the *nearest* discharge was wrong for quarter-hour data:
+                # the DP can produce a complex schedule where a small
+                # intermediate discharge (low spread) precedes the main
+                # discharge (high spread).  Breaking on the first discharge
+                # caused the charge to be removed even though a profitable
+                # pairing existed slightly further in the window.
+                charge_cost = get_charge_cost(i, max(filtered_power[i], 0.0))
+                has_discharge_in_window = False
+                has_profitable_discharge = False
+                for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
+                    if filtered_mode[j] == "discharging":
+                        has_discharge_in_window = True
+                        discharge_price = get_discharge_value(j, abs(filtered_power[j]))
+                        effective_spread = discharge_price - charge_cost / _rte
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_discharge = True
+                            break
+                if has_discharge_in_window and not has_profitable_discharge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = "idle"
+                    changed = True
+            elif filtered_mode[i] == "discharging":
+                # Look ahead for a charge within the oscillation window.
+                # Same logic: suppress only if every charge in the window
+                # would make this discharge unprofitable.
+                discharge_price = get_discharge_value(i, abs(filtered_power[i]))
+                has_charge_in_window = False
+                has_profitable_charge = False
+                for j in range(i + 1, min(i + lookahead_steps + 1, len(filtered_mode))):
+                    if filtered_mode[j] == "charging":
+                        has_charge_in_window = True
+                        charge_cost = get_charge_cost(j, max(filtered_power[j], 0.0))
+                        effective_spread = discharge_price - charge_cost / _rte
+                        if effective_spread >= min_arbitrage_spread:
+                            has_profitable_charge = True
+                            break
+                if has_charge_in_window and not has_profitable_charge:
+                    filtered_power[i] = 0.0
+                    filtered_mode[i] = "idle"
+                    changed = True
+            i += 1
+
+    return _rebuild_schedule(
+        power_schedule_kw=filtered_power,
+        step_durations_hours=step_durations_hours,
+        initial_soc_kwh=initial_soc_kwh,
+        min_soc_kwh=min_soc_kwh,
+        max_soc_kwh=max_soc_kwh,
+        charge_curve=charge_curve,
+        discharge_curve=discharge_curve,
+        pv_dc_forecast=pv_dc_forecast,
+        pv_dc_coupled=pv_dc_coupled,
+        pv_dc_efficiency=pv_dc_efficiency,
+        max_charge_power_kw=max_charge_power_kw,
+    )
+
+
+def _filter_micro_cycles(
+    power_schedule_kw: list[float],
+    mode_schedule: list[str],
+    initial_soc_kwh: float,
+    step_durations_hours: list[float],
+    min_soc_kwh: float,
+    max_soc_kwh: float,
+    charge_curve: EfficiencyCurve,
+    discharge_curve: EfficiencyCurve,
+    pv_dc_forecast: list[float] | None = None,
+    pv_dc_coupled: bool = False,
+    pv_dc_efficiency: float = 0.97,
+    min_cycle_kwh: float = 0.2,
+    max_charge_power_kw: float = 0.0,
+    soc_schedule_kwh: list[float] | None = None,
+) -> tuple[list[float], list[str], list[float]]:
+    """Filter out micro-cycles whose total energy is below min_cycle_kwh.
+
+    Charge or discharge segments that move less energy than min_cycle_kwh have
+    disproportionately high wear per kWh of useful storage — the part of ageing
+    that a per-kWh degradation price cannot express, because it is per cycle
+    rather than per throughput.  Replacing them with idle preserves battery
+    lifespan.
+
+    Unlike the oscillation filter this is deliberately NOT gated on cost: the
+    wear it avoids is real but unpriced, so a cost guard would disable it
+    entirely.  It is not free, though — measured over simulated quarter-hourly
+    days it suppresses a handful of steps per day and costs on the order of 2 %
+    of achievable savings.  Raise MIN_CYCLE_KWH to trade more savings for less
+    wear, or lower it for the reverse.
+
+    Block energy is measured on the BATTERY side (stored when charging, drawn
+    when discharging), which is the quantity that actually wears the cells and
+    the same one degradation is priced on.  Measuring the AC setpoint instead
+    misjudged blocks near the threshold by the efficiency factor, in opposite
+    directions for the two directions.
+
+    Args:
+        power_schedule_kw: Power schedule in kW
+        mode_schedule: Mode schedule
+        initial_soc_kwh: Initial SoC in kWh
+        step_durations_hours: Per-step duration in hours
+        min_cycle_kwh: Minimum energy per charge/discharge block in kWh
+        soc_schedule_kwh: SoC trajectory of the input schedule. When given, a
+            charge block that starts below min_soc is never suppressed: it is
+            the refill back to the reserve, not avoidable wear, and dropping
+            it would leave the battery below min_soc run after run.
+
+    Returns:
+        Filtered (power_schedule, mode_schedule, soc_schedule)
+    """
+    if not power_schedule_kw:
+        return power_schedule_kw, mode_schedule, [initial_soc_kwh]
+
+    filtered_power = list(power_schedule_kw)
+    filtered_mode = list(mode_schedule)
+    any_filtered = False
+
+    # Step 0 is artificially shortened to align with the current price-period
+    # boundary, and can be as little as one minute. Measuring the block on that
+    # duration judged an action by when the optimizer happened to run rather
+    # than by its economics, so an isolated first step was suppressed purely for
+    # starting late in a period. Size it on the reference (full) interval
+    # instead — the same correction the oscillation filter already applies.
+    ref_step_h = (
+        step_durations_hours[1]
+        if len(step_durations_hours) > 1
+        else (step_durations_hours[0] if step_durations_hours else 0.25)
+    )
+
+    i = 0
+    while i < len(filtered_mode):
+        current_dir = filtered_mode[i]
+        if current_dir not in ("charging", "discharging"):
+            i += 1
+            continue
+
+        # Find the extent of this contiguous charge/discharge block
+        j = i
+        total_energy_kwh = 0.0
+        while j < len(filtered_mode) and filtered_mode[j] == current_dir:
+            if j == 0:
+                step_h = ref_step_h
+            elif j < len(step_durations_hours):
+                step_h = step_durations_hours[j]
+            else:
+                step_h = step_durations_hours[-1]
+            # Battery-side energy: what the cells actually see.
+            power_kw = abs(filtered_power[j])
+            if current_dir == "charging":
+                total_energy_kwh += (
+                    power_kw * step_h * _interpolate_efficiency(charge_curve, power_kw)
+                )
+            else:
+                eff = _interpolate_efficiency(discharge_curve, power_kw)
+                total_energy_kwh += power_kw * step_h / eff if eff > 0 else 0.0
+            j += 1
+
+        is_refill = (
+            current_dir == "charging"
+            and soc_schedule_kwh is not None
+            and i < len(soc_schedule_kwh)
+            and soc_schedule_kwh[i] < min_soc_kwh - 1e-9
+        )
+        if total_energy_kwh < min_cycle_kwh and not is_refill:
+            for k in range(i, j):
+                filtered_power[k] = 0.0
+                filtered_mode[k] = "idle"
+            any_filtered = True
+
+        i = j
+
+    if not any_filtered:
+        # Nothing changed; skip rebuild since oscillation filter already produced
+        # consistent power/mode/soc. Rebuild only needed to get soc_schedule.
+        return (
+            power_schedule_kw,
+            mode_schedule,
+            _rebuild_schedule(
+                power_schedule_kw=power_schedule_kw,
+                step_durations_hours=step_durations_hours,
+                initial_soc_kwh=initial_soc_kwh,
+                min_soc_kwh=min_soc_kwh,
+                max_soc_kwh=max_soc_kwh,
+                charge_curve=charge_curve,
+                discharge_curve=discharge_curve,
+                pv_dc_forecast=pv_dc_forecast,
+                pv_dc_coupled=pv_dc_coupled,
+                pv_dc_efficiency=pv_dc_efficiency,
+                max_charge_power_kw=max_charge_power_kw,
+            )[2],
+        )
+
+    return _rebuild_schedule(
+        power_schedule_kw=filtered_power,
+        step_durations_hours=step_durations_hours,
+        initial_soc_kwh=initial_soc_kwh,
+        min_soc_kwh=min_soc_kwh,
+        max_soc_kwh=max_soc_kwh,
+        charge_curve=charge_curve,
+        discharge_curve=discharge_curve,
+        pv_dc_forecast=pv_dc_forecast,
+        pv_dc_coupled=pv_dc_coupled,
+        pv_dc_efficiency=pv_dc_efficiency,
+        max_charge_power_kw=max_charge_power_kw,
+    )
+
+
+def post_process(
+    battery,
+    current_soc_kwh,
+    power_schedule_kw,
+    mode_schedule,
+    soc_schedule_kwh,
+    price_forecast,
+    feed_in_forecast,
+    pv_forecast,
+    consumption_forecast,
+    step_durations_hours,
+    degradation_cost,
+    min_price_spread,
+    terminal_price,
+    soc_resolution_wh,
+    pv_dc_forecast=None,
+    charge_eff_curve_override=None,
+    discharge_eff_curve_override=None,
+):
+    """Apply the integration's post-DP pipeline to a forward-pass schedule.
+
+    Mirrors optimize_battery_schedule after the forward pass: price the raw
+    schedule, run the oscillation filter and keep it only when it does not cost
+    money, then the (ungated) micro-cycle filter.
+
+    Returns (power_kw, modes, soc_kwh, raw_total_cost, total_cost).
+    """
+    n_steps = len(power_schedule_kw)
+    charge_curve = charge_eff_curve_override or battery.charge_efficiency_curve
+    discharge_curve = discharge_eff_curve_override or battery.discharge_efficiency_curve
+    cost_charge_curve = battery.charge_efficiency_curve
+    cost_discharge_curve = battery.discharge_efficiency_curve
+    feed_in = (
+        feed_in_forecast[:n_steps] if feed_in_forecast else price_forecast[:n_steps]
+    )
+    pv_dc = pv_dc_forecast[:n_steps] if pv_dc_forecast else None
+
+    usable_kwh = battery.max_soc_kwh - battery.min_soc_kwh
+    cycle_hours = (
+        usable_kwh / battery.max_discharge_power_kw
+        if battery.max_discharge_power_kw > 0
+        else 2.0
+    )
+    oscillation_window_hours = max(2.0, cycle_hours)
+
+    def _price(power_kw, soc_kwh):
+        return _calculate_schedule_total_cost(
+            battery_config=battery,
+            power_schedule_kw=power_kw,
+            soc_schedule_kwh=soc_kwh,
+            price_forecast=price_forecast[:n_steps],
+            feed_in_forecast=feed_in,
+            pv_forecast=pv_forecast[:n_steps],
+            consumption_forecast=consumption_forecast[:n_steps],
+            step_durations_hours=step_durations_hours[:n_steps],
+            degradation_cost_per_kwh=degradation_cost,
+            terminal_price=terminal_price,
+            pv_dc_forecast=pv_dc if pv_dc is not None else [0.0] * n_steps,
+        )
+
+    raw_total = _price(power_schedule_kw, soc_schedule_kwh)
+
+    # Ending below min_soc carries the DP's deficit penalty in the cost guard,
+    # so the filter cannot undo a refill the DP planned on purpose (mirrors
+    # _deficit_surcharge in optimizer.py, #215).
+    min_soc_wh = round(battery.min_soc_kwh * 1000)
+    deficit_penalty = _deficit_penalty_per_kwh(
+        price_forecast[:n_steps],
+        feed_in,
+        charge_curve,
+        degradation_cost,
+        max(0.0, min_price_spread) / 2.0,
+    )
+
+    def _deficit_surcharge(soc_kwh):
+        deficit_kwh = min_soc_wh / 1000.0 - (soc_kwh[-1] if soc_kwh else 0.0)
+        if deficit_kwh * 1000.0 <= soc_resolution_wh / 2.0:
+            return 0.0
+        return deficit_kwh * (deficit_penalty - terminal_price)
+
+    raw_objective = raw_total + _deficit_surcharge(soc_schedule_kwh)
+
+    osc_power, osc_modes, osc_soc = _filter_oscillations(
+        power_schedule_kw=power_schedule_kw,
+        mode_schedule=mode_schedule,
+        initial_soc_kwh=current_soc_kwh,
+        price_forecast=price_forecast[:n_steps],
+        min_price_spread=min_price_spread,
+        degradation_cost_per_kwh=degradation_cost,
+        step_durations_hours=step_durations_hours[:n_steps],
+        min_soc_kwh=battery.min_soc_kwh,
+        max_soc_kwh=battery.max_soc_kwh,
+        pv_forecast=pv_forecast[:n_steps],
+        consumption_forecast=consumption_forecast[:n_steps],
+        feed_in_forecast=feed_in,
+        oscillation_window_hours=oscillation_window_hours,
+        pv_dc_forecast=pv_dc,
+        pv_dc_coupled=battery.pv_dc_coupled,
+        pv_dc_efficiency=battery.pv_dc_efficiency,
+        charge_curve=charge_curve,
+        discharge_curve=discharge_curve,
+        cost_charge_curve=cost_charge_curve,
+        cost_discharge_curve=cost_discharge_curve,
+        max_charge_power_kw=battery.max_charge_power_kw,
+        max_discharge_power_kw=battery.max_discharge_power_kw,
+    )
+    if _price(osc_power, osc_soc) + _deficit_surcharge(osc_soc) <= raw_objective:
+        power_schedule_kw, mode_schedule, soc_schedule_kwh = (
+            osc_power,
+            osc_modes,
+            osc_soc,
+        )
+
+    power_schedule_kw, mode_schedule, soc_schedule_kwh = _filter_micro_cycles(
+        power_schedule_kw=power_schedule_kw,
+        mode_schedule=mode_schedule,
+        initial_soc_kwh=soc_schedule_kwh[0],
+        step_durations_hours=step_durations_hours[:n_steps],
+        min_soc_kwh=battery.min_soc_kwh,
+        max_soc_kwh=battery.max_soc_kwh,
+        pv_dc_forecast=pv_dc,
+        pv_dc_coupled=battery.pv_dc_coupled,
+        pv_dc_efficiency=battery.pv_dc_efficiency,
+        min_cycle_kwh=MIN_CYCLE_KWH,
+        charge_curve=charge_curve,
+        discharge_curve=discharge_curve,
+        max_charge_power_kw=battery.max_charge_power_kw,
+        soc_schedule_kwh=soc_schedule_kwh,
+    )
+    total = _price(power_schedule_kw, soc_schedule_kwh)
+    return power_schedule_kw, mode_schedule, soc_schedule_kwh, raw_total, total
+
+
+# ---------------------------------------------------------------------------
 # Analysis helpers
 # ---------------------------------------------------------------------------
 
@@ -1683,6 +2351,42 @@ def main():
         charge_eff_curve_override=charge_eff_curve_override,
         discharge_eff_curve_override=discharge_eff_curve_override,
         arbitrage_cost_per_kwh=max(0.0, min_price_spread) / 2.0,
+    )
+
+    # Post-DP pipeline (oscillation filter with cost guard, micro-cycle
+    # filter), exactly as the integration runs it. The recorded schedule below
+    # is the post-processed one, so comparing it against the raw forward pass
+    # used to show every filter decision as a mismatch.
+    raw_mode_schedule = list(mode_schedule)
+    (
+        power_schedule_kw,
+        mode_schedule,
+        soc_schedule_kwh,
+        sim_raw_total,
+        sim_total,
+    ) = post_process(
+        battery,
+        current_soc_kwh,
+        power_schedule_kw,
+        mode_schedule,
+        soc_schedule_kwh,
+        price_forecast,
+        feed_in_forecast,
+        pv_forecast,
+        consumption_forecast,
+        step_durations_hours,
+        degradation_cost,
+        min_price_spread,
+        terminal_price,
+        soc_resolution_wh,
+        pv_dc_forecast=pv_dc_forecast,
+        charge_eff_curve_override=charge_eff_curve_override,
+        discharge_eff_curve_override=discharge_eff_curve_override,
+    )
+    n_filtered = sum(1 for a, b in zip(raw_mode_schedule, mode_schedule) if a != b)
+    print(
+        f"  Post-processing: {n_filtered} step(s) changed by the filters "
+        f"(simulated cost {sim_raw_total:.5f} € raw -> {sim_total:.5f} € final)"
     )
 
     # Recorded schedule from diagnostics

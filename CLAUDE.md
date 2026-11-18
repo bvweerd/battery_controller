@@ -20,15 +20,15 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
 
 ## HA Conventions
 - `_attr_has_entity_name = True` on all entities
-- `_attr_translation_key` alongside `_attr_name` (fallback)
+- Name entities only through `_attr_translation_key`; never set `_attr_name` — Home Assistant lets it override the translation, so nl.json names were never shown (`tests/test_entity_names.py` enforces this)
 - `strings.json` = copy of `translations/en.json` (required by HA)
 - `section()` imported from `homeassistant.data_entry_flow` (not helpers.selector)
 - Use `async def` for all I/O; never synchronous I/O in async context
 
 ## Critical Implementation Notes
-- **Feed-in price**: Never return `None` to optimizer — falls back to `CONF_FIXED_FEED_IN_PRICE` (€0.07). Returning None causes DP to default to grid_price, making PV arbitrage unprofitable.
+- **Feed-in price**: Never return `None` to optimizer — falls back to `CONF_FIXED_FEED_IN_PRICE` (€0.04 default). Returning None causes DP to default to grid_price, making PV arbitrage unprofitable.
 - **RTE split**: `charge_eff = discharge_eff = sqrt(RTE)` — ensures `charge × discharge = RTE`
-- **Oscillation filter**: Post-DP pass removes charge↔discharge pairs where spread < `(2×degradation + min_price_spread) / sqrt(RTE)`. Uses 2-hour lookahead window.
+- **Oscillation filter**: Post-DP pass removes charge↔discharge pairs where spread < `(2×degradation + min_price_spread) / sqrt(RTE)`. Lookahead window is `max(2 h, usable_kWh / max_discharge_kW)`. The filtered schedule is only kept when it does not cost money (the arbitrage hurdle itself lives in the DP objective as `min_price_spread / 2` per kWh of commanded throughput).
 - **DC PV**: ~97% efficient (MPPT only); AC PV ~85% (through inverter). Excess DC goes to AC at 96%.
 - **SoC fallback**: If SoC sensor unavailable, last known SoC from previous run is used.
 

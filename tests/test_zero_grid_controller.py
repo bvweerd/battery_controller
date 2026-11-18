@@ -461,3 +461,29 @@ def test_get_control_action_zero_capacity_does_not_crash():
         mode="zero_grid",
     )
     assert action["soc_percent"] == 0.0
+
+
+def test_idle_is_not_held_at_a_sub_deadband_setpoint(battery_config):
+    """Idle means 0 W even when the previous setpoint was inside the deadband."""
+    controller = ZeroGridController(
+        ZeroGridControllerConfig(deadband_w=200.0), battery_config
+    )
+    controller.reset_setpoint(150.0)
+
+    action = controller.get_control_action(0.0, 5.0, 0.0, 0.0, "idle")
+
+    assert action["target_power_w"] == 0.0
+
+
+def test_soc_limit_stop_is_not_held_by_the_deadband(battery_config):
+    """At max SoC a small leftover charge setpoint must drop to zero."""
+    controller = ZeroGridController(
+        ZeroGridControllerConfig(deadband_w=200.0), battery_config
+    )
+    controller.reset_setpoint(150.0)
+
+    action = controller.get_control_action(
+        -500.0, battery_config.max_soc_kwh, 0.0, 0.0, "zero_grid"
+    )
+
+    assert action["target_power_w"] == 0.0

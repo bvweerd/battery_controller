@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import logging
 import re
+
+_LOGGER = logging.getLogger(__name__)
+
+# Legacy-format curves already warned about (see parse_efficiency_curve_lenient).
+_WARNED_LEGACY_CURVES: set[str] = set()
 
 EfficiencyCurve = list[tuple[float, float]]
 """List of (power_kw, efficiency) tuples, sorted ascending by power."""
 
-_PAIR_RE = re.compile(r"\(?\s*(-?\d+(?:\.\d+)?)\s*[,:\s]\s*(-?\d+(?:\.\d+)?)\s*\)?")
+# A number with optional leading zero (".95") or trailing decimals.
+_NUM = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
+# A pair is either "power:efficiency" or a parenthesised "(power, efficiency)".
+# A bare "a, b" is deliberately NOT a pair: "0.92, 0.95" reads like two
+# efficiencies, and silently taking it as 0.92 kW -> 95 % accepted nonsense.
+_PAIR_RE = re.compile(
+    rf"(?:({_NUM})\s*:\s*({_NUM}))|(?:\(\s*({_NUM})\s*[,\s]\s*({_NUM})\s*\))"
+)
+# The old, lenient grammar (any separator, parentheses optional). Only used to
+# keep loading curves that were saved before the stricter grammar existed.
+_LEGACY_PAIR_RE = re.compile(
+    r"\(?\s*(-?\d+(?:\.\d+)?)\s*[,:\s]\s*(-?\d+(?:\.\d+)?)\s*\)?"
+)
 
 
 def parse_efficiency_curve(value: str | float, max_power_kw: float) -> EfficiencyCurve:
@@ -36,17 +54,64 @@ def parse_efficiency_curve(value: str | float, max_power_kw: float) -> Efficienc
             raise
         # Not a plain float; try to parse as pairs
 
-    pairs = _PAIR_RE.findall(raw)
-    if not pairs:
-        raise ValueError(
-            f"Cannot parse efficiency curve from {value!r}. "
-            "Use a plain float like '0.95' or power:efficiency pairs like '0:0.92, 5:0.95'."
-        )
+    pairs = [(m[0], m[1]) if m[0] else (m[2], m[3]) for m in _PAIR_RE.findall(raw)]
+    return _curve_from_pairs(value, raw, pairs, _PAIR_RE)
 
+
+def parse_efficiency_curve_lenient(
+    value: str | float, max_power_kw: float
+) -> EfficiencyCurve:
+    """Parse a stored curve, accepting the older lenient pair grammar.
+
+    New input is validated with :func:`parse_efficiency_curve`. A curve saved
+    before that grammar tightened (e.g. ``"0, 0.92, 5, 0.95"``) must still load
+    rather than fail the whole integration, so it falls back to the old reading
+    with a warning that asks the user to re-enter it.
+    """
+    try:
+        return parse_efficiency_curve(value, max_power_kw)
+    except ValueError as strict_error:
+        raw = str(value).strip()
+        try:
+            curve = _curve_from_pairs(
+                value, raw, _LEGACY_PAIR_RE.findall(raw), _LEGACY_PAIR_RE
+            )
+        except ValueError:
+            raise strict_error from None
+        # Once per curve: BatteryConfig is rebuilt at the start of every
+        # optimization run, so warning on each parse repeated the same
+        # message every few minutes until the user re-entered the curve.
+        if raw in _WARNED_LEGACY_CURVES:
+            return curve
+        _WARNED_LEGACY_CURVES.add(raw)
+        _LOGGER.warning(
+            "Efficiency curve %r uses an ambiguous format and was read as %s. "
+            "Re-enter it as power:efficiency pairs (e.g. '0:0.92, 5:0.95') in "
+            "the battery settings: %s",
+            value,
+            curve,
+            strict_error,
+        )
+        return curve
+
+
+def _curve_from_pairs(
+    value: str | float,
+    raw: str,
+    pairs: list[tuple[str, str]],
+    pattern: re.Pattern[str],
+) -> EfficiencyCurve:
+    """Validate parsed (power, efficiency) strings into a sorted curve."""
     # Reject inputs where numbers are left over after pairing (e.g. a bare
     # list of efficiencies like "0.92 0.95 0.97"): silently dropping the
     # remainder would accept nonsense power values without the user noticing.
-    leftover = _PAIR_RE.sub("", raw)
+    leftover = pattern.sub("", raw)
+    if not pairs and not re.search(r"\d", leftover):
+        raise ValueError(
+            f"Cannot parse efficiency curve from {value!r}. "
+            "Use a plain float like '0.95' or power:efficiency pairs like "
+            "'0:0.92, 5:0.95'."
+        )
     if re.search(r"\d", leftover):
         raise ValueError(
             f"Cannot parse efficiency curve from {value!r}: "

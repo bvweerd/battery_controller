@@ -123,8 +123,8 @@ rather than asked for.
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| Fixed feed-in price | €0.04/kWh | 0–10 | Fallback feed-in price when no feed-in sensor is configured |
-| Zero grid enabled | `true` | — | Enable real-time zero-grid balance control |
+| Fixed feed-in price | €0.04/kWh | −1–10 | Fallback feed-in price when no feed-in sensor is configured. Negative for contracts that charge a feed-in fee; Hybrid then always stores PV surplus rather than exporting it, since every exported kWh costs money |
+| Zero grid enabled | `true` | — | Run the real-time (~5 s) zero-grid loop. Requires grid power sensors. When off, zero-grid steps publish a 0 W setpoint and leave balancing to the battery's own controller — the same as having no power sensors |
 | Zero grid response time | 10 s | 1–300 | Expected battery response delay; limits how fast setpoints are updated |
 | Max grid power | 0 kW | 0–1000 | Grid connection cap (0 = unlimited) |
 
@@ -276,7 +276,7 @@ the UI or an automation without reloading the integration.
 
 | Entity | Range | Default | Description |
 |--------|-------|---------|-------------|
-| Degradation Cost | 0–1.00 EUR/cycle | 0.42 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
+| Degradation Cost per Cycle | 0–1.00 EUR/cycle | 0.42 | Battery wear cost per full charge+discharge cycle; part of the optimizer's cost function |
 | Minimum Price Spread | 0–0.50 EUR/kWh | 0.05 | Extra margin per kWh a cycle must earn *on top of* round-trip losses and degradation — not the minimum price difference itself |
 | Zero Grid Deadband | 0–500 W | 50 | Grid power tolerance; setpoints are not updated within this band |
 | Manual Power Setpoint | ±max power W | 0 | Target power in `manual` mode (positive = discharge, negative = charge) |

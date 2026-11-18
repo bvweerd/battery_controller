@@ -23,6 +23,15 @@ from .config_flow import async_migrate_entry  # noqa: F401
 from .const import (
     BATTERY_SUBENTRY_TYPE,
     CONF_CAPACITY_KWH,
+    CONF_CHARGE_EFFICIENCY_CURVE,
+    CONF_DISCHARGE_EFFICIENCY_CURVE,
+    CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+    CONF_HIGH_SOC_MAX_CHARGE_KW,
+    CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+    CONF_LOW_SOC_MAX_DISCHARGE_KW,
+    CONF_MAX_SOC_PERCENT,
+    CONF_MIN_SOC_PERCENT,
+    CONF_PV_DC_EFFICIENCY,
     CONF_CONTROL_MODE,
     CONF_DEGRADATION_COST_PER_CYCLE,
     CONF_MANUAL_POWER_SETPOINT_W,
@@ -98,6 +107,54 @@ class BatteryControllerData:
     # entry.options exactly as they stood at setup. Used by _update_listener to
     # tell an options change from the derived keys `config` also carries.
     options: dict[str, Any] = field(default_factory=dict)
+    # Subentries (type, title, data) exactly as they stood at setup. Adding,
+    # removing or editing a battery or PV array changes the coordinators'
+    # structure (sensors, per-battery dispatch, PV models), so it reloads.
+    subentries: dict[str, tuple[str, str, dict[str, Any]]] = field(default_factory=dict)
+
+
+# Battery subentry keys the optimization coordinator re-reads live at the start
+# of every run (_refresh_battery_config), so editing them needs no reload.
+# Capacity and power ratings are deliberately absent: they also size number
+# entity ranges and name the battery device, which are fixed at setup.
+_LIVE_BATTERY_KEYS = frozenset(
+    {
+        CONF_CHARGE_EFFICIENCY_CURVE,
+        CONF_DISCHARGE_EFFICIENCY_CURVE,
+        CONF_MIN_SOC_PERCENT,
+        CONF_MAX_SOC_PERCENT,
+        CONF_PV_DC_EFFICIENCY,
+        CONF_HIGH_SOC_CHARGE_THRESHOLD_PCT,
+        CONF_HIGH_SOC_MAX_CHARGE_KW,
+        CONF_LOW_SOC_DISCHARGE_THRESHOLD_PCT,
+        CONF_LOW_SOC_MAX_DISCHARGE_KW,
+    }
+)
+
+
+def _subentry_snapshot(
+    entry: ConfigEntry,
+) -> dict[str, tuple[str, str, dict[str, Any]]]:
+    """Structural snapshot of an entry's subentries, for the reload decision.
+
+    Live-refreshed battery keys are left out, so editing an SoC limit or an
+    efficiency curve does not restart every coordinator (and lose the
+    commitment lock, hysteresis and last-known SoC with it).
+    """
+    return {
+        sid: (
+            s.subentry_type,
+            s.title,
+            {
+                k: v
+                for k, v in s.data.items()
+                if not (
+                    s.subentry_type == BATTERY_SUBENTRY_TYPE and k in _LIVE_BATTERY_KEYS
+                )
+            },
+        )
+        for sid, s in entry.subentries.items()
+    }
 
 
 async def _async_handle_reset_efficiency_calibration(
@@ -349,6 +406,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         optimization_coordinator=optimization_coordinator,
         config=config,
         options=dict(entry.options),
+        subentries=_subentry_snapshot(entry),
         device=device,
         battery_devices=battery_devices,
         pv_devices=pv_devices,
@@ -390,6 +448,15 @@ async def _update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
         for key in (set(old_options) | set(entry.options)) - _NO_RELOAD_KEYS
     )
 
+    # Subentry changes reach this listener too (HA calls update listeners on
+    # add/update/remove of a subentry) but leave the options untouched, so
+    # without this check a new, edited or deleted battery or PV array only
+    # took effect after a restart. Edits to live-refreshed battery keys are
+    # excluded from the snapshot and take effect on the next run instead.
+    needs_reload = needs_reload or (
+        entry.runtime_data.subentries != _subentry_snapshot(entry)
+    )
+
     if needs_reload:
         _LOGGER.debug("Structural config changed; reloading entry %s", entry.entry_id)
         await hass.config_entries.async_reload(entry.entry_id)
@@ -419,7 +486,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and its platforms."""
     _LOGGER.info("Unloading entry %s", entry.entry_id)
 
-    if entry.runtime_data is not None:
+    # Platforms first: if they fail to unload the entry stays loaded, and its
+    # entities must then still have running coordinators behind them.
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok and entry.runtime_data is not None:
         for coord in (
             entry.runtime_data.forecast_coordinator,
             entry.runtime_data.optimization_coordinator,
@@ -430,7 +500,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception:
                 _LOGGER.exception("Error shutting down coordinator %s", coord)
 
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         _LOGGER.debug("Successfully unloaded entry %s", entry.entry_id)
         remaining_entries = [
