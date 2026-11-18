@@ -388,7 +388,9 @@ def _build_main_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_FIXED_FEED_IN_PRICE,
                 default=d.get(CONF_FIXED_FEED_IN_PRICE, DEFAULT_FIXED_FEED_IN_PRICE),
                 description={"suggested_value": d.get(CONF_FIXED_FEED_IN_PRICE)},
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=10.0)),
+                # Negative allowed: contracts with a feed-in fee (terugleverkosten)
+                # pay to export, which the optimizer already handles.
+            ): vol.All(vol.Coerce(float), vol.Range(min=-1.0, max=10.0)),
             vol.Optional(
                 CONF_ZERO_GRID_ENABLED,
                 default=d.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED),

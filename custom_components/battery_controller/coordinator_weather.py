@@ -46,7 +46,10 @@ class WeatherDataCoordinator(DataUpdateCoordinator):
                 "hourly": "temperature_2m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation,wind_speed_10m",
                 "wind_speed_unit": "ms",
                 "timezone": "UTC",
-                "forecast_days": "2",
+                # Three days, not two: the series starts at 00:00 UTC today,
+                # so with two days the evening runs had barely 25 h left and
+                # the last hours of the 36 h DP horizon got no PV at all.
+                "forecast_days": "3",
             }
         )
 

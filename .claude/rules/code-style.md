@@ -23,7 +23,7 @@ paths:
 ## HA-specific conventions
 - `_LOGGER = logging.getLogger(__name__)` at module level
 - `async def` for all I/O-bound operations — no blocking calls in async context
-- Entity classes: `_attr_has_entity_name = True`, set `_attr_translation_key`
+- Entity classes: `_attr_has_entity_name = True`, set `_attr_translation_key`, never `_attr_name` (it overrides the translation)
 - Config flow: inherit from `config_entries.ConfigFlow`; options flow from `config_entries.OptionsFlowWithConfigEntry`
 - Import `section()` and `SectionConfig` from `homeassistant.data_entry_flow`
 - Use `coordinator.data` pattern; raise `UpdateFailed` on errors in `_async_update_data`

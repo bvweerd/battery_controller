@@ -69,6 +69,8 @@ PV_CAL_IMPLAUSIBLE = "sample_dropped_implausible"
 
 _PV_CAL_ELEVATION_BANDS = (0, 10, 20, 30, 40)  # lower bounds in degrees
 _PV_CALIBRATION_BAND_MIN_SAMPLES = 5
+# Delay before persisting newly collected samples when no correction moved.
+_PV_CAL_SAMPLE_SAVE_DELAY_S = 1800
 
 
 def _pv_elevation_band(elevation_deg: float) -> int:
@@ -290,7 +292,17 @@ class ForecastCoordinator(DataUpdateCoordinator):
         is only derived once PV_CALIBRATION_MIN_SAMPLES observations exist, so
         this stays False while the window fills.
         """
-        return _pv_gain_is_significant(self.pv_correction(subentry_id))
+        # Mirror _pv_gain_for_elevation: a band with its own correction uses
+        # that, every other band falls back to the global one. The forecast is
+        # corrected when any band's EFFECTIVE gain is significant — a band gain
+        # can apply before the global window fills, and a significant global
+        # gain applies nowhere once every band has learned its own.
+        bands = self._pv_cal_band_corrections.get(subentry_id, {})
+        effective = [
+            bands.get(band, self.pv_correction(subentry_id))
+            for band in range(len(_PV_CAL_ELEVATION_BANDS))
+        ]
+        return any(_pv_gain_is_significant(gain) for gain in effective)
 
     def pv_last_result(self, subentry_id: str) -> str:
         """What the last calibration attempt for one array did, and why."""
@@ -359,27 +371,27 @@ class ForecastCoordinator(DataUpdateCoordinator):
 
     async def _async_save_pv_calibration(self) -> None:
         """Persist per-array PV corrections."""
-        await self._pv_cal_store.async_save(
-            {
-                "arrays": {
-                    sid: {
-                        "samples": [[m, f] for m, f in samples],
-                        "correction": self._pv_cal_correction.get(sid, 1.0),
-                        "band_samples": {
-                            str(b): list(s)
-                            for b, s in self._pv_cal_band_samples.get(sid, {}).items()
-                        },
-                        "band_corrections": {
-                            str(b): c
-                            for b, c in self._pv_cal_band_corrections.get(
-                                sid, {}
-                            ).items()
-                        },
-                    }
-                    for sid, samples in self._pv_cal_samples.items()
+        await self._pv_cal_store.async_save(self._pv_cal_payload())
+
+    def _pv_cal_payload(self) -> dict[str, Any]:
+        """The stored form of every array's samples and corrections."""
+        return {
+            "arrays": {
+                sid: {
+                    "samples": [[m, f] for m, f in samples],
+                    "correction": self._pv_cal_correction.get(sid, 1.0),
+                    "band_samples": {
+                        str(b): list(s)
+                        for b, s in self._pv_cal_band_samples.get(sid, {}).items()
+                    },
+                    "band_corrections": {
+                        str(b): c
+                        for b, c in self._pv_cal_band_corrections.get(sid, {}).items()
+                    },
                 }
+                for sid, samples in self._pv_cal_samples.items()
             }
-        )
+        }
 
     async def async_reset_pv_calibration(self) -> None:
         """Reset every per-array PV correction to the nominal 1.0."""
@@ -452,6 +464,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
             return
 
         changed = False
+        sampled = False
         for sid, snapshot_kwh in planned_by_sid.items():
             planned_kwh = snapshot_kwh * elapsed_scale
             entity_id = self._pv_measured_sensors.get(sid)
@@ -489,6 +502,7 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 sid, deque(maxlen=PV_CALIBRATION_WINDOW)
             )
             samples.append((measured_kwh, planned_kwh))
+            sampled = True
             # Per-elevation-band calibration: same sample, split by sun angle.
             elevation_deg = snapshot.get("elevation_deg")
             if elevation_deg is not None:
@@ -529,6 +543,13 @@ class ForecastCoordinator(DataUpdateCoordinator):
                 )
         if changed:
             self.hass.async_create_task(self._async_save_pv_calibration())
+        elif sampled:
+            # Persist the filling window and the per-band samples too, or they
+            # are lost on restart — but batched: a full write for every
+            # quarter-hourly sample is ~50 writes a day to an SD card.
+            self._pv_cal_store.async_delay_save(
+                self._pv_cal_payload, _PV_CAL_SAMPLE_SAVE_DELAY_S
+            )
 
     def _set_pv_results(self, sids: Iterable[str], result: str) -> None:
         """Record the same calibration outcome for several arrays at once."""

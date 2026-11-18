@@ -1093,7 +1093,7 @@ function renderDiagnostics(raw) {
       null);
     // Use shadow price from diagnostics if available; otherwise compute from V
     if (opt.shadow_price_eur_kwh === undefined || opt.shadow_price_eur_kwh === null) {
-      const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5);
+      const shadow = computeShadowPrice(dp2.V, dp2.socStates, bs.soc_kwh || 5, dp2.minSocIdx);
       document.getElementById('s-shadow').textContent = `€ ${shadow.toFixed(4)}/kWh`;
     }
     renderProfitabilityTable(prices, feedInForDp, pvFc, consumFc, powerKw, modes, socKwh,

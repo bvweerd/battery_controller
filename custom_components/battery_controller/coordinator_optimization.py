@@ -76,7 +76,9 @@ from .const import (
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
+    CONF_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_DEADBAND_W,
+    DEFAULT_ZERO_GRID_ENABLED,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_HYBRID_PLUS,
@@ -545,6 +547,17 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         self._committed_step_start = None
         self._last_surplus_capture_decision = "zero_grid"
         self._surplus_capture_blocked = False
+        # The hybrid hysteresis memories describe decisions taken under the
+        # previous mode. Reset them to exactly the state a fresh start has
+        # (the values __init__ sets), so a mode switch behaves like starting
+        # in that mode rather than inheriting whichever side of each band the
+        # previous mode happened to leave it on.
+        self._last_hybrid_decision = "zero_grid"
+        self._last_hybrid_idle_decision = ACTION_IDLE
+        self._last_idle_upgrade_decision = ACTION_IDLE
+        self._last_hybrid_charge_decision = ACTION_CHARGING
+        self._last_grid_charge_decision = ACTION_CHARGING
+        self._grid_charge_vetoed = False
         # Reset cached setpoint so the real-time loop uses idle immediately
         # instead of applying stale setpoints from the previous mode while the
         # re-optimization triggered by the mode change is still running.
@@ -740,10 +753,8 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # with state-change tracking each sensor fires a separate event,
         # causing the zero_grid integrator to run twice in rapid succession
         # and double the setpoint. A fixed interval reads all sensors at once.
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
-        if has_power_sensors:
+        realtime_control = self._realtime_control_enabled
+        if realtime_control:
             # Single source: create_zero_grid_controller already parsed this
             # from the config, so re-reading it here could drift.
             interval_s = self.zero_grid_controller.config.response_time_s
@@ -1034,6 +1045,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                     else rt_power_kw * 1000
                 )
 
+        if not self._optimization_enabled and rt_effective_mode in (
+            ACTION_CHARGING,
+            ACTION_DISCHARGING,
+        ):
+            # The optimizer is paused, so the cached charge/discharge is the
+            # first step of a plan that is no longer being refreshed. Executing
+            # it kept e.g. a 3 kW grid charge running for as long as the switch
+            # stayed off, long after the price period it was planned for.
+            # Plan-independent control (zero_grid, manual) is unaffected.
+            rt_effective_mode = ACTION_IDLE
+            controller_schedule_w = 0.0
+
         controller_mode = self._resolve_controller_mode(
             rt_effective_mode, current_grid_w, battery_state.power_kw * 1000
         )
@@ -1052,7 +1075,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Recalculate zero_grid setpoint with actual sensor data
         saved_last_target_w = self.zero_grid_controller.last_target_w
-        control_action = self.zero_grid_controller.get_control_action(
+        control_action = self._control_action(
             current_grid_w=current_grid_w,
             current_soc_kwh=battery_state.soc_kwh,
             current_battery_w=battery_state.power_kw * 1000,
@@ -1383,6 +1406,30 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
         )
 
+    @property
+    def _realtime_control_enabled(self) -> bool:
+        """Whether this integration runs the real-time zero-grid loop itself.
+
+        Needs grid power sensors to measure against, and the user can switch it
+        off (CONF_ZERO_GRID_ENABLED) to leave zero-grid to the battery's own
+        controller — the same behaviour as having no power sensors: no ~5 s
+        loop, and a zero_grid step publishes a 0 W setpoint.
+        """
+        if not bool(self.config.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED)):
+            return False
+        return bool(self._power_consumption_sensors or self._power_production_sensors)
+
+    def _control_action(self, **kwargs: Any) -> dict[str, Any]:
+        """Ask the zero-grid controller for a setpoint, with the live deadband.
+
+        The only way the coordinator calls get_control_action. The number
+        entity writes the deadband option without a reload, and the
+        controller used to keep the value it was created with; syncing it here
+        rather than at each call site means a new caller cannot forget it.
+        """
+        self.zero_grid_controller.config.deadband_w = self._hybrid_deadband_w()
+        return self.zero_grid_controller.get_control_action(**kwargs)
+
     def _resolve_controller_mode(
         self,
         effective_mode: str,
@@ -1419,9 +1466,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Returns:
             Controller mode string for ZeroGridController.
         """
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
+        realtime_control = self._realtime_control_enabled
 
         if effective_mode == "zero_grid":
             return "zero_grid"
@@ -1432,7 +1477,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             upgrade_allowed = (
                 self._control_mode not in (MODE_FOLLOW_SCHEDULE, MODE_MANUAL)
                 and not self._surplus_capture_blocked
-                and has_power_sensors
+                and realtime_control
             )
             if not upgrade_allowed:
                 # Reset the memory so a later upgrade starts from the strict
@@ -1618,7 +1663,9 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             soc_percent = soc_value
             soc_kwh = (soc_percent / 100) * battery_config.capacity_kwh
 
-        power_kw = power_value  # Assume kW unless sensor says otherwise
+        # Without a power sensor there is nothing to convert. With one, a
+        # missing unit is read as W (the common default for power sensors).
+        power_kw = power_value
         if power_sensor:
             state = self.hass.states.get(power_sensor)
             if state:
@@ -1707,13 +1754,18 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if entry is None:
             return
 
+        # Keep the subentry data list and the config list in lockstep: several
+        # loops zip the two, so dropping a removed battery from one but not the
+        # other paired one pack's config with another pack's sensors. The
+        # sensor ids are refreshed together with the specs for the same reason.
+        live = [
+            (sid, dict(entry.subentries[sid].data))
+            for sid, _ in self._battery_subentries
+            if sid in entry.subentries
+        ]
+        self._battery_subentries = live
         self._individual_battery_configs = [
-            (sid, BatteryConfig.from_subentry(dict(s.data)))
-            for sid, s in (
-                (sid, entry.subentries[sid])
-                for sid, _ in self._battery_subentries
-                if sid in entry.subentries
-            )
+            (sid, BatteryConfig.from_subentry(data)) for sid, data in live
         ]
         self.battery_config = aggregate_battery_configs(
             [cfg for _, cfg in self._individual_battery_configs]
@@ -1778,7 +1830,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 "OptimizationCoordinator: Optimization disabled, returning cached data."
             )
             if self.data is not None:
-                return self.data
+                return self._paused_data(self.data)
 
         self._optimization_running = True
         self._pending_optimization = False
@@ -1793,6 +1845,42 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 )
                 self._optimization_trigger_source = "pending_rerun"
                 self.hass.async_create_task(self.async_request_refresh())
+
+    def _paused_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Cached data with any planned charge/discharge stood down.
+
+        While the optimizer is paused its plan is no longer refreshed, so the
+        cached first step must not stay commanded. The real-time loop already
+        stands it down every tick, but without that loop (no grid power
+        sensors, or zero-grid control switched off) the cached control action
+        was republished unchanged for as long as the switch stayed off.
+        """
+        if self._effective_mode not in (ACTION_CHARGING, ACTION_DISCHARGING):
+            return data
+        self._effective_mode = ACTION_IDLE
+        self._effective_power = 0.0
+        self._controller_schedule_w = 0.0
+        battery_state = data.get("battery_state") or self.get_current_battery_state()
+        control_action = self._control_action(
+            current_grid_w=float(
+                data.get("control_action", {}).get("current_grid_w", 0.0)
+            ),
+            current_soc_kwh=battery_state.soc_kwh,
+            current_battery_w=battery_state.power_kw * 1000,
+            dp_schedule_w=0.0,
+            mode=ACTION_IDLE,
+        )
+        battery_setpoints = self._split_setpoint(0.0, self._control_mode)
+        self._last_battery_setpoints = dict(battery_setpoints)
+        self._record_dispatched_setpoints(battery_setpoints, dt_util.utcnow())
+        return {
+            **data,
+            "control_action": control_action,
+            "battery_setpoints": battery_setpoints,
+            "optimal_power_kw": 0.0,
+            "optimal_mode": ACTION_IDLE,
+            "updated_at": dt_util.now().isoformat(),
+        }
 
     async def _async_load_charge_eff_calibration(self) -> None:
         """Load every battery's persisted charge calibration from storage."""
@@ -2573,18 +2661,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 effective_power = 0.0
             elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
-                # Use shadow price as the threshold: net sell value per kWh
-                # stored = feed_in × discharge_eff at the planned power — the
+                # Use shadow price as the threshold: net value per kWh stored =
+                # delivered value × discharge_eff at the planned power — the
                 # same efficiency the DP priced this action with. If that
                 # exceeds the shadow price (the value of keeping the energy for
-                # future use), exporting is better.
+                # future use), discharging now is better.
                 #
                 # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
                 # oscillation when shadow_price ≈ net_sell_value.
                 # • Was discharging → continue unless net_sell_value < threshold × 0.95
                 # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                net_sell_value = current_feed_in * self._discharge_efficiency_at(
+                # Value each delivered kWh by where it goes: the part that
+                # covers the house's own shortfall displaces import at the buy
+                # price, only the remainder is exported at the feed-in price.
+                # Pricing all of it at feed-in (as before) vetoed planned
+                # self-consumption discharges while the house imported at the
+                # peak price. Same split as the oscillation filter's
+                # get_discharge_value.
+                discharge_kw = abs(result.optimal_power_kw)
+                to_self_kw = min(discharge_kw, max(0.0, -surplus_w) / 1000.0)
+                delivered_value = (
+                    (
+                        to_self_kw * current_price
+                        + (discharge_kw - to_self_kw) * current_feed_in
+                    )
+                    / discharge_kw
+                    if discharge_kw > 0
+                    else current_feed_in
+                )
+                net_sell_value = delivered_value * self._discharge_efficiency_at(
                     result.optimal_power_kw
                 )
                 threshold = result.shadow_price_eur_kwh
@@ -2803,9 +2909,15 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             # Same economics as the post-DP oscillation filter in optimizer.py:
             # min_arbitrage_spread = (2 x degradation + min_spread) / sqrt(RTE).
             commit_spread = (2.0 * degradation_cost_per_kwh + min_spread) / sqrt_rte
+            # A band of 2 % of the usable range on both ends. Multiplying the
+            # limits themselves made the band asymmetric (20 Wh at a 1 kWh
+            # floor, 180 Wh at a 9 kWh ceiling) and zero at min_soc = 0 %.
+            soc_margin_kwh = 0.02 * max(
+                0.0, battery_config.max_soc_kwh - battery_config.min_soc_kwh
+            )
             soc_at_limit = (
-                battery_state.soc_kwh <= battery_config.min_soc_kwh * 1.02
-                or battery_state.soc_kwh >= battery_config.max_soc_kwh * 0.98
+                battery_state.soc_kwh <= battery_config.min_soc_kwh + soc_margin_kwh
+                or battery_state.soc_kwh >= battery_config.max_soc_kwh - soc_margin_kwh
             )
             same_price_period = (
                 current_step_start is not None
@@ -2942,11 +3054,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if not price_forecast:
             # Sensor unavailable or has no forecast attributes: try historical model
             if self._price_model.has_data():
-                weather_data = self.weather_coordinator.data or {}
-                price_forecast = self._price_model.forecast(
-                    hours=24,
-                    ghi_forecast=weather_data.get("radiation_forecast"),
-                    wind_forecast=weather_data.get("wind_speed_forecast"),
+                # Anchor the model on real hour boundaries, through the same
+                # helper the horizon extension uses: it slices the weather
+                # features to those hours and buckets by local hour-of-day.
+                # Asking the model for "24 hours from now" instead put the
+                # series up to an hour off and fed it weather from the hour of
+                # the last weather fetch.
+                hour_start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+                price_start_times = [hour_start + timedelta(hours=i) for i in range(24)]
+                price_forecast = self._model_series(
+                    self._price_model, price_start_times, [1.0] * 24
                 )
                 price_interval = 60
                 price_forecast_source = "historical_model"
@@ -3018,21 +3135,25 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # construction; a sensor forecast carries its own period starts.
         feed_in_start: datetime = dt_util.utcnow()
         feed_in_sensor = self.config.get(CONF_FEED_IN_PRICE_SENSOR)
-        if feed_in_sensor:
-            feed_in_state = usable_state(self.hass, feed_in_sensor)
-            if feed_in_state is not None:
-                feed_in_forecast, feed_in_starts, feed_in_interval = (
-                    extract_price_forecast_with_timestamps(feed_in_state)
-                )
+        feed_in_forecast: list[float] = []
+        feed_in_state = usable_state(self.hass, feed_in_sensor)
+        if feed_in_state is not None:
+            feed_in_forecast, feed_in_starts, feed_in_interval = (
+                extract_price_forecast_with_timestamps(feed_in_state)
+            )
+            if feed_in_forecast:
                 if feed_in_starts:
                     feed_in_start = feed_in_starts[0]
                 feed_in_is_dynamic = True
-            else:
-                # Sensor unavailable - fall back to fixed price
-                feed_in_forecast = [self._fixed_feed_in_price()] * len(price_forecast)
-        else:
-            # Use fixed feed-in price
+        if not feed_in_forecast:
+            # One fallback for every way of having no feed-in series: no
+            # sensor configured, the sensor unavailable, or a readable sensor
+            # without a usable period (all elapsed, non-numeric state). An
+            # empty list used to reach the optimizer as None, which then
+            # priced every export at the grid BUY price — the failure
+            # CLAUDE.md warns about.
             feed_in_forecast = [self._fixed_feed_in_price()] * len(price_forecast)
+            feed_in_interval = price_interval
 
         # Get optimization parameters — read runtime-tunable values from live options
         degradation_cost = self._live_option(
@@ -3397,7 +3518,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             effective_mode, current_grid, battery_state.power_kw * 1000
         )
 
-        control_action = self.zero_grid_controller.get_control_action(
+        control_action = self._control_action(
             current_grid_w=current_grid,
             current_soc_kwh=battery_state.soc_kwh,
             current_battery_w=battery_state.power_kw * 1000,
@@ -3405,12 +3526,11 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             mode=controller_mode,
         )
 
-        # Battery-controlled zero_grid: if no power sensors but mode is zero_grid,
-        # set setpoint to 0 (battery inverter will handle zero_grid with its own sensors)
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
-        if not has_power_sensors and effective_mode == "zero_grid":
+        # Battery-controlled zero_grid: without our own real-time loop (no grid
+        # power sensors, or zero-grid control switched off) a zero_grid step
+        # publishes 0 W and the battery inverter balances with its own sensors.
+        realtime_control = self._realtime_control_enabled
+        if not realtime_control and effective_mode == "zero_grid":
             control_action["target_power_w"] = 0.0
             control_action["target_power_kw"] = 0.0
             control_action["action_mode"] = "zero_grid"

@@ -282,12 +282,16 @@ class BatteryDispatcher:
                     if state is not None
                     else (cfg.min_soc_kwh + cfg.max_soc_kwh) / 2
                 )
+                # Clamp against what this pack can still take on top of what
+                # earlier rounds already gave it — clamping each round against
+                # the full rating let the sum of rounds exceed the rating.
+                already = result.get(sid, 0.0)
                 if remaining_kw > 0:
-                    max_chg = cfg.max_charge_at_soc(soc_kwh)
+                    max_chg = max(0.0, cfg.max_charge_at_soc(soc_kwh) - already)
                     clamped = min(raw, max_chg)
                     at_limit = clamped >= max_chg - 1e-6
                 else:
-                    max_dchg = cfg.max_discharge_at_soc(soc_kwh)
+                    max_dchg = max(0.0, cfg.max_discharge_at_soc(soc_kwh) + already)
                     clamped = max(raw, -max_dchg)
                     at_limit = clamped <= -max_dchg + 1e-6
 

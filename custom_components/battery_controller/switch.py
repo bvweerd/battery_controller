@@ -62,7 +62,6 @@ class BatteryOptimizationSwitch(
 
     _attr_has_entity_name = True
     _attr_translation_key = "optimization_enabled"
-    _attr_name = "Optimization Enabled"
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
@@ -125,7 +124,6 @@ class PVCurtailmentSwitch(
 
     _attr_has_entity_name = True
     _attr_translation_key = "pv_curtailed"
-    _attr_name = "PV Curtailed"
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(

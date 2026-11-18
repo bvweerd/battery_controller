@@ -238,6 +238,11 @@ class ZeroGridController:
         Returns:
             Adjusted target respecting deadband
         """
+        # A hard zero (idle mode, or an SoC limit that stopped the battery) is
+        # a command, not noise: holding a sub-deadband setpoint there kept a
+        # full battery charging, or an idle one moving, indefinitely.
+        if target_w == 0.0:
+            return 0.0
         if abs(target_w - self._last_target_w) < self.config.deadband_w:
             return self._last_target_w
         return target_w

@@ -28,7 +28,7 @@ battery_controller/
 - State space: time steps × SoC states (10 Wh resolution) × power actions (100 W steps)
 - Backward pass: `V[t][s] = min(step_cost + V[t+1][s'])` for all actions
 - Forward pass: execute `best_action[t][current_soc_state]`
-- Terminal condition: `V[T][s] = -(soc_kwh × feed_in_price_T)` — prevents horizon-end discharge
+- Terminal condition: `V[T][s] = -(stored_kwh_above_min × terminal_price)`, where `terminal_price = max(0, min(feed_in[-1], 6 h tail average of feed-in clipped at the forecast median))` — prevents horizon-end discharge
 - Shadow price: `λ = -dV[0]/dSoC` — marginal value of stored energy (used in hybrid mode)
 
 ## Key external dependencies

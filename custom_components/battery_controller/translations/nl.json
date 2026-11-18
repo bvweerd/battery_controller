@@ -8,66 +8,103 @@
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
-              "price_sensor": "Elektriciteitsprijs sensor",
-              "battery_soc_sensor": "Batterij SoC sensor"
-            }
-          },
-          "pv": {
-            "name": "PV Array 1 (Primair)",
-            "data": {
-              "pv_peak_power_kwp": "Piekvermogen AC PV (kWp)",
-              "pv_orientation": "Oriëntatie (graden, 180=zuid)",
-              "pv_tilt": "Hellingshoek (graden)",
-              "pv_efficiency_factor": "Systeemrendement (0-1)",
-              "pv_dc_coupled": "PV direct op batterij (DC-gekoppeld)",
-              "pv_dc_peak_power_kwp": "Piekvermogen DC PV op batterij (kWp)",
-              "pv_dc_efficiency": "DC-koppelingsrendement (0-1)"
+              "price_sensor": "Elektriciteitsprijs sensor"
+            },
+            "data_description": {
+              "price_sensor": "Sensor met prijsvoorspellingsattributen voor elektriciteit (Nordpool, ENTSO-E of Dynamic Energy Contract Calculator). De optimizer heeft toekomstige prijzen nodig om laden en ontladen te plannen."
             }
           },
           "optional_sensors": {
             "name": "Optionele Sensoren",
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
-              "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "power_consumption_sensors": "Sensoren afgenomen netvermogen (W, bijv. DSMR — voor realtime balans)",
+              "power_production_sensors": "Sensoren teruggeleverd netvermogen (W, bijv. DSMR — voor realtime balans)",
               "grid_import_sensors": "Netinvoer sensoren (kWh, bijv. DSMR)",
               "grid_export_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)",
-              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)"
+              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)",
+              "pv_production_sensors": "PV-productiesensoren (kWh)"
+            },
+            "data_description": {
+              "feed_in_price_sensor": "Optionele aparte sensor voor de terugleverprijs. Zonder deze sensor wordt de vaste terugleverprijs hieronder gebruikt.",
+              "power_consumption_sensors": "Som van alle sensoren voor afgenomen netvermogen. Gebruikt door de nul-op-de-meter-regelaar voor realtime balans (updates elke ~5 s).",
+              "power_production_sensors": "Som van alle sensoren voor teruggeleverd netvermogen. Gebruikt door de nul-op-de-meter-regelaar voor realtime balans (updates elke ~5 s).",
+              "grid_import_sensors": "Cumulatieve kWh afgenomen van het net. Het huishoudverbruik wordt niet ingesteld maar afgeleid: bruto = afname − teruglevering + PV + ontladen − laden, met dit veld, de terugleverings- en PV-velden hieronder en de energietellers van elke batterij.",
+              "grid_export_sensors": "Cumulatieve kWh teruggeleverd aan het net. Zonder deze sensor zou PV die naar het net ging worden meegeteld als verbruik dat het huis nooit afnam.",
+              "gross_load_sensors": "Alleen als je een meter tussen de omvormer en het huis hebt. Die meet het huishoudverbruik direct, dus als deze is ingesteld wordt de berekening hierboven volledig overgeslagen. Nauwkeuriger dan het optellen van meerdere meters, en de enige bruikbare bron als een term niet meetbaar is — bijvoorbeeld DC-gekoppelde PV zonder DC-teller. Laat anders leeg.",
+              "pv_production_sensors": "Cumulatieve kWh van PV-omvormers — de PV-term van diezelfde reconstructie, voor de productie die het huis bediende in plaats van het net. Zonder deze sensor valt de integratie terug op de eigen historie van de PV-voorspelling, die minder nauwkeurig is."
             }
           },
           "advanced": {
             "name": "Geavanceerde Instellingen",
             "data": {
               "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
-              "zero_grid_enabled": "Nul-op-de-meter actief"
+              "zero_grid_enabled": "Nul-op-de-meter actief",
+              "zero_grid_response_time_s": "Update-interval nul-op-de-meter (seconden)",
+              "max_grid_power_kw": "Max. vermogen netaansluiting (kW, 0 = onbeperkt)"
+            },
+            "data_description": {
+              "fixed_feed_in_price": "Terugvalprijs voor teruglevering als er geen terugleverprijssensor is ingesteld. Wordt ook gebruikt als minimumwaarde voor arbitrageberekeningen.",
+              "zero_grid_enabled": "Schakelt realtime batterijsturing in om de netuitwisseling te minimaliseren. Vereist sensoren voor afgenomen en teruggeleverd vermogen.",
+              "zero_grid_response_time_s": "Verwachte vertraging tussen een setpointwijziging en de reactie van de batterij. Begrenst hoe vaak setpoints worden bijgewerkt om oscillatie te voorkomen.",
+              "max_grid_power_kw": "De optimizer houdt gepland laden binnen deze grens en behandelt teruglevering daarboven als afgeregeld (geen terugleveropbrengst). Zet op 0 voor geen limiet."
             }
           }
-        }
-      },
-      "pv_menu": {
-        "title": "Extra PV Arrays",
-        "description": "Je hebt {pv_count} extra PV array(s) geconfigureerd. Voeg meer arrays toe of rond de configuratie af.",
-        "menu_options": {
-          "add_pv_array": "Extra PV array toevoegen",
-          "remove_pv_array": "Laatste PV array verwijderen",
-          "finish_setup": "Afronden"
-        }
-      },
-      "add_pv_array": {
-        "title": "PV Array {array_number} toevoegen",
-        "description": "Configureer een extra PV array.",
-        "data": {
-          "peak_power_kwp": "Piekvermogen (kWp)",
-          "orientation": "Oriëntatie (graden, 180=zuid)",
-          "tilt": "Hellingshoek (graden)",
-          "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
         }
       }
     },
     "error": {
-      "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC)."
+      "missing_required": "Vul eerst de verplichte sensoren in (prijs + batterij SoC).",
+      "cannot_connect": "Kan geen verbinding maken met open-meteo.com. Controleer je internetverbinding en probeer het opnieuw."
     },
     "abort": {
       "already_configured": "Battery Controller is al geconfigureerd."
+    }
+  },
+  "exceptions": {
+    "api_error": {
+      "message": "Open-meteo API gaf status {status} terug."
+    },
+    "connection_error": {
+      "message": "Fout bij ophalen van weergegevens van open-meteo: {error}."
+    },
+    "no_forecast_data": {
+      "message": "Geen voorspellingsgegevens in het antwoord van de open-meteo API."
+    },
+    "no_weather_data": {
+      "message": "De weer-coordinator heeft nog geen gegevens."
+    },
+    "optimization_in_progress": {
+      "message": "Optimalisatie is al bezig; ingepland voor de volgende ronde."
+    },
+    "no_price_data": {
+      "message": "Geen voorspellingsgegevens beschikbaar van de forecast-coordinator."
+    },
+    "no_price_sensor": {
+      "message": "Er is geen elektriciteitsprijssensor ingesteld."
+    },
+    "price_parse_error": {
+      "message": "Kan geen prijsgegevens uit sensor {sensor} halen: {error}."
+    },
+    "price_sensor_unavailable": {
+      "message": "Prijssensor {sensor} is niet beschikbaar en er zijn nog geen gegevens voor het historische prijsmodel."
+    },
+    "optimizer_error": {
+      "message": "Batterij-optimizer mislukt: {error}."
+    }
+  },
+  "issues": {
+    "price_sensor_unavailable": {
+      "title": "Elektriciteitsprijssensor niet beschikbaar",
+      "description": "De prijssensor **{sensor}** is niet beschikbaar en er bestaat nog geen historisch prijsmodel. De batterij-optimalisatie kan niet draaien zonder prijsdata. Controleer of de sensor werkt en forecast-attributen heeft."
+    },
+    "weather_data_unavailable": {
+      "title": "Weerdata niet beschikbaar (open-meteo)",
+      "description": "De batterijcontroller kan de open-meteo weer-API niet bereiken. PV-productie wordt op nul verondersteld totdat de verbinding is hersteld. Controleer je internetverbinding of de status van open-meteo."
+    },
+    "weather_data_stale": {
+      "title": "Weerdata is verouderd (open-meteo)",
+      "description": "De weerdata is {age_hours} uur oud en wordt niet meer ververst. De kwaliteit van de PV-voorspelling neemt af naarmate de data veroudert. Controleer je internetverbinding of de status van open-meteo; herlaad de integratie als het probleem aanhoudt."
     }
   },
   "options": {
@@ -79,58 +116,48 @@
           "sensors": {
             "name": "Verplichte Sensoren",
             "data": {
-              "price_sensor": "Elektriciteitsprijs sensor",
-              "battery_soc_sensor": "Batterij SoC sensor"
-            }
-          },
-          "pv": {
-            "name": "PV Array 1 (Primair)",
-            "data": {
-              "pv_peak_power_kwp": "Piekvermogen AC PV (kWp)",
-              "pv_orientation": "Oriëntatie (graden, 180=zuid)",
-              "pv_tilt": "Hellingshoek (graden)",
-              "pv_efficiency_factor": "Systeemrendement (0-1)",
-              "pv_dc_coupled": "PV direct op batterij (DC-gekoppeld)",
-              "pv_dc_peak_power_kwp": "Piekvermogen DC PV op batterij (kWp)",
-              "pv_dc_efficiency": "DC-koppelingsrendement (0-1)"
+              "price_sensor": "Elektriciteitsprijs sensor"
+            },
+            "data_description": {
+              "price_sensor": "Sensor met prijsvoorspellingsattributen voor elektriciteit (Nordpool, ENTSO-E of Dynamic Energy Contract Calculator). De optimizer heeft toekomstige prijzen nodig om laden en ontladen te plannen."
             }
           },
           "optional_sensors": {
             "name": "Optionele Sensoren",
             "data": {
               "feed_in_price_sensor": "Terugleverprijs sensor (optioneel)",
-              "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
+              "power_consumption_sensors": "Sensoren afgenomen netvermogen (W, bijv. DSMR — voor realtime balans)",
+              "power_production_sensors": "Sensoren teruggeleverd netvermogen (W, bijv. DSMR — voor realtime balans)",
               "grid_import_sensors": "Netinvoer sensoren (kWh, bijv. DSMR)",
               "grid_export_sensors": "Teruglevering sensoren (kWh, bijv. DSMR)",
-              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)"
+              "gross_load_sensors": "Huisverbruik sensoren (kWh, optionele override)",
+              "pv_production_sensors": "PV-productiesensoren (kWh)"
+            },
+            "data_description": {
+              "feed_in_price_sensor": "Optionele aparte sensor voor de terugleverprijs. Zonder deze sensor wordt de vaste terugleverprijs hieronder gebruikt.",
+              "power_consumption_sensors": "Som van alle sensoren voor afgenomen netvermogen. Gebruikt door de nul-op-de-meter-regelaar voor realtime balans (updates elke ~5 s).",
+              "power_production_sensors": "Som van alle sensoren voor teruggeleverd netvermogen. Gebruikt door de nul-op-de-meter-regelaar voor realtime balans (updates elke ~5 s).",
+              "grid_import_sensors": "Cumulatieve kWh afgenomen van het net. Het huishoudverbruik wordt niet ingesteld maar afgeleid: bruto = afname − teruglevering + PV + ontladen − laden, met dit veld, de terugleverings- en PV-velden hieronder en de energietellers van elke batterij.",
+              "grid_export_sensors": "Cumulatieve kWh teruggeleverd aan het net. Zonder deze sensor zou PV die naar het net ging worden meegeteld als verbruik dat het huis nooit afnam.",
+              "gross_load_sensors": "Alleen als je een meter tussen de omvormer en het huis hebt. Die meet het huishoudverbruik direct, dus als deze is ingesteld wordt de berekening hierboven volledig overgeslagen. Nauwkeuriger dan het optellen van meerdere meters, en de enige bruikbare bron als een term niet meetbaar is — bijvoorbeeld DC-gekoppelde PV zonder DC-teller. Laat anders leeg.",
+              "pv_production_sensors": "Cumulatieve kWh van PV-omvormers — de PV-term van diezelfde reconstructie, voor de productie die het huis bediende in plaats van het net. Zonder deze sensor valt de integratie terug op de eigen historie van de PV-voorspelling, die minder nauwkeurig is."
             }
           },
           "advanced": {
             "name": "Geavanceerde Instellingen",
             "data": {
               "fixed_feed_in_price": "Vaste terugleverprijs (EUR/kWh)",
-              "zero_grid_enabled": "Nul-op-de-meter actief"
+              "zero_grid_enabled": "Nul-op-de-meter actief",
+              "zero_grid_response_time_s": "Update-interval nul-op-de-meter (seconden)",
+              "max_grid_power_kw": "Max. vermogen netaansluiting (kW, 0 = onbeperkt)"
+            },
+            "data_description": {
+              "fixed_feed_in_price": "Terugvalprijs voor teruglevering als er geen terugleverprijssensor is ingesteld. Wordt ook gebruikt als minimumwaarde voor arbitrageberekeningen.",
+              "zero_grid_enabled": "Schakelt realtime batterijsturing in om de netuitwisseling te minimaliseren. Vereist sensoren voor afgenomen en teruggeleverd vermogen.",
+              "zero_grid_response_time_s": "Verwachte vertraging tussen een setpointwijziging en de reactie van de batterij. Begrenst hoe vaak setpoints worden bijgewerkt om oscillatie te voorkomen.",
+              "max_grid_power_kw": "De optimizer houdt gepland laden binnen deze grens en behandelt teruglevering daarboven als afgeregeld (geen terugleveropbrengst). Zet op 0 voor geen limiet."
             }
           }
-        }
-      },
-      "pv_menu": {
-        "title": "Extra PV Arrays",
-        "description": "Je hebt {pv_count} extra PV array(s) geconfigureerd. Voeg meer arrays toe of rond af.",
-        "menu_options": {
-          "add_pv_array": "Extra PV array toevoegen",
-          "remove_pv_array": "Laatste PV array verwijderen",
-          "finish_setup": "Afronden"
-        }
-      },
-      "add_pv_array": {
-        "title": "PV Array {array_number} toevoegen",
-        "description": "Configureer een extra PV array.",
-        "data": {
-          "peak_power_kwp": "Piekvermogen (kWp)",
-          "orientation": "Oriëntatie (graden, 180=zuid)",
-          "tilt": "Hellingshoek (graden)",
-          "dc_coupled": "DC-gekoppeld (direct op batterij-omvormer)"
         }
       }
     },
@@ -140,6 +167,7 @@
   },
   "config_subentries": {
     "battery": {
+      "entry_type": "Batterijsysteem",
       "flow_title": "Batterij",
       "initiate_flow": {
         "user": "Batterijsysteem toevoegen"
@@ -161,11 +189,27 @@
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
             "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
-            "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)"
+            "pv_dc_efficiency": "DC-koppelingsrendement (0–1, voor DC-gekoppelde PV op deze omvormer)",
+            "high_soc_charge_threshold_pct": "Drempel laadbegrenzing bij hoge SoC (%, optioneel)",
+            "high_soc_max_charge_kw": "Begrensd laadvermogen boven drempel (kW, optioneel)",
+            "low_soc_discharge_threshold_pct": "Drempel ontlaadbegrenzing bij lage SoC (%, optioneel)",
+            "low_soc_max_discharge_kw": "Begrensd ontlaadvermogen onder drempel (kW, optioneel)"
           },
           "data_description": {
+            "capacity_kwh": "Totale nominale capaciteit van de batterij.",
             "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
-            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "min_soc_percent": "De optimizer ontlaadt niet onder dit niveau. Stel iets boven de harde limiet van de omvormer in als veiligheidsmarge.",
+            "max_soc_percent": "De optimizer laadt niet boven dit niveau. Onder 100% blijven verlengt de levensduur van de batterij.",
+            "battery_soc_sensor": "Sensor met de laadtoestand (0–100 %) of energie in kWh. Verplicht.",
+            "battery_power_sensor": "Sensor met het actuele batterijvermogen (W of kW). Positief = laden, negatief = ontladen (de omgekeerde tekenconventie van de vermogenssensoren die de integratie zelf aanmaakt, zoals Batterij-setpoint). Optioneel; verbetert de realtime detectie van laden/ontladen.",
+            "battery_energy_charged_sensor": "Cumulatieve kWh geladen in deze batterij. Gebruikt om het bruto huishoudverbruik te reconstrueren wanneer de verbruikssensor netafname meet, omdat laden van het net via de meter loopt en anders als huishoudverbruik zou worden geleerd. Rapporteert één omvormer één teller voor meerdere packs, stel die dan bij één ervan in.",
+            "battery_energy_discharged_sensor": "Cumulatieve kWh ontladen uit deze batterij. Voor dezelfde reconstructie weer opgeteld, omdat ontladen netafname vervangt en anders het verbruik dat het dekte zou verbergen.",
+            "pv_dc_efficiency": "Rendement van de PV-panelen naar de DC-bus van de omvormer (meestal 0,97, alleen MPPT-conversieverlies). Alleen relevant als er DC-gekoppelde PV-strings zijn ingesteld.",
+            "high_soc_charge_threshold_pct": "Boven deze SoC neemt de batterij minder laadvermogen op. Laat leeg als dit niet van toepassing is.",
+            "high_soc_max_charge_kw": "Maximaal laadvermogen boven de drempel voor hoge SoC. Laat leeg als dit niet van toepassing is.",
+            "low_soc_discharge_threshold_pct": "Onder deze SoC levert de batterij minder ontlaadvermogen. Laat leeg als dit niet van toepassing is.",
+            "low_soc_max_discharge_kw": "Maximaal ontlaadvermogen onder de drempel voor lage SoC. Laat leeg als dit niet van toepassing is."
           }
         },
         "reconfigure": {
@@ -184,11 +228,27 @@
             "battery_power_sensor": "Batterij vermogen sensor (optioneel)",
             "battery_energy_charged_sensor": "Accu geladen sensor (kWh, optioneel)",
             "battery_energy_discharged_sensor": "Accu ontladen sensor (kWh, optioneel)",
-            "pv_dc_efficiency": "DC-koppelingsrendement (0–1)"
+            "pv_dc_efficiency": "DC-koppelingsrendement (0–1)",
+            "high_soc_charge_threshold_pct": "Drempel laadbegrenzing bij hoge SoC (%, optioneel)",
+            "high_soc_max_charge_kw": "Begrensd laadvermogen boven drempel (kW, optioneel)",
+            "low_soc_discharge_threshold_pct": "Drempel ontlaadbegrenzing bij lage SoC (%, optioneel)",
+            "low_soc_max_discharge_kw": "Begrensd ontlaadvermogen onder drempel (kW, optioneel)"
           },
           "data_description": {
+            "capacity_kwh": "Totale nominale capaciteit van de batterij.",
             "charge_efficiency_curve": "Laadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
-            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves."
+            "discharge_efficiency_curve": "Ontlaadrendement als functie van vermogen. Enkele waarde (bijv. 0.95) voor een vlak rendement, of vermogen:rendement-paren (bijv. '0.1:0.73, 0.5:0.91, 5:0.95'). Het rendement is bij laag vermogen meestal veel lager, omdat het vaste nullastverlies van de omvormer uit een kleine stroom betaald moet worden. Zie de pagina met rendementscurves in de Battery Controller-documentatie voor gemeten curves.",
+            "min_soc_percent": "De optimizer ontlaadt niet onder dit niveau. Stel iets boven de harde limiet van de omvormer in als veiligheidsmarge.",
+            "max_soc_percent": "De optimizer laadt niet boven dit niveau. Onder 100% blijven verlengt de levensduur van de batterij.",
+            "battery_soc_sensor": "Sensor met de laadtoestand (0–100 %) of energie in kWh. Verplicht.",
+            "battery_power_sensor": "Sensor met het actuele batterijvermogen (W of kW). Positief = laden, negatief = ontladen (de omgekeerde tekenconventie van de vermogenssensoren die de integratie zelf aanmaakt, zoals Batterij-setpoint). Optioneel; verbetert de realtime detectie van laden/ontladen.",
+            "battery_energy_charged_sensor": "Cumulatieve kWh geladen in deze batterij. Gebruikt om het bruto huishoudverbruik te reconstrueren wanneer de verbruikssensor netafname meet, omdat laden van het net via de meter loopt en anders als huishoudverbruik zou worden geleerd. Rapporteert één omvormer één teller voor meerdere packs, stel die dan bij één ervan in.",
+            "battery_energy_discharged_sensor": "Cumulatieve kWh ontladen uit deze batterij. Voor dezelfde reconstructie weer opgeteld, omdat ontladen netafname vervangt en anders het verbruik dat het dekte zou verbergen.",
+            "pv_dc_efficiency": "Rendement van de PV-panelen naar de DC-bus van de omvormer (meestal 0,97, alleen MPPT-conversieverlies). Alleen relevant als er DC-gekoppelde PV-strings zijn ingesteld.",
+            "high_soc_charge_threshold_pct": "Boven deze SoC neemt de batterij minder laadvermogen op. Laat leeg als dit niet van toepassing is.",
+            "high_soc_max_charge_kw": "Maximaal laadvermogen boven de drempel voor hoge SoC. Laat leeg als dit niet van toepassing is.",
+            "low_soc_discharge_threshold_pct": "Onder deze SoC levert de batterij minder ontlaadvermogen. Laat leeg als dit niet van toepassing is.",
+            "low_soc_max_discharge_kw": "Maximaal ontlaadvermogen onder de drempel voor lage SoC. Laat leeg als dit niet van toepassing is."
           }
         }
       },
@@ -200,6 +260,7 @@
       }
     },
     "pv_array": {
+      "entry_type": "PV-string",
       "flow_title": "PV Array",
       "initiate_flow": {
         "user": "PV Array toevoegen"
@@ -219,6 +280,8 @@
             "pv_measured_production_sensor": "Gemeten productiesensor (kWh, optioneel)"
           },
           "data_description": {
+            "peak_power_kwp": "Totaal piekvermogen van alle panelen in deze string",
+            "efficiency_factor": "Genegeerd voor DC-gekoppelde strings (gebruikt het DC-koppelingsrendement uit de batterijconfiguratie)",
             "pv_forecast_sensors": "Voorspellingssensoren van een PV-forecast-integratie zoals Solcast (selecteer zowel de 'Forecast Today' als 'Forecast Tomorrow' sensoren). Indien ingesteld vervangt deze data het interne stralingsmodel voor de periodes die ze dekken; het interne model blijft de terugval.",
             "pv_measured_production_sensor": "Cumulatieve kWh van DEZE array. Wordt gebruikt om per array een correctie op de voorspelling te leren — een verkeerd ingevoerde hoek of oriëntatie, vervuiling of een uitgevallen string komen naar voren als een systematische afwijking. Telt ook mee in de reconstructie van het huisverbruik, naast de sensoren die daar al zijn ingesteld. Als één omvormer één teller voor meerdere arrays rapporteert, stel hem dan bij één ervan in."
           }
@@ -276,8 +339,20 @@
       "net_grid_forecast": {
         "name": "Netto Grid Voorspelling"
       },
+      "ghi": {
+        "name": "Zonne-instraling"
+      },
+      "wind_speed_ms": {
+        "name": "Windsnelheid"
+      },
       "daily_savings": {
         "name": "Geschatte Besparing"
+      },
+      "shadow_price": {
+        "name": "Schaduwprijs van opslag"
+      },
+      "current_grid_power": {
+        "name": "Huidig netvermogen"
       },
       "battery_setpoint": {
         "name": "Batterij Setpoint"
@@ -308,15 +383,12 @@
       },
       "battery_discharge_eff_correction": {
         "name": "Ontlaadefficiëntie-correctie"
+      },
+      "pv_array_calibration": {
+        "name": "Correctie PV-voorspelling"
       }
     },
     "number": {
-      "min_soc_percent": {
-        "name": "Minimum SoC"
-      },
-      "max_soc_percent": {
-        "name": "Maximum SoC"
-      },
       "degradation_cost": {
         "name": "Degradatiekosten per cyclus"
       },
@@ -325,6 +397,9 @@
       },
       "zero_grid_deadband": {
         "name": "Nul-op-de-meter Deadband"
+      },
+      "manual_power_setpoint": {
+        "name": "Handmatig vermogenssetpoint"
       }
     },
     "select": {
@@ -342,6 +417,9 @@
     "switch": {
       "optimization_enabled": {
         "name": "Optimalisatie Actief"
+      },
+      "pv_curtailed": {
+        "name": "PV afgeregeld"
       }
     },
     "binary_sensor": {
@@ -351,20 +429,6 @@
       "use_max_power": {
         "name": "Gebruik Maximale Energie Voorgesteld"
       }
-    }
-  },
-  "issues": {
-    "price_sensor_unavailable": {
-      "title": "Elektriciteitsprijssensor niet beschikbaar",
-      "description": "De prijssensor **{sensor}** is niet beschikbaar en er bestaat nog geen historisch prijsmodel. De batterij-optimalisatie kan niet draaien zonder prijsdata. Controleer of de sensor werkt en forecast-attributen heeft."
-    },
-    "weather_data_unavailable": {
-      "title": "Weerdata niet beschikbaar (open-meteo)",
-      "description": "De batterijcontroller kan de open-meteo weer-API niet bereiken. PV-productie wordt op nul verondersteld totdat de verbinding is hersteld. Controleer je internetverbinding of de status van open-meteo."
-    },
-    "weather_data_stale": {
-      "title": "Weerdata is verouderd (open-meteo)",
-      "description": "De weerdata is {age_hours} uur oud en wordt niet meer ververst. De kwaliteit van de PV-voorspelling neemt af naarmate de data veroudert. Controleer je internetverbinding of de status van open-meteo; herlaad de integratie als het probleem aanhoudt."
     }
   }
 }

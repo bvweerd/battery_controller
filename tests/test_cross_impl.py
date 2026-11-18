@@ -8,9 +8,11 @@ guard) and the simulator against the same fixture.  docs/__tests__/
 cross_impl.test.js runs the identical cases against analyzer.js.
 
 Fixture cases are deliberately post-processing-neutral (no oscillation pairs,
-no SoC boundary hits) because the simulator runs the raw DP without the
-integration's post-filters.  Regenerate the fixture with the generator noted
-inside the JSON file whenever the DP algorithm intentionally changes.
+no SoC boundary hits) so they pin the raw DP, which analyzer.js is compared on
+too.  The post-DP filters are covered separately below by comparing the
+simulator's full pipeline (post_process) with optimize_battery_schedule on
+scenarios that do trigger them.  Regenerate the fixture with the generator
+noted inside the JSON file whenever the DP algorithm intentionally changes.
 """
 
 from __future__ import annotations
@@ -162,3 +164,201 @@ def test_simulator_matches_fixture(case: dict) -> None:
     expected = case["expected"]
     assert power == pytest.approx(expected["power_schedule_kw"], abs=1e-9)
     assert soc == pytest.approx(expected["soc_schedule_kwh"], abs=1e-9)
+
+
+def _scenario(seed: int, soc_kwh: float = 2.0) -> dict:
+    """A quarter-hourly day with noisy prices, PV and load (deterministic).
+
+    The battery floor is 0.5 kWh, so ``soc_kwh`` below that starts in the
+    below-min-SoC refill path (#215).
+    """
+    import random
+
+    rng = random.Random(seed)
+    n = 48
+    prices = [
+        round(0.20 + 0.10 * ((i // 8) % 2) + rng.uniform(-0.03, 0.03), 4)
+        for i in range(n)
+    ]
+    pv = [round(max(0.0, rng.uniform(-1.0, 2.5)), 3) for _ in range(n)]
+    load = [round(rng.uniform(0.2, 1.2), 3) for _ in range(n)]
+    return {
+        "config": {
+            "capacity_kwh": 5.0,
+            "max_charge_power_kw": 2.0,
+            "max_discharge_power_kw": 2.0,
+            "charge_curve": [[0.0, 0.9], [2.0, 0.95]],
+            "discharge_curve": [[0.0, 0.9], [2.0, 0.95]],
+            "min_soc_percent": 10.0,
+            "max_soc_percent": 90.0,
+            "pv_dc_coupled": False,
+            "pv_dc_efficiency": 0.97,
+            "max_grid_power_kw": 0.0,
+        },
+        "inputs": {
+            "soc_kwh": soc_kwh,
+            "prices": prices,
+            "feed_in": [round(p - 0.12, 4) for p in prices],
+            "pv": pv,
+            "consumption": load,
+            "step_hours": [0.1] + [0.25] * (n - 1),
+            "degradation_cost_per_kwh": 0.01,
+            "min_price_spread": 0.0,
+            "pv_dc": None,
+        },
+    }
+
+
+def _simulate_full(case: dict):
+    """The simulator's whole pipeline: DP, forward pass, post-DP filters."""
+    inp = case["inputs"]
+    battery = _sim_config(case["config"])
+    n = len(inp["prices"])
+    pv_dc = inp["pv_dc"] or [0.0] * n
+    (V, _p, soc_states, _r, step_w, durations, min_wh, max_wh, terminal) = sim.run_dp(
+        battery,
+        inp["soc_kwh"],
+        inp["prices"],
+        inp["feed_in"],
+        inp["pv"],
+        inp["consumption"],
+        inp["step_hours"],
+        inp["degradation_cost_per_kwh"],
+        inp["min_price_spread"],
+        pv_dc,
+    )
+    power, modes, soc = sim.forward_pass(
+        V,
+        soc_states,
+        inp["soc_kwh"],
+        durations,
+        min_wh,
+        max_wh,
+        n,
+        battery,
+        pv_dc,
+        inp["prices"],
+        inp["feed_in"],
+        inp["pv"],
+        inp["consumption"],
+        inp["degradation_cost_per_kwh"],
+        step_w,
+        arbitrage_cost_per_kwh=max(0.0, inp["min_price_spread"]) / 2.0,
+    )
+    raw_modes = list(modes)
+    power, modes, soc, raw_total, total = sim.post_process(
+        battery,
+        inp["soc_kwh"],
+        power,
+        modes,
+        soc,
+        inp["prices"],
+        inp["feed_in"],
+        inp["pv"],
+        inp["consumption"],
+        durations,
+        inp["degradation_cost_per_kwh"],
+        inp["min_price_spread"],
+        terminal,
+        _r,
+        pv_dc_forecast=pv_dc,
+    )
+    return power, modes, soc, total, raw_modes != modes
+
+
+@pytest.mark.parametrize("soc_kwh", [2.0, 0.2])
+@pytest.mark.parametrize("seed", range(6))
+def test_simulator_post_processing_matches_integration(
+    seed: int, soc_kwh: float
+) -> None:
+    """With the filters active, the simulator still reproduces optimizer.py.
+
+    0.2 kWh starts below the 0.5 kWh floor, exercising the refill exemptions
+    in the cost guard and the micro-cycle filter.
+    """
+    case = _scenario(seed, soc_kwh)
+    inp = case["inputs"]
+    result = optimize_battery_schedule(
+        battery_config=_integration_config(case["config"]),
+        current_soc_kwh=inp["soc_kwh"],
+        price_forecast=inp["prices"],
+        feed_in_forecast=inp["feed_in"],
+        pv_forecast=inp["pv"],
+        consumption_forecast=inp["consumption"],
+        step_durations_hours=inp["step_hours"],
+        degradation_cost_per_kwh=inp["degradation_cost_per_kwh"],
+        min_price_spread=inp["min_price_spread"],
+        pv_dc_forecast=inp["pv_dc"],
+    )
+    power, modes, soc, total, _changed = _simulate_full(case)
+
+    assert power == pytest.approx(result.power_schedule_kw, abs=1e-9)
+    assert modes == result.mode_schedule
+    assert soc == pytest.approx(result.soc_schedule_kwh, abs=1e-9)
+    assert total == pytest.approx(result.total_cost, abs=1e-9)
+
+
+def test_post_processing_scenarios_actually_exercise_the_filters() -> None:
+    """At least one scenario above must be changed by the filters.
+
+    Otherwise the parity test would pass on a simulator without them.
+    """
+    assert any(_simulate_full(_scenario(seed))[4] for seed in range(6))
+
+
+_COPIED_FILTERS = (
+    "_rebuild_charge_budget_wh",
+    "_rebuild_schedule",
+    "_calculate_schedule_total_cost",
+    "_filter_oscillations",
+    "_filter_micro_cycles",
+)
+
+
+def _function_source(source: str, name: str) -> str:
+    import re
+
+    match = re.search(
+        rf"\ndef {name}\(.*?(?=\n\n\n(?:def |@|# |_[A-Z]|class )|\Z)", source, re.S
+    )
+    assert match, name
+    return match.group(0).strip("\n")
+
+
+@pytest.mark.parametrize("name", _COPIED_FILTERS)
+def test_simulator_filters_are_verbatim_copies(name: str) -> None:
+    """The simulator's post-DP filters must stay identical to optimizer.py.
+
+    Only the substitutions the simulator needs (no HA imports) are allowed.
+    A behavioural parity test only catches drift on the inputs it happens to
+    use; this catches any edit to optimizer.py that was not copied over.
+    """
+    import re
+
+    opt_path = SIM_PATH.parent.parent / (
+        "custom_components/battery_controller/optimizer.py"
+    )
+    expected = _function_source(opt_path.read_text(), name)
+    expected = expected.replace(
+        "battery_config.charge_efficiency_curve_parsed",
+        "battery_config.charge_efficiency_curve",
+    ).replace(
+        "battery_config.discharge_efficiency_curve_parsed",
+        "battery_config.discharge_efficiency_curve",
+    )
+    expected = re.sub(
+        r"(?<![_\w])interpolate_efficiency\(", "_interpolate_efficiency(", expected
+    )
+    expected = re.sub(
+        r"(?<![_\w])representative_efficiency\(",
+        "_representative_efficiency(",
+        expected,
+    )
+    for const, literal in (
+        ("ACTION_CHARGING", '"charging"'),
+        ("ACTION_DISCHARGING", '"discharging"'),
+        ("ACTION_IDLE", '"idle"'),
+    ):
+        expected = expected.replace(const, literal)
+
+    assert _function_source(SIM_PATH.read_text(), name) == expected

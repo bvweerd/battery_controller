@@ -1748,3 +1748,11 @@ class TestResampleToSteps:
         source_kwh = sum(values) * 0.25
         step_kwh = sum(v * d for v, d in zip(result, durations))
         assert step_kwh == pytest.approx(source_kwh)
+
+
+def test_zero_price_entry_is_kept():
+    """A dict entry priced at exactly 0.0 is a price, not a missing value."""
+    assert h._normalize_price_value({"start": "x", "value": 0.0}) == 0.0
+    assert h._normalize_price_value({"value": 0}) == 0.0
+    assert h._normalize_price_value({"price": 0.0}) == 0.0
+    assert h._normalize_price_value({"value": None, "price": 0.12}) == 0.12
