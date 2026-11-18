@@ -42,6 +42,8 @@ def _make_runtime_data(config=None, options=None):
     # Options snapshot; defaults to the config so the existing cases, where the
     # two are the same thing, keep reading naturally.
     runtime_data.options = options if options is not None else (config or {})
+    # Subentry snapshot matching _make_entry's empty subentries.
+    runtime_data.subentries = {}
     runtime_data.forecast_coordinator = MagicMock()
     runtime_data.forecast_coordinator.async_shutdown = AsyncMock()
     runtime_data.optimization_coordinator = MagicMock()
@@ -510,3 +512,46 @@ def test_link_to_hub_prefers_the_registry_id():
         assert "via_device" not in info
     else:
         assert info["via_device"] == (DOMAIN, "parent_entry")
+
+
+@pytest.mark.asyncio
+async def test_update_listener_reloads_on_subentry_change():
+    """Adding, removing or editing a battery or PV array reloads the entry."""
+    entry = _make_entry()
+    entry.runtime_data = _make_runtime_data(config={})
+    sub = MagicMock()
+    sub.subentry_type = "battery"
+    sub.title = "Battery"
+    sub.data = {"capacity_kwh": 10.0}
+    entry.subentries = {"bat1": sub}
+
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_update_listener_skips_reload_for_live_battery_keys():
+    """An SoC-limit edit is picked up live; it must not restart everything."""
+    from custom_components.battery_controller.__init__ import _subentry_snapshot
+
+    sub = MagicMock()
+    sub.subentry_type = "battery"
+    sub.title = "Battery"
+    sub.data = {"capacity_kwh": 10.0, "min_soc_percent": 10.0}
+    entry = _make_entry()
+    entry.subentries = {"bat1": sub}
+    entry.runtime_data = _make_runtime_data(config={})
+    entry.runtime_data.subentries = _subentry_snapshot(entry)
+
+    sub.data = {"capacity_kwh": 10.0, "min_soc_percent": 20.0}
+    mock_hass = MagicMock()
+    mock_hass.config_entries.async_reload = AsyncMock()
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_not_called()
+
+    sub.data = {"capacity_kwh": 12.0, "min_soc_percent": 20.0}
+    await _update_listener(mock_hass, entry)
+    mock_hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)

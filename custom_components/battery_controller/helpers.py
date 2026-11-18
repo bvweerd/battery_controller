@@ -50,7 +50,12 @@ def battery_energy_sensor_ids(
 def _normalize_price_value(value: Any) -> float | None:
     """Normalize a raw price value to a float if possible."""
     if isinstance(value, dict):
-        value = value.get("value") or value.get("price")
+        # Key presence, not truthiness: a price of exactly 0.0 is a real (and
+        # very attractive) price, and `or` used to drop it, removing that
+        # period from the horizon altogether.
+        value = (
+            value.get("value") if value.get("value") is not None else value.get("price")
+        )
 
     try:
         result = float(value)

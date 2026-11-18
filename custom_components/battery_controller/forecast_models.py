@@ -36,6 +36,24 @@ def _get_season(month: int) -> int:
     ]
 
 
+# Share of the already learned (hour, weekday) buckets a rebuild must cover
+# before it replaces the pattern instead of only updating it.
+_PATTERN_REPLACE_COVERAGE = 0.75
+
+
+def _add_hours(start: datetime, hours: int) -> datetime:
+    """``start`` plus a number of real hours, in ``start``'s own time zone.
+
+    Adding a timedelta to an aware datetime is wall-clock arithmetic in Python,
+    so across a DST change every later hour landed one hour-of-day bucket off.
+    Stepping in UTC and converting back keeps elapsed time and the bucket in
+    step. Naive datetimes keep plain arithmetic: they have no offset to change.
+    """
+    if start.tzinfo is None:
+        return start + timedelta(hours=hours)
+    return (start.astimezone(UTC) + timedelta(hours=hours)).astimezone(start.tzinfo)
+
+
 class PVForecastModel:
     """Model for PV production forecasting."""
 
@@ -435,13 +453,34 @@ class ConsumptionForecastModel:
                     MAX_PLAUSIBLE_CONSUMPTION_KW,
                 )
 
-            for h_key, values in hourly_values.items():
-                if values:
-                    self._hourly_pattern[h_key] = sum(values) / len(values)
-
-            for s_key, values in seasonal_values.items():
-                if len(values) >= self._SEASONAL_MIN_SAMPLES:
-                    self._seasonal_pattern[s_key] = sum(values) / len(values)
+            # Rebuilt rather than updated in place, so a bucket whose samples
+            # have all aged out of the history window does not keep its old
+            # average forever — but only when the rebuild covers most of what
+            # is already learned. A partial result (a meter replaced two days
+            # ago, a short recorder history) only updates the buckets it has
+            # data for; replacing wholesale there wiped the rest of the week.
+            new_hourly = {
+                h_key: sum(values) / len(values)
+                for h_key, values in hourly_values.items()
+                if values
+            }
+            new_seasonal = {
+                s_key: sum(values) / len(values)
+                for s_key, values in seasonal_values.items()
+                if len(values) >= self._SEASONAL_MIN_SAMPLES
+            }
+            if len(new_hourly) >= _PATTERN_REPLACE_COVERAGE * len(self._hourly_pattern):
+                self._hourly_pattern = new_hourly
+                self._seasonal_pattern = new_seasonal
+            else:
+                _LOGGER.debug(
+                    "Consumption history covers %d of %d learned buckets; "
+                    "updating those instead of replacing the pattern",
+                    len(new_hourly),
+                    len(self._hourly_pattern),
+                )
+                self._hourly_pattern.update(new_hourly)
+                self._seasonal_pattern.update(new_seasonal)
 
             _LOGGER.debug(
                 "Updated consumption pattern from %d energy sensors, "
@@ -475,7 +514,7 @@ class ConsumptionForecastModel:
 
         forecast = []
         for h in range(hours):
-            dt = start_time + timedelta(hours=h)
+            dt = _add_hours(start_time, h)
             hour = dt.hour
             dow = dt.weekday()
             season = _get_season(dt.month)
@@ -796,7 +835,7 @@ class PriceForecastModel:
 
         result = []
         for h in range(hours):
-            step_time = start_time + timedelta(hours=h)
+            step_time = _add_hours(start_time, h)
             hour = step_time.hour
             dow = step_time.weekday()
             price: float | None = None

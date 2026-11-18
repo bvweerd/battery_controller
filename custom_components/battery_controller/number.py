@@ -130,7 +130,6 @@ class DegradationCostNumber(BatteryControllerNumber):
     _conf_default = DEFAULT_DEGRADATION_COST_PER_CYCLE
     _key = "degradation_cost"
     _attr_translation_key = "degradation_cost"
-    _attr_name = "Degradation Cost"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 1.00
     _attr_native_step = 0.01
@@ -145,7 +144,6 @@ class MinPriceSpreadNumber(BatteryControllerNumber):
     _conf_default = DEFAULT_MIN_PRICE_SPREAD
     _key = "min_price_spread"
     _attr_translation_key = "min_price_spread"
-    _attr_name = "Minimum Price Spread"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 0.50
     _attr_native_step = 0.01
@@ -160,7 +158,6 @@ class ZeroGridDeadbandNumber(BatteryControllerNumber):
     _conf_default = DEFAULT_ZERO_GRID_DEADBAND_W
     _key = "zero_grid_deadband"
     _attr_translation_key = "zero_grid_deadband"
-    _attr_name = "Zero Grid Deadband"
     _attr_native_min_value = 0.0
     _attr_native_max_value = 500.0
     _attr_native_step = 10.0
@@ -180,7 +177,6 @@ class ManualPowerSetpointNumber(BatteryControllerNumber):
     _conf_default = DEFAULT_MANUAL_POWER_SETPOINT_W
     _key = "manual_power_setpoint"
     _attr_translation_key = "manual_power_setpoint"
-    _attr_name = "Manual Power Setpoint"
     _attr_native_step = 100.0
     _attr_native_unit_of_measurement = "W"
     _attr_mode = NumberMode.BOX

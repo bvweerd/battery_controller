@@ -344,3 +344,36 @@ class TestAggregateCurvesConcentrated:
         assert interpolate_efficiency(result, 1.2) == pytest.approx(0.91)
         # 0.5 kW: one pack at 0.5 (0.91) beats two at 0.25
         assert interpolate_efficiency(result, 0.5) == pytest.approx(0.91)
+
+
+class TestStrictPairGrammar:
+    """Pairs need a colon or parentheses; bare comma lists are ambiguous."""
+
+    def test_bare_comma_pair_is_rejected(self):
+        with pytest.raises(ValueError, match="unpaired"):
+            parse_efficiency_curve("0.92, 0.95", 5.0)
+
+    def test_leading_dot_numbers_are_accepted(self):
+        assert parse_efficiency_curve(".95", 5.0) == [(0.0, 0.95), (5.0, 0.95)]
+        assert parse_efficiency_curve("0:.92, 5:.95", 5.0) == [
+            (0.0, 0.92),
+            (5.0, 0.95),
+        ]
+
+    def test_stored_legacy_curve_still_loads_with_a_warning(self, caplog):
+        from custom_components.battery_controller.battery_model import BatteryConfig
+
+        cfg = BatteryConfig(charge_efficiency_curve="0, 0.92, 5, 0.95")
+
+        assert cfg.charge_efficiency_curve_parsed == [(0.0, 0.92), (5.0, 0.95)]
+        assert "ambiguous format" in caplog.text
+
+    def test_legacy_curve_warning_is_logged_once(self, caplog):
+        """Configs are rebuilt every run; the warning must not repeat each time."""
+        from custom_components.battery_controller.battery_model import BatteryConfig
+
+        legacy = "0, 0.90, 4, 0.94"
+        BatteryConfig(charge_efficiency_curve=legacy)
+        BatteryConfig(charge_efficiency_curve=legacy)
+
+        assert caplog.text.count("ambiguous format") == 1

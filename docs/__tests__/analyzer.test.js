@@ -699,3 +699,27 @@ describe('generateTips', () => {
     expect(tips.some(t => t.t === 'ok')).toBe(true);
   });
 });
+
+// ─── below min SoC (issue #215) ─────────────────────────────────────────────
+
+describe('below min SoC', () => {
+  const prices = [...Array(8).fill(0.30), ...Array(8).fill(0.12), ...Array(16).fill(0.35)];
+  const inputs = (n = prices.length) => ({
+    priceFc: prices, feedInFc: Array(n).fill(0.07), pvFc: Array(n).fill(0),
+    consumFc: Array(n).fill(0.3), stepDurations: Array(n).fill(0.25),
+    degradCost: 0.03, minPriceSpread: 0.05, pvDcFc: Array(n).fill(0),
+  });
+
+  test('far below min SoC is charged back instead of idling', () => {
+    const cfg = makeCfg({ minSocKwh: 2.0, maxSocKwh: 9.0, maxChargeKw: 1.0, maxDischargeKw: 1.0 });
+    const r = runOptimizer(cfg, 0.5, inputs());
+    expect(r.modes).toContain('charging');
+    expect(Math.max(...r.socKwh)).toBeGreaterThanOrEqual(2.0 - 1e-6);
+  });
+
+  test('shadow price does not carry the deficit penalty when refill is infeasible', () => {
+    const cfg = makeCfg({ minSocKwh: 2.0, maxSocKwh: 9.0, maxChargeKw: 0.1, maxDischargeKw: 3.0 });
+    const r = runOptimizer(cfg, 0.5, inputs());
+    expect(r.shadowPrice).toBeLessThan(1.0);
+  });
+});

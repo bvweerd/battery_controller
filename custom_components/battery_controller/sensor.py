@@ -93,14 +93,12 @@ async def async_setup_entry(
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     BatterySubentrySoCSensor(
                         optimization_coordinator,
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     # Per-battery calibration: the fleet sensors average the
                     # packs together, which describes neither when they differ.
@@ -109,14 +107,12 @@ async def async_setup_entry(
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     BatterySubentryDischargeCalibrationSensor(
                         optimization_coordinator,
                         batt_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -136,14 +132,12 @@ async def async_setup_entry(
                         pv_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                     PVArrayCalibrationSensor(
                         forecast_coordinator,
                         pv_device,
                         entry,
                         subentry.subentry_id,
-                        subentry.title,
                     ),
                 ],
                 config_subentry_id=subentry.subentry_id,
@@ -169,7 +163,12 @@ async def async_setup_entry(
             # and subentry. Removing the main-entry link would delete the device, so
             # a device still outside its subentry is moved into it instead.
             if dev.config_entry_id == entry.entry_id and dev.config_subentry_id is None:
-                device_registry.async_update_device(dev.id, new_config_subentry_id=sid)
+                # Passed as a mapping so the call type-checks against the
+                # older Home Assistant releases this integration supports,
+                # which do not have the keyword (the hasattr guard above keeps
+                # it from running there).
+                move: dict[str, Any] = {"new_config_subentry_id": sid}
+                device_registry.async_update_device(dev.id, **move)
         elif None in dev.config_entries_subentries.get(entry.entry_id, set()):
             device_registry.async_update_device(
                 dev.id,
@@ -239,7 +238,6 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "optimal_power"
-    _attr_name = "Optimal Power"
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -269,7 +267,6 @@ class BatteryOptimalModeSensor(BatteryControllerSensor):
     """Sensor for recommended battery mode."""
 
     _attr_translation_key = "optimal_mode"
-    _attr_name = "Optimal Mode"
     _key = "optimal_mode"
 
     @property
@@ -283,7 +280,6 @@ class BatteryScheduleSensor(BatteryControllerSensor):
     """Sensor for the full battery schedule (as attributes)."""
 
     _attr_translation_key = "schedule"
-    _attr_name = "Schedule"
     # Large list attributes (96-step schedules); disable by default to reduce
     # recorder load. Users who need these can enable them explicitly.
     _attr_entity_registry_enabled_default = False
@@ -348,7 +344,6 @@ class BatterySoCSensor(BatteryControllerSensor):
     """Sensor for combined battery state of charge across all batteries."""
 
     _attr_translation_key = "soc"
-    _attr_name = "Total State of Charge"
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -381,7 +376,6 @@ class BatteryPowerSensor(BatteryControllerSensor):
     """Sensor for current battery power."""
 
     _attr_translation_key = "battery_power"
-    _attr_name = "Total Battery Power"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -412,7 +406,6 @@ class PVForecastSensor(BatteryForecastSensor):
     """
 
     _attr_translation_key = "pv_forecast"
-    _attr_name = "PV Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -458,7 +451,6 @@ class ConsumptionForecastSensor(BatteryForecastSensor):
     """Sensor for consumption forecast."""
 
     _attr_translation_key = "consumption_forecast"
-    _attr_name = "Consumption Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -488,7 +480,6 @@ class NetGridForecastSensor(BatteryForecastSensor):
     """Sensor for net grid power forecast (without battery = consumption - PV)."""
 
     _attr_translation_key = "net_grid_forecast"
-    _attr_name = "Net Grid Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -516,7 +507,6 @@ class SolarIrradianceSensor(BatteryForecastSensor):
     """Sensor for solar irradiance (GHI) — logged to recorder for price model training."""
 
     _attr_translation_key = "ghi"
-    _attr_name = "Solar Irradiance"
     _attr_native_unit_of_measurement = "W/m²"
     _attr_device_class = SensorDeviceClass.IRRADIANCE
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -534,7 +524,6 @@ class WindSpeedSensor(BatteryForecastSensor):
     """Sensor for wind speed — logged to recorder for price model training."""
 
     _attr_translation_key = "wind_speed_ms"
-    _attr_name = "Wind Speed"
     _attr_native_unit_of_measurement = "m/s"
     _attr_device_class = SensorDeviceClass.WIND_SPEED
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -572,7 +561,6 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "daily_savings"
-    _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "daily_savings"
@@ -607,7 +595,6 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "shadow_price"
-    _attr_name = "Shadow Price of Storage"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "shadow_price"
@@ -643,7 +630,6 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
     """Sensor for current grid power (import/export)."""
 
     _attr_translation_key = "current_grid_power"
-    _attr_name = "Current Grid Power"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -688,7 +674,6 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "battery_setpoint"
-    _attr_name = "Battery Setpoint"
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -718,6 +703,10 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
     Positive = discharge, Negative = charge (sensor convention).
     """
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "battery_subentry_setpoint"
+
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -728,11 +717,9 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"setpoint_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"Battery Setpoint {battery_title}"
 
     @property
     def native_value(self) -> float | None:
@@ -762,6 +749,10 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
 class BatterySubentrySoCSensor(BatteryControllerSensor):
     """Per-battery state-of-charge sensor."""
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "battery_subentry_soc"
+
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -772,11 +763,9 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"soc_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"State of Charge {battery_title}"
 
     @property
     def native_value(self) -> float | None:
@@ -806,6 +795,10 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
 class PVArrayForecastSensor(BatteryForecastSensor):
     """Diagnostic sensor for a single PV array's expected output and forecast."""
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "pv_array_forecast"
+
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -818,11 +811,9 @@ class PVArrayForecastSensor(BatteryForecastSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        array_title: str,
     ):
         super().__init__(coordinator, device, entry, f"pv_array_forecast_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"PV Forecast {array_title}"
 
     @property
     def native_value(self) -> float | None:
@@ -849,7 +840,6 @@ class BatteryControlModeSensor(BatteryControllerSensor):
     """Sensor for the current control mode."""
 
     _attr_translation_key = "control_mode"
-    _attr_name = "Control Mode"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _key = "control_mode"
@@ -865,7 +855,6 @@ class OptimizationStatusSensor(BatteryControllerSensor):
     """Sensor for optimization status / diagnostics."""
 
     _attr_translation_key = "optimization_status"
-    _attr_name = "Optimization Status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _key = "optimization_status"
@@ -881,11 +870,29 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             return "failed"
         last_success = self.coordinator.last_success_time
         if last_success is not None:
-            interval = self.coordinator.update_interval or timedelta(minutes=15)
             age = dt_util.utcnow() - last_success
-            if age > interval * 2.5:
+            if age > self._stale_after():
                 return "stale"
         return "ok"
+
+    def _stale_after(self) -> timedelta:
+        """Age after which the last successful run counts as stale.
+
+        Runs are driven by the price periods (a boundary run plus a mid-period
+        run), not by the coordinator's 60-minute fallback interval, so two
+        missed price periods is the meaningful threshold: 30 min with
+        quarter-hourly prices, 2 h with hourly ones. Deriving it from the
+        fallback interval left a stuck optimizer reported "ok" for 2.5 hours.
+        """
+        price_interval_min = 60.0
+        if self.coordinator.data:
+            try:
+                price_interval_min = float(
+                    self.coordinator.data.get("price_interval") or 60
+                )
+            except (TypeError, ValueError):
+                price_interval_min = 60.0
+        return timedelta(minutes=max(30.0, 2 * price_interval_min))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -903,6 +910,7 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             "last_success": str(last_success) if last_success else None,
             "age_minutes": age_minutes,
             "update_interval_minutes": interval.total_seconds() / 60,
+            "stale_after_minutes": self._stale_after().total_seconds() / 60,
         }
         if self.coordinator.data is None:
             return attrs
@@ -985,7 +993,6 @@ class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     """
 
     _attr_translation_key = "charge_eff_correction"
-    _attr_name = "Charge Efficiency Correction"
     _key = "charge_eff_correction"
 
     def _calibration(self) -> tuple[float, int, bool, str]:
@@ -1004,7 +1011,6 @@ class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     """Learned correction on the discharge-side SoC transition, fleet-wide."""
 
     _attr_translation_key = "discharge_eff_correction"
-    _attr_name = "Discharge Efficiency Correction"
     _key = "discharge_eff_correction"
 
     def _calibration(self) -> tuple[float, int, bool, str]:
@@ -1042,13 +1048,9 @@ class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        battery_title: str,
     ):
         super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"{self._title} {battery_title}"
-
-    _title = ""
 
     def _calibration(self) -> tuple[float, int, bool, str]:
         return self.coordinator.battery_calibration_state(
@@ -1067,7 +1069,6 @@ class BatterySubentryChargeCalibrationSensor(BatterySubentryCalibrationSensor):
     _attr_translation_key = "battery_charge_eff_correction"
     _action = ACTION_CHARGING
     _key = "charge_eff_correction"
-    _title = "Charge Efficiency Correction"
 
 
 class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor):
@@ -1076,7 +1077,6 @@ class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor
     _attr_translation_key = "battery_discharge_eff_correction"
     _action = ACTION_DISCHARGING
     _key = "discharge_eff_correction"
-    _title = "Discharge Efficiency Correction"
 
 
 class PVArrayCalibrationSensor(BatteryForecastSensor):
@@ -1094,6 +1094,10 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
     sensor configured.
     """
 
+    # Named through the translation key only: the subentry's own device
+    # carries its name, and has_entity_name prefixes it.
+    _attr_translation_key = "pv_array_calibration"
+
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1105,11 +1109,9 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
         device: DeviceInfo,
         entry: ConfigEntry,
         subentry_id: str,
-        array_title: str,
     ):
         super().__init__(coordinator, device, entry, f"pv_calibration_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"PV Forecast Correction {array_title}"
 
     @property
     def native_value(self) -> float:

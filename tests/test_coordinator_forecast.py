@@ -1790,3 +1790,26 @@ async def test_pv_gain_for_elevation_falls_back_to_global(hass):
     assert coord._pv_gain_for_elevation("pv1", 5.0) == pytest.approx(0.85)
     # Unknown array → fall back to 1.0
     assert coord._pv_gain_for_elevation("unknown", 25.0) == pytest.approx(1.0)
+
+
+def test_pv_band_correction_counts_as_applied(hass):
+    """A significant elevation-band gain is reported as applied."""
+    coord = _make_cal_coordinator(hass)
+    sid = coord.pv_calibrated_array_ids[0]
+    assert coord.pv_correction_applied(sid) is False
+
+    coord._pv_cal_band_corrections[sid] = {2: 0.8}
+
+    assert coord.pv_correction_applied(sid) is True
+
+
+def test_pv_global_correction_not_applied_when_every_band_overrides_it(hass):
+    """A significant global gain applies nowhere once all bands have their own."""
+    coord = _make_cal_coordinator(hass)
+    sid = coord.pv_calibrated_array_ids[0]
+    coord._pv_cal_correction[sid] = 1.15
+    assert coord.pv_correction_applied(sid) is True
+
+    coord._pv_cal_band_corrections[sid] = {band: 1.0 for band in range(5)}
+
+    assert coord.pv_correction_applied(sid) is False
