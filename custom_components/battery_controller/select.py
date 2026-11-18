@@ -58,7 +58,6 @@ class BatteryControlModeSelect(
 
     _attr_has_entity_name = True
     _attr_translation_key = "control_mode"
-    _attr_name = "Control Mode"
     _attr_entity_category = EntityCategory.CONFIG
     _attr_options = CONTROL_MODES
 

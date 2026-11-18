@@ -20,7 +20,7 @@ Home Assistant custom integration that optimizes home battery charge/discharge s
 
 ## HA Conventions
 - `_attr_has_entity_name = True` on all entities
-- `_attr_translation_key` alongside `_attr_name` (fallback)
+- Name entities only through `_attr_translation_key`; never set `_attr_name` — Home Assistant lets it override the translation, so nl.json names were never shown (`tests/test_entity_names.py` enforces this)
 - `strings.json` = copy of `translations/en.json` (required by HA)
 - `section()` imported from `homeassistant.data_entry_flow` (not helpers.selector)
 - Use `async def` for all I/O; never synchronous I/O in async context

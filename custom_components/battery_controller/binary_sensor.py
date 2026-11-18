@@ -73,7 +73,6 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
     """
 
     _attr_translation_key = "pv_curtailment"
-    _attr_name = "PV Curtailment Suggested"
 
     def __init__(
         self,
@@ -120,7 +119,6 @@ class UseMaxPowerSensor(BatteryControllerBinarySensor):
     """
 
     _attr_translation_key = "use_max_power"
-    _attr_name = "Use Maximum Power Suggested"
 
     def __init__(
         self,

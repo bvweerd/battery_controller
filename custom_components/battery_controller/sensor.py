@@ -244,7 +244,6 @@ class BatteryOptimalPowerSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "optimal_power"
-    _attr_name = "Optimal Power"
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -274,7 +273,6 @@ class BatteryOptimalModeSensor(BatteryControllerSensor):
     """Sensor for recommended battery mode."""
 
     _attr_translation_key = "optimal_mode"
-    _attr_name = "Optimal Mode"
     _key = "optimal_mode"
 
     @property
@@ -288,7 +286,6 @@ class BatteryScheduleSensor(BatteryControllerSensor):
     """Sensor for the full battery schedule (as attributes)."""
 
     _attr_translation_key = "schedule"
-    _attr_name = "Schedule"
     # Large list attributes (96-step schedules); disable by default to reduce
     # recorder load. Users who need these can enable them explicitly.
     _attr_entity_registry_enabled_default = False
@@ -353,7 +350,6 @@ class BatterySoCSensor(BatteryControllerSensor):
     """Sensor for combined battery state of charge across all batteries."""
 
     _attr_translation_key = "soc"
-    _attr_name = "Total State of Charge"
     _attr_native_unit_of_measurement = "%"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -386,7 +382,6 @@ class BatteryPowerSensor(BatteryControllerSensor):
     """Sensor for current battery power."""
 
     _attr_translation_key = "battery_power"
-    _attr_name = "Total Battery Power"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -417,7 +412,6 @@ class PVForecastSensor(BatteryForecastSensor):
     """
 
     _attr_translation_key = "pv_forecast"
-    _attr_name = "PV Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -463,7 +457,6 @@ class ConsumptionForecastSensor(BatteryForecastSensor):
     """Sensor for consumption forecast."""
 
     _attr_translation_key = "consumption_forecast"
-    _attr_name = "Consumption Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -493,7 +486,6 @@ class NetGridForecastSensor(BatteryForecastSensor):
     """Sensor for net grid power forecast (without battery = consumption - PV)."""
 
     _attr_translation_key = "net_grid_forecast"
-    _attr_name = "Net Grid Forecast"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -521,7 +513,6 @@ class SolarIrradianceSensor(BatteryForecastSensor):
     """Sensor for solar irradiance (GHI) — logged to recorder for price model training."""
 
     _attr_translation_key = "ghi"
-    _attr_name = "Solar Irradiance"
     _attr_native_unit_of_measurement = "W/m²"
     _attr_device_class = SensorDeviceClass.IRRADIANCE
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -539,7 +530,6 @@ class WindSpeedSensor(BatteryForecastSensor):
     """Sensor for wind speed — logged to recorder for price model training."""
 
     _attr_translation_key = "wind_speed_ms"
-    _attr_name = "Wind Speed"
     _attr_native_unit_of_measurement = "m/s"
     _attr_device_class = SensorDeviceClass.WIND_SPEED
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -577,7 +567,6 @@ class BatteryDailySavingsSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "daily_savings"
-    _attr_name = "Estimated Savings"
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "daily_savings"
@@ -612,7 +601,6 @@ class BatteryShadowPriceSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "shadow_price"
-    _attr_name = "Shadow Price of Storage"
     _attr_native_unit_of_measurement = "EUR/kWh"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _key = "shadow_price"
@@ -648,7 +636,6 @@ class CurrentGridPowerSensor(BatteryControllerSensor):
     """Sensor for current grid power (import/export)."""
 
     _attr_translation_key = "current_grid_power"
-    _attr_name = "Current Grid Power"
     _attr_native_unit_of_measurement = "kW"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -693,7 +680,6 @@ class BatteryGridSetpointSensor(BatteryControllerSensor):
     """
 
     _attr_translation_key = "battery_setpoint"
-    _attr_name = "Battery Setpoint"
     _attr_native_unit_of_measurement = "W"
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -737,11 +723,9 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
     ):
         super().__init__(coordinator, device, entry, f"setpoint_{subentry_id}")
         self._subentry_id = subentry_id
-        # The battery's own device already carries its name, and with
-        # has_entity_name HA prefixes it; repeating it here gave names like
-        # "Marstek Battery Setpoint Marstek".
+        # Named through the translation key: the battery's own device carries
+        # its name, and has_entity_name prefixes it.
         self._attr_translation_key = "battery_subentry_setpoint"
-        self._attr_name = "Battery Setpoint"
 
     @property
     def native_value(self) -> float | None:
@@ -786,7 +770,6 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
         super().__init__(coordinator, device, entry, f"soc_{subentry_id}")
         self._subentry_id = subentry_id
         self._attr_translation_key = "battery_subentry_soc"
-        self._attr_name = "State of Charge"
 
     @property
     def native_value(self) -> float | None:
@@ -833,7 +816,6 @@ class PVArrayForecastSensor(BatteryForecastSensor):
         super().__init__(coordinator, device, entry, f"pv_array_forecast_{subentry_id}")
         self._subentry_id = subentry_id
         self._attr_translation_key = "pv_array_forecast"
-        self._attr_name = "PV Forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -860,7 +842,6 @@ class BatteryControlModeSensor(BatteryControllerSensor):
     """Sensor for the current control mode."""
 
     _attr_translation_key = "control_mode"
-    _attr_name = "Control Mode"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _key = "control_mode"
@@ -876,7 +857,6 @@ class OptimizationStatusSensor(BatteryControllerSensor):
     """Sensor for optimization status / diagnostics."""
 
     _attr_translation_key = "optimization_status"
-    _attr_name = "Optimization Status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _key = "optimization_status"
@@ -1015,7 +995,6 @@ class ChargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     """
 
     _attr_translation_key = "charge_eff_correction"
-    _attr_name = "Charge Efficiency Correction"
     _key = "charge_eff_correction"
 
     def _calibration(self) -> tuple[float, int, bool, str]:
@@ -1034,7 +1013,6 @@ class DischargeEfficiencyCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     """Learned correction on the discharge-side SoC transition, fleet-wide."""
 
     _attr_translation_key = "discharge_eff_correction"
-    _attr_name = "Discharge Efficiency Correction"
     _key = "discharge_eff_correction"
 
     def _calibration(self) -> tuple[float, int, bool, str]:
@@ -1076,9 +1054,6 @@ class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     ):
         super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = self._title
-
-    _title = ""
 
     def _calibration(self) -> tuple[float, int, bool, str]:
         return self.coordinator.battery_calibration_state(
@@ -1097,7 +1072,6 @@ class BatterySubentryChargeCalibrationSensor(BatterySubentryCalibrationSensor):
     _attr_translation_key = "battery_charge_eff_correction"
     _action = ACTION_CHARGING
     _key = "charge_eff_correction"
-    _title = "Charge Efficiency Correction"
 
 
 class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor):
@@ -1106,7 +1080,6 @@ class BatterySubentryDischargeCalibrationSensor(BatterySubentryCalibrationSensor
     _attr_translation_key = "battery_discharge_eff_correction"
     _action = ACTION_DISCHARGING
     _key = "discharge_eff_correction"
-    _title = "Discharge Efficiency Correction"
 
 
 class PVArrayCalibrationSensor(BatteryForecastSensor):
@@ -1140,7 +1113,6 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
         super().__init__(coordinator, device, entry, f"pv_calibration_{subentry_id}")
         self._subentry_id = subentry_id
         self._attr_translation_key = "pv_array_calibration"
-        self._attr_name = "PV Forecast Correction"
 
     @property
     def native_value(self) -> float:

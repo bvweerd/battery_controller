@@ -1515,10 +1515,9 @@ def test_per_battery_calibration_names_the_battery_and_direction():
     )
 
     assert charge.unique_id != discharge.unique_id
-    # The battery is named by its device (has_entity_name prefixes it), so the
-    # entity name itself must not repeat it: "Marstek Charge ... Marstek".
-    assert "Marstek" not in charge.name
-    assert charge.name != discharge.name
+    # Names come from the translation keys (checked end to end in
+    # test_entity_names.py); the two directions need distinct keys.
+    assert charge.translation_key != discharge.translation_key
 
 
 def _make_pv_calibration_coord(
@@ -1635,22 +1634,3 @@ def test_every_sensor_pairs_a_legal_device_and_state_class():
 
     assert checked > 10, f"only {checked} sensors instantiated; the walk is broken"
     assert not offenders, "illegal device/state class pairs: " + ", ".join(offenders)
-
-
-def test_per_subentry_sensor_names_do_not_repeat_the_device_name():
-    """Setpoint, SoC and PV-array sensors leave the device name to the device."""
-    coord = _make_opt_coord()
-    entry = _make_entry()
-    setpoint = BatterySubentrySetpointSensor(
-        coord, _make_device(), entry, "bat1", "Marstek"
-    )
-    soc = BatterySubentrySoCSensor(coord, _make_device(), entry, "bat1", "Marstek")
-    fc_coord = _make_forecast_coord()
-    pv = PVArrayForecastSensor(fc_coord, _make_device(), entry, "pv1", "Roof")
-    pv_cal = PVArrayCalibrationSensor(fc_coord, _make_device(), entry, "pv1", "Roof")
-
-    assert setpoint.name == "Battery Setpoint"
-    assert soc.name == "State of Charge"
-    assert pv.name == "PV Forecast"
-    assert pv_cal.name == "PV Forecast Correction"
-    assert pv_cal.translation_key == "pv_array_calibration"
