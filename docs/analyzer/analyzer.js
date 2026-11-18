@@ -226,7 +226,7 @@ function findNearestSocIdx(socWh, socStates) {
 /** Number of DP states below min SoC (mirrors optimizer.n_states_below_min). */
 function nStatesBelowMin(currentSocWh, minSocWh, socResWh) {
   if (currentSocWh >= minSocWh || socResWh <= 0) return 0;
-  return Math.ceil((minSocWh - currentSocWh) / socResWh - 1e-9);
+  return Math.min(Math.ceil((minSocWh - currentSocWh) / socResWh - 1e-9), MAX_SOC_STATES);
 }
 
 /** Terminal cost per kWh below min SoC (mirrors optimizer.deficit_penalty_per_kwh). */
@@ -270,7 +270,12 @@ function runDP(cfg, currentSocKwh, priceFc, feedInFc, pvFc, consumFc,
   const fullStepH = stepDurations.length > 1 ? stepDurations[1] : minStepH;
   // Coarsen the SoC grid for large batteries so the state count stays
   // bounded (mirrors optimizer.py).
-  const socResTargetWh = Math.max(SOC_RES_WH, (maxSocWh - minSocWh) / MAX_SOC_STATES);
+  // The below-min extension (see nStatesBelowMin) shares the budget.
+  const socResTargetWh = Math.max(
+    SOC_RES_WH,
+    (maxSocWh - minSocWh) / MAX_SOC_STATES,
+    Math.max(0, minSocWh - currentSocKwh * 1000) / MAX_SOC_STATES
+  );
   const alignedStepW = socResTargetWh / fullStepH;
   const powerStepW   = Math.max(POWER_STEP_W, alignedStepW);
 
@@ -620,7 +625,9 @@ function rebuildSoc(powerKw, modes, cfg, currentSocKwh, stepDurations, pvDcFc, c
     } else if (modes[t] === 'discharging' && p > 1e-9) {
       const actionW = p * 1000;    // positive
       const eff = interpolateEfficiency(dischargeCurve, actionW / 1000);
-      curSocWh = Math.max(curSocWh - actionW * stepH / eff, minSocWh);
+      // Floor at min SoC, but never above the current SoC: a discharge left in
+      // place below min SoC becomes idle, not a jump up (mirrors optimizer.py).
+      curSocWh = Math.max(curSocWh - actionW * stepH / eff, Math.min(minSocWh, curSocWh));
     } else {
       if (cfg.pvDcCoupled && pvDcW > 0) {
         const headroomWh = Math.max(0, maxSocWh - curSocWh);
@@ -736,7 +743,8 @@ function filterOscillations(powerKw, modes, cfg, priceFc, feedInFc, pvFc,
  * one degradation is priced on.
  * Mirrors Python _filter_micro_cycles.
  */
-function filterMicroCycles(powerKw, modes, stepDurations, chargeCurve = null, dischargeCurve = null) {
+function filterMicroCycles(powerKw, modes, stepDurations, chargeCurve = null, dischargeCurve = null,
+                           socKwh = null, minSocKwh = null) {
   if (!powerKw.length) return { powerKw, modes };
 
   const filtPow  = [...powerKw];
@@ -763,7 +771,11 @@ function filterMicroCycles(powerKw, modes, stepDurations, chargeCurve = null, di
       }
       j++;
     }
-    if (totalEnergy < MIN_CYCLE_KWH) {
+    // A charge block starting below min SoC is the refill to the reserve, not
+    // avoidable wear: never suppress it (mirrors optimizer.py).
+    const isRefill = dir === 'charging' && socKwh && minSocKwh != null
+      && i < socKwh.length && socKwh[i] < minSocKwh - 1e-9;
+    if (totalEnergy < MIN_CYCLE_KWH && !isRefill) {
       for (let k = i; k < j; k++) { filtPow[k] = 0; filtMode[k] = 'idle'; }
     }
     i = j;
@@ -771,10 +783,12 @@ function filterMicroCycles(powerKw, modes, stepDurations, chargeCurve = null, di
   return { powerKw: filtPow, modes: filtMode };
 }
 
-function computeShadowPrice(V, socStates, currentSocKwh) {
-  if (socStates.length < 3) return 0;
-  const idx     = findNearestSocIdx(currentSocKwh * 1000, socStates);
-  const clamped = Math.max(1, Math.min(socStates.length - 2, idx));
+function computeShadowPrice(V, socStates, currentSocKwh, minSocIdx = 0) {
+  // Only states at or above min SoC enter the gradient: below it V carries the
+  // deficit penalty when a refill is infeasible (mirrors optimizer.py).
+  if (socStates.length - minSocIdx < 3) return 0;
+  const idx     = Math.max(minSocIdx, findNearestSocIdx(currentSocKwh * 1000, socStates));
+  const clamped = Math.max(minSocIdx + 1, Math.min(socStates.length - 2, idx));
   // λ = -dV/dSoC = (V[s-1] - V[s+1]) / (2 * ΔSoC)
   // V at lower SoC > V at higher SoC (more energy = lower future cost),
   // so (V[low] - V[high]) is positive → shadow price is positive.
@@ -839,7 +853,7 @@ function computeScheduleCost(powerKw, socKwh, inputs, cfg, terminalPrice) {
   // is valued like the initial SoC in savings (mirrors optimizer.py).
   if (terminalPrice > 0 && socKwh.length > powerKw.length) {
     const finalSoc      = socKwh[socKwh.length - 1];
-    const finalStoredKwh = finalSoc - cfg.minSocKwh;
+    const finalStoredKwh = finalSoc - Math.round(cfg.minSocKwh * 1000) / 1000;
     total -= finalStoredKwh * terminalPrice;
   }
   return total;
@@ -900,8 +914,9 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   // terminal price for a deficit, so a filter that removes the refill would
   // look cheaper. Mirrors optimizer.py _deficit_surcharge.
   const deficitSurcharge = (soc) => {
-    const deficitKwh = cfg.minSocKwh - (soc.length ? soc[soc.length - 1] : 0);
-    return deficitKwh <= 1e-9 ? 0 : deficitKwh * (dp.deficitPenalty - dp.terminalPrice);
+    // Within half a SoC state counts as reached (the DP grid's resolution).
+    const deficitKwh = dp.minSocWh / 1000 - (soc.length ? soc[soc.length - 1] : 0);
+    return deficitKwh * 1000 <= dp.socResWh / 2 ? 0 : deficitKwh * (dp.deficitPenalty - dp.terminalPrice);
   };
   if (computeScheduleCost(oscResult.powerKw, oscSocKwh, inputs, cfg, dp.terminalPrice)
       + deficitSurcharge(oscSocKwh) <= rawTotal + deficitSurcharge(rawSocKwh)) {
@@ -909,32 +924,26 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
     modes   = oscResult.modes;
   }
 
-  const mcResult = filterMicroCycles(
-    powerKw, modes, dp.stepDurations,
-    chargeEffCurveOverride ?? cfg.chargeCurve,
-    dischargeEffCurveOverride ?? cfg.dischargeCurve
-  );
-  // Not cost-gated, but it must not drop the refill back to min SoC
-  // (mirrors optimizer.py).
+  // SoC of the schedule entering the filter, so it can spare a below-min refill.
   const preMcSoc = rebuildSoc(
     powerKw, modes, cfg, currentSocKwh, dp.stepDurations, pvDcFc,
     chargeEffCurveOverride, dischargeEffCurveOverride
   );
-  const mcSoc = rebuildSoc(
-    mcResult.powerKw, mcResult.modes, cfg, currentSocKwh, dp.stepDurations,
-    pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
+  const mcResult = filterMicroCycles(
+    powerKw, modes, dp.stepDurations,
+    chargeEffCurveOverride ?? cfg.chargeCurve,
+    dischargeEffCurveOverride ?? cfg.dischargeCurve,
+    preMcSoc, cfg.minSocKwh
   );
-  if (deficitSurcharge(mcSoc) <= deficitSurcharge(preMcSoc) + 1e-9) {
-    powerKw = mcResult.powerKw;
-    modes   = mcResult.modes;
-  }
+  powerKw = mcResult.powerKw;
+  modes   = mcResult.modes;
 
   // Rebuild SoC from filtered schedule
   const socKwh = rebuildSoc(
     powerKw, modes, cfg, currentSocKwh, dp.stepDurations, pvDcFc, chargeEffCurveOverride, dischargeEffCurveOverride
   );
 
-  const shadow   = computeShadowPrice(dp.V, dp.socStates, currentSocKwh);
+  const shadow   = computeShadowPrice(dp.V, dp.socStates, currentSocKwh, dp.minSocIdx);
   const baseline = computeBaselineCost(inputs, cfg);
   const total    = computeScheduleCost(
     powerKw, socKwh, inputs, cfg, dp.terminalPrice
@@ -944,7 +953,7 @@ function runOptimizer(cfg, currentSocKwh, inputs) {
   // Subtract initial terminal value so savings = 0 when battery is idle,
   // regardless of how much energy is already stored.
   // Mirrors: savings = baseline - initial_terminal_value - total_cost
-  const initialStoredKwh = currentSocKwh - cfg.minSocKwh;  // linear, see computeScheduleCost
+  const initialStoredKwh = currentSocKwh - dp.minSocWh / 1000;  // linear, see computeScheduleCost
   const savings = baseline - initialStoredKwh * dp.terminalPrice - total;
 
   return {

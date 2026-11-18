@@ -520,7 +520,8 @@ def _n_states_below_min(current_soc_wh, min_soc_wh, soc_resolution_wh):
     """Number of DP states below min_soc (mirrors optimizer.n_states_below_min)."""
     if current_soc_wh >= min_soc_wh or soc_resolution_wh <= 0:
         return 0
-    return math.ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh - 1e-9)
+    n_below = math.ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh - 1e-9)
+    return min(n_below, MAX_SOC_STATES)
 
 
 def _deficit_penalty_per_kwh(
@@ -573,8 +574,11 @@ def run_dp(
 
     # Coarsen the SoC grid for large batteries so the state count stays
     # bounded (mirrors optimizer.py).
+    # The below-min extension (see _n_states_below_min) shares the budget.
     soc_resolution_wh = max(
-        float(SOC_RESOLUTION_WH), (max_soc_wh - min_soc_wh) / MAX_SOC_STATES
+        float(SOC_RESOLUTION_WH),
+        (max_soc_wh - min_soc_wh) / MAX_SOC_STATES,
+        max(0.0, min_soc_wh - current_soc_kwh * 1000.0) / MAX_SOC_STATES,
     )
     full_step_hours = (
         step_durations_hours[1] if len(step_durations_hours) > 1 else min_step_hours

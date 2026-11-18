@@ -3474,3 +3474,75 @@ class TestBelowMinSoc:
         assert penalty > (0.4 + 0.03 + 0.025) / 0.9
         # Zero prices still give a strictly positive penalty.
         assert deficit_penalty_per_kwh([0.0], [0.0], curve, 0.0, 0.0) > 0
+
+    def test_rebuild_never_raises_soc_on_discharge_below_min(self):
+        """A discharge left in place below min_soc becomes idle, not a jump up."""
+        from custom_components.battery_controller.optimizer import _rebuild_schedule
+
+        power, modes, soc = _rebuild_schedule(
+            power_schedule_kw=[-1.0],
+            step_durations_hours=[0.25],
+            initial_soc_kwh=0.5,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+        )
+        assert soc == [0.5, 0.5]
+        assert power == [0.0]
+        assert modes == ["idle"]
+
+    def test_micro_filter_keeps_small_refill_below_min(self):
+        """A refill smaller than MIN_CYCLE_KWH is kept; elsewhere it is filtered."""
+        args = dict(
+            power_schedule_kw=[0.4, 0.0, 0.0],
+            mode_schedule=["charging", "idle", "idle"],
+            step_durations_hours=[0.25] * 3,
+            min_soc_kwh=1.0,
+            max_soc_kwh=9.0,
+            charge_curve=_flat_curve(0.95),
+            discharge_curve=_flat_curve(0.95),
+            min_cycle_kwh=0.2,
+        )
+        kept, _, _ = _filter_micro_cycles(
+            initial_soc_kwh=0.95, soc_schedule_kwh=[0.95, 1.045, 1.045, 1.045], **args
+        )
+        assert kept[0] == pytest.approx(0.4)
+        dropped, _, _ = _filter_micro_cycles(
+            initial_soc_kwh=5.0, soc_schedule_kwh=[5.0, 5.095, 5.095, 5.095], **args
+        )
+        assert dropped[0] == 0.0
+
+    def test_shadow_price_ignores_deficit_penalty(self):
+        """Refill infeasible (tiny charge power): λ must not carry the penalty."""
+        config = BatteryConfig(
+            capacity_kwh=10.0,
+            max_charge_power_kw=0.1,
+            max_discharge_power_kw=3.0,
+            min_soc_percent=20.0,
+            max_soc_percent=90.0,
+        )
+        result = self._run(config, 0.5)
+        penalty = deficit_penalty_per_kwh(
+            self.PRICES,
+            [0.07] * len(self.PRICES),
+            config.charge_efficiency_curve_parsed,
+            0.03,
+            0.025,
+        )
+        assert result.shadow_price_eur_kwh < penalty / 2
+
+    def test_large_deficit_keeps_state_budget(self):
+        """Nearly empty large battery with a high min_soc: grid coarsened, not huge."""
+        res = compute_soc_resolution_wh(25_000, 45_000, 0.0)
+        assert res >= 25_000 / MAX_SOC_STATES
+        assert n_states_below_min(0.0, 25_000, res) <= MAX_SOC_STATES
+        config = BatteryConfig(
+            capacity_kwh=50.0,
+            max_charge_power_kw=5.0,
+            max_discharge_power_kw=5.0,
+            min_soc_percent=50.0,
+            max_soc_percent=90.0,
+        )
+        result = self._run(config, 0.0)
+        assert "charging" in result.mode_schedule
