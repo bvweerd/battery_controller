@@ -383,6 +383,9 @@
       },
       "battery_discharge_eff_correction": {
         "name": "Discharge Efficiency Correction"
+      },
+      "pv_array_calibration": {
+        "name": "PV Forecast Correction"
       }
     },
     "number": {

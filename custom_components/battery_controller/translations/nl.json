@@ -383,6 +383,9 @@
       },
       "battery_discharge_eff_correction": {
         "name": "Ontlaadefficiëntie-correctie"
+      },
+      "pv_array_calibration": {
+        "name": "Correctie PV-voorspelling"
       }
     },
     "number": {

@@ -5431,3 +5431,100 @@ def test_commitment_releases_near_empty_with_zero_min_soc(hass):
     )
 
     assert locked is False
+
+
+def _discharge_result(power_kw: float, shadow: float) -> OptimizationResult:
+    return OptimizationResult(
+        power_schedule_kw=[power_kw],
+        mode_schedule=[ACTION_DISCHARGING],
+        soc_schedule_kwh=[5.0, 5.0 + power_kw * 0.25],
+        total_cost=0.0,
+        baseline_cost=0.0,
+        savings=0.0,
+        optimal_power_kw=power_kw,
+        optimal_mode=ACTION_DISCHARGING,
+        shadow_price_eur_kwh=shadow,
+        price_forecast=[0.35],
+        pv_forecast=[0.0],
+        consumption_forecast=[1.5],
+    )
+
+
+def test_hybrid_discharge_for_own_load_is_valued_at_the_buy_price(hass):
+    """A planned discharge that covers the house's own load is not vetoed.
+
+    Valued at the feed-in price (0.10 x eff < shadow 0.20) the plan used to be
+    overruled while the house imported at 0.35; covering own load it is worth
+    the buy price.
+    """
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+
+    mode, power = coord._resolve_effective_mode(
+        _discharge_result(-1.0, shadow=0.20),
+        current_grid=1500.0,  # house short by 1.5 kW, battery idle
+        resampled_feed_in=[0.10],
+        hybrid_deadband_w=50.0,
+        battery_power_w=0.0,
+        current_price=0.35,
+    )
+
+    assert mode == ACTION_DISCHARGING
+    assert power == pytest.approx(-1.0)
+
+
+def test_hybrid_discharge_for_export_still_uses_the_feed_in_price(hass):
+    """With no own load to cover, the export value decides as before."""
+    coord = _make_coordinator(hass)
+    coord._control_mode = MODE_HYBRID
+
+    mode, _power = coord._resolve_effective_mode(
+        _discharge_result(-1.0, shadow=0.20),
+        current_grid=-500.0,  # PV surplus: everything discharged is exported
+        resampled_feed_in=[0.10],
+        hybrid_deadband_w=50.0,
+        battery_power_w=0.0,
+        current_price=0.35,
+    )
+
+    assert mode != ACTION_DISCHARGING
+
+
+@pytest.mark.asyncio
+async def test_zero_grid_disabled_publishes_battery_controlled_setpoint(
+    hass, optimization_run
+):
+    """zero_grid_enabled = False leaves zero-grid to the battery itself."""
+    h = optimization_run()
+    h.coord._control_mode = MODE_ZERO_GRID
+    h.coord._power_consumption_sensors = ["sensor.import_w"]
+    h.coord.config["zero_grid_enabled"] = False
+    h.control_action = {"target_power_kw": 0.8, "target_power_w": 800.0}
+
+    data = await h.run()
+
+    assert h.coord._realtime_control_enabled is False
+    assert data["control_action"]["target_power_w"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_historical_price_fallback_is_anchored_on_the_hour(
+    hass, optimization_run, monkeypatch
+):
+    """The model fallback asks for whole hours, not 'now + n hours'."""
+    h = optimization_run()
+    h.now = h.now.replace(minute=23)
+    h.price_sensor_state = "unavailable"
+    h.price_model_has_data = True
+    calls = []
+
+    def _forecast(hours=24, start_time=None, **_kw):
+        calls.append(start_time)
+        return [0.2] * hours
+
+    monkeypatch.setattr(h.coord._price_model, "forecast", _forecast)
+
+    await h.run()
+
+    assert calls, "historical model was not consulted"
+    assert calls[0].minute == 0 and calls[0].second == 0

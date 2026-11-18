@@ -737,7 +737,11 @@ class BatterySubentrySetpointSensor(BatteryControllerSensor):
     ):
         super().__init__(coordinator, device, entry, f"setpoint_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"Battery Setpoint {battery_title}"
+        # The battery's own device already carries its name, and with
+        # has_entity_name HA prefixes it; repeating it here gave names like
+        # "Marstek Battery Setpoint Marstek".
+        self._attr_translation_key = "battery_subentry_setpoint"
+        self._attr_name = "Battery Setpoint"
 
     @property
     def native_value(self) -> float | None:
@@ -781,7 +785,8 @@ class BatterySubentrySoCSensor(BatteryControllerSensor):
     ):
         super().__init__(coordinator, device, entry, f"soc_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"State of Charge {battery_title}"
+        self._attr_translation_key = "battery_subentry_soc"
+        self._attr_name = "State of Charge"
 
     @property
     def native_value(self) -> float | None:
@@ -827,7 +832,8 @@ class PVArrayForecastSensor(BatteryForecastSensor):
     ):
         super().__init__(coordinator, device, entry, f"pv_array_forecast_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"PV Forecast {array_title}"
+        self._attr_translation_key = "pv_array_forecast"
+        self._attr_name = "PV Forecast"
 
     @property
     def native_value(self) -> float | None:
@@ -886,11 +892,29 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             return "failed"
         last_success = self.coordinator.last_success_time
         if last_success is not None:
-            interval = self.coordinator.update_interval or timedelta(minutes=15)
             age = dt_util.utcnow() - last_success
-            if age > interval * 2.5:
+            if age > self._stale_after():
                 return "stale"
         return "ok"
+
+    def _stale_after(self) -> timedelta:
+        """Age after which the last successful run counts as stale.
+
+        Runs are driven by the price periods (a boundary run plus a mid-period
+        run), not by the coordinator's 60-minute fallback interval, so two
+        missed price periods is the meaningful threshold: 30 min with
+        quarter-hourly prices, 2 h with hourly ones. Deriving it from the
+        fallback interval left a stuck optimizer reported "ok" for 2.5 hours.
+        """
+        price_interval_min = 60.0
+        if self.coordinator.data:
+            try:
+                price_interval_min = float(
+                    self.coordinator.data.get("price_interval") or 60
+                )
+            except (TypeError, ValueError):
+                price_interval_min = 60.0
+        return timedelta(minutes=max(30.0, 2 * price_interval_min))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -908,6 +932,7 @@ class OptimizationStatusSensor(BatteryControllerSensor):
             "last_success": str(last_success) if last_success else None,
             "age_minutes": age_minutes,
             "update_interval_minutes": interval.total_seconds() / 60,
+            "stale_after_minutes": self._stale_after().total_seconds() / 60,
         }
         if self.coordinator.data is None:
             return attrs
@@ -1051,7 +1076,7 @@ class BatterySubentryCalibrationSensor(BatteryEfficiencyCalibrationSensor):
     ):
         super().__init__(coordinator, device, entry, f"{self._key}_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"{self._title} {battery_title}"
+        self._attr_name = self._title
 
     _title = ""
 
@@ -1114,7 +1139,8 @@ class PVArrayCalibrationSensor(BatteryForecastSensor):
     ):
         super().__init__(coordinator, device, entry, f"pv_calibration_{subentry_id}")
         self._subentry_id = subentry_id
-        self._attr_name = f"PV Forecast Correction {array_title}"
+        self._attr_translation_key = "pv_array_calibration"
+        self._attr_name = "PV Forecast Correction"
 
     @property
     def native_value(self) -> float:

@@ -6,7 +6,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -75,7 +74,6 @@ class PVCurtailmentSensor(BatteryControllerBinarySensor):
 
     _attr_translation_key = "pv_curtailment"
     _attr_name = "PV Curtailment Suggested"
-    _attr_device_class = BinarySensorDeviceClass.RUNNING
 
     def __init__(
         self,
@@ -123,7 +121,6 @@ class UseMaxPowerSensor(BatteryControllerBinarySensor):
 
     _attr_translation_key = "use_max_power"
     _attr_name = "Use Maximum Power Suggested"
-    _attr_device_class = BinarySensorDeviceClass.RUNNING
 
     def __init__(
         self,

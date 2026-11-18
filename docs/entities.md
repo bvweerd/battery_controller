@@ -59,7 +59,7 @@ All *disabled by default*.
 | Wind Speed | m/s | Current wind speed from open-meteo; logged to the recorder to train the price model |
 | Current Grid Power | kW | Measured grid exchange used by the zero-grid controller |
 | Control Mode | — | Active control mode (diagnostic mirror of the select entity) |
-| Optimization Status | — | Optimizer health: `ok`, `stale`, `failed`, `disabled`, or `initializing` |
+| Optimization Status | — | Optimizer health: `ok`, `stale` (no successful run for two price periods, at least 30 min), `failed`, `disabled`, or `initializing` |
 
 !!! tip
     **Solar Irradiance** and **Wind Speed** feed the self-learning historical price model.
@@ -82,7 +82,7 @@ Both are suggestions, not actions. Wire them to an automation if you want them a
 
 | Entity | Description |
 |--------|-------------|
-| Optimization Enabled | Pause or resume the optimizer without changing any other setting. State is restored across Home Assistant restarts. |
+| Optimization Enabled | Pause or resume the optimizer without changing any other setting. While paused no planned charge or discharge is executed (the plan is no longer refreshed); zero-grid and manual control keep working. State is restored across Home Assistant restarts. |
 
 ---
 

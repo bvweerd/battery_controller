@@ -1551,3 +1551,20 @@ class TestPriceSharpeningShrinkage:
         )
         # Bin has too few samples → falls through to the overall average
         assert result[0] == pytest.approx(0.25)
+
+
+def test_consumption_forecast_hours_stay_aligned_across_dst():
+    """Each forecast hour lands in its real local hour-of-day across a DST change.
+
+    Europe/Amsterdam springs forward at 02:00 on 2026-03-29: four real hours
+    from midnight are local 00, 01, 03 and 04 — not 00..03 as wall-clock
+    arithmetic gave.
+    """
+    from zoneinfo import ZoneInfo
+
+    model = ConsumptionForecastModel(hass=MagicMock())
+    sunday = 6
+    model._hourly_pattern = {(h, sunday): float(h) for h in range(24)}
+    start = datetime(2026, 3, 29, 0, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+
+    assert model.forecast(hours=4, start_time=start) == [0.0, 1.0, 3.0, 4.0]

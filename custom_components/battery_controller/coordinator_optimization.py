@@ -76,7 +76,9 @@ from .const import (
     CONF_PV_DC_COUPLED,
     CONF_PV_DC_PEAK_POWER_KWP,
     CONF_ZERO_GRID_DEADBAND_W,
+    CONF_ZERO_GRID_ENABLED,
     DEFAULT_ZERO_GRID_DEADBAND_W,
+    DEFAULT_ZERO_GRID_ENABLED,
     MODE_FOLLOW_SCHEDULE,
     MODE_HYBRID,
     MODE_HYBRID_PLUS,
@@ -749,9 +751,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         # with state-change tracking each sensor fires a separate event,
         # causing the zero_grid integrator to run twice in rapid succession
         # and double the setpoint. A fixed interval reads all sensors at once.
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
+        has_power_sensors = self._realtime_control_enabled
         if has_power_sensors:
             # Single source: create_zero_grid_controller already parsed this
             # from the config, so re-reading it here could drift.
@@ -1405,6 +1405,19 @@ class OptimizationCoordinator(DataUpdateCoordinator):
             CONF_ZERO_GRID_DEADBAND_W, DEFAULT_ZERO_GRID_DEADBAND_W
         )
 
+    @property
+    def _realtime_control_enabled(self) -> bool:
+        """Whether this integration runs the real-time zero-grid loop itself.
+
+        Needs grid power sensors to measure against, and the user can switch it
+        off (CONF_ZERO_GRID_ENABLED) to leave zero-grid to the battery's own
+        controller — the same behaviour as having no power sensors: no ~5 s
+        loop, and a zero_grid step publishes a 0 W setpoint.
+        """
+        if not bool(self.config.get(CONF_ZERO_GRID_ENABLED, DEFAULT_ZERO_GRID_ENABLED)):
+            return False
+        return bool(self._power_consumption_sensors or self._power_production_sensors)
+
     def _sync_controller_deadband(self) -> None:
         """Hand the live deadband option to the zero-grid controller.
 
@@ -1450,9 +1463,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         Returns:
             Controller mode string for ZeroGridController.
         """
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
+        has_power_sensors = self._realtime_control_enabled
 
         if effective_mode == "zero_grid":
             return "zero_grid"
@@ -2611,18 +2622,36 @@ class OptimizationCoordinator(DataUpdateCoordinator):
                 effective_power = 0.0
             elif result.optimal_mode == ACTION_DISCHARGING:
                 # Decide: full-rate export vs zero_grid (self-consumption only).
-                # Use shadow price as the threshold: net sell value per kWh
-                # stored = feed_in × discharge_eff at the planned power — the
+                # Use shadow price as the threshold: net value per kWh stored =
+                # delivered value × discharge_eff at the planned power — the
                 # same efficiency the DP priced this action with. If that
                 # exceeds the shadow price (the value of keeping the energy for
-                # future use), exporting is better.
+                # future use), discharging now is better.
                 #
                 # Hysteresis (P3.1): apply a ±5% band around the threshold to prevent
                 # oscillation when shadow_price ≈ net_sell_value.
                 # • Was discharging → continue unless net_sell_value < threshold × 0.95
                 # • Was not discharging → start only if net_sell_value ≥ threshold × 1.05
                 current_feed_in = self._current_feed_in_price(resampled_feed_in)
-                net_sell_value = current_feed_in * self._discharge_efficiency_at(
+                # Value each delivered kWh by where it goes: the part that
+                # covers the house's own shortfall displaces import at the buy
+                # price, only the remainder is exported at the feed-in price.
+                # Pricing all of it at feed-in (as before) vetoed planned
+                # self-consumption discharges while the house imported at the
+                # peak price. Same split as the oscillation filter's
+                # get_discharge_value.
+                discharge_kw = abs(result.optimal_power_kw)
+                to_self_kw = min(discharge_kw, max(0.0, -surplus_w) / 1000.0)
+                delivered_value = (
+                    (
+                        to_self_kw * current_price
+                        + (discharge_kw - to_self_kw) * current_feed_in
+                    )
+                    / discharge_kw
+                    if discharge_kw > 0
+                    else current_feed_in
+                )
+                net_sell_value = delivered_value * self._discharge_efficiency_at(
                     result.optimal_power_kw
                 )
                 threshold = result.shadow_price_eur_kwh
@@ -2986,11 +3015,16 @@ class OptimizationCoordinator(DataUpdateCoordinator):
         if not price_forecast:
             # Sensor unavailable or has no forecast attributes: try historical model
             if self._price_model.has_data():
-                weather_data = self.weather_coordinator.data or {}
-                price_forecast = self._price_model.forecast(
-                    hours=24,
-                    ghi_forecast=weather_data.get("radiation_forecast"),
-                    wind_forecast=weather_data.get("wind_speed_forecast"),
+                # Anchor the model on real hour boundaries, through the same
+                # helper the horizon extension uses: it slices the weather
+                # features to those hours and buckets by local hour-of-day.
+                # Asking the model for "24 hours from now" instead put the
+                # series up to an hour off and fed it weather from the hour of
+                # the last weather fetch.
+                hour_start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+                price_start_times = [hour_start + timedelta(hours=i) for i in range(24)]
+                price_forecast = self._model_series(
+                    self._price_model, price_start_times, [1.0] * 24
                 )
                 price_interval = 60
                 price_forecast_source = "historical_model"
@@ -3464,9 +3498,7 @@ class OptimizationCoordinator(DataUpdateCoordinator):
 
         # Battery-controlled zero_grid: if no power sensors but mode is zero_grid,
         # set setpoint to 0 (battery inverter will handle zero_grid with its own sensors)
-        has_power_sensors = bool(
-            self._power_consumption_sensors or self._power_production_sensors
-        )
+        has_power_sensors = self._realtime_control_enabled
         if not has_power_sensors and effective_mode == "zero_grid":
             control_action["target_power_w"] = 0.0
             control_action["target_power_kw"] = 0.0

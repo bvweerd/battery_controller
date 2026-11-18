@@ -1361,3 +1361,17 @@ async def test_options_flow_partial_submit_applies_defaults_and_empty_lists(
     assert v4_config_entry.options["zero_grid_enabled"] is True
     assert v4_config_entry.options["zero_grid_response_time_s"] == 10.0
     assert v4_config_entry.options["max_grid_power_kw"] == 0.0
+
+
+def test_fixed_feed_in_price_may_be_negative() -> None:
+    """A feed-in fee (terugleverkosten) is a negative fixed feed-in price."""
+    from custom_components.battery_controller.config_flow import _build_main_schema
+
+    validated = _build_main_schema()(
+        {
+            "sensors": {"price_sensor": "sensor.price"},
+            "advanced": {"fixed_feed_in_price": -0.1},
+        }
+    )
+
+    assert validated["advanced"]["fixed_feed_in_price"] == -0.1

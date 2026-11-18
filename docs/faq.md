@@ -116,8 +116,9 @@ individual charge and discharge decision, including the ones it declined to make
 In Hybrid and Hybrid+ the DP schedule is a plan, not a command: **Optimal Mode** is what
 the controller actually does, **Schedule Mode** is what the plan wanted. They differ when
 the shadow price overrules the plan — a planned discharge is only executed while
-`feed_in × discharge_eff ≥ λ`, because below that the energy is worth more later than
-selling it now pays.
+`value × discharge_eff ≥ λ`, where `value` is the buy price for the part that covers
+your own load and the feed-in price for the exported rest. Below that the energy is
+worth more later than using it now.
 
 A held discharge means idle, not charging. If you see charging while the plan says
 discharging, the surplus capture must have been worth more than exporting

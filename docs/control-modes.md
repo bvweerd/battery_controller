@@ -116,8 +116,10 @@ consumption spikes — a cloud passing over the panels while a large appliance s
 — instead of pulling from the grid.
 
 The one exception is a **vetoed discharge**. When the DP plans to discharge but the
-shadow price says the energy is worth more later than the current feed-in price pays,
-Hybrid overrules the plan and holds. That veto is a decision to keep energy, so it does
+shadow price says the energy is worth more later than discharging now pays, Hybrid
+overrules the plan and holds. "What discharging now pays" counts the part that covers
+the house's own load at the buy price and only the exported remainder at the feed-in
+price. That veto is a decision to keep energy, so it does
 not fall through to zero-grid unless storing the surplus also beats exporting it
 (`λ × charge_eff ≥ feed-in`) — otherwise the mode that just refused to sell at the
 feed-in price would immediately buy PV surplus at that same price. Both Hybrid and

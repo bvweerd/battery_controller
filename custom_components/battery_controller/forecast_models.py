@@ -36,6 +36,19 @@ def _get_season(month: int) -> int:
     ]
 
 
+def _add_hours(start: datetime, hours: int) -> datetime:
+    """``start`` plus a number of real hours, in ``start``'s own time zone.
+
+    Adding a timedelta to an aware datetime is wall-clock arithmetic in Python,
+    so across a DST change every later hour landed one hour-of-day bucket off.
+    Stepping in UTC and converting back keeps elapsed time and the bucket in
+    step. Naive datetimes keep plain arithmetic: they have no offset to change.
+    """
+    if start.tzinfo is None:
+        return start + timedelta(hours=hours)
+    return (start.astimezone(UTC) + timedelta(hours=hours)).astimezone(start.tzinfo)
+
+
 class PVForecastModel:
     """Model for PV production forecasting."""
 
@@ -483,7 +496,7 @@ class ConsumptionForecastModel:
 
         forecast = []
         for h in range(hours):
-            dt = start_time + timedelta(hours=h)
+            dt = _add_hours(start_time, h)
             hour = dt.hour
             dow = dt.weekday()
             season = _get_season(dt.month)
@@ -804,7 +817,7 @@ class PriceForecastModel:
 
         result = []
         for h in range(hours):
-            step_time = start_time + timedelta(hours=h)
+            step_time = _add_hours(start_time, h)
             hour = step_time.hour
             dow = step_time.weekday()
             price: float | None = None

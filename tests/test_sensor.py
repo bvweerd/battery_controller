@@ -916,9 +916,20 @@ class TestOptimizationStatusSensor:
         assert sensor.native_value == "ok"
 
     def test_stale_when_old_update(self):
-
+        """Quarter-hourly prices: stale after two missed periods (30 min)."""
         old = dt_util.utcnow() - timedelta(minutes=60)
         sensor = self._sensor({"last_success_time": old})
+        sensor.coordinator.data = {"price_interval": 15}
+        assert sensor.native_value == "stale"
+
+    def test_stale_threshold_follows_hourly_prices(self):
+        """Hourly prices: a run 60 min ago is fine, 130 min ago is stale."""
+        sensor = self._sensor(
+            {"last_success_time": dt_util.utcnow() - timedelta(minutes=60)}
+        )
+        sensor.coordinator.data = {"price_interval": 60}
+        assert sensor.native_value == "ok"
+        sensor.coordinator.last_success_time = dt_util.utcnow() - timedelta(minutes=130)
         assert sensor.native_value == "stale"
 
     def test_extra_attrs_basic(self):
@@ -1504,7 +1515,9 @@ def test_per_battery_calibration_names_the_battery_and_direction():
     )
 
     assert charge.unique_id != discharge.unique_id
-    assert "Marstek" in charge.name
+    # The battery is named by its device (has_entity_name prefixes it), so the
+    # entity name itself must not repeat it: "Marstek Charge ... Marstek".
+    assert "Marstek" not in charge.name
     assert charge.name != discharge.name
 
 
@@ -1622,3 +1635,22 @@ def test_every_sensor_pairs_a_legal_device_and_state_class():
 
     assert checked > 10, f"only {checked} sensors instantiated; the walk is broken"
     assert not offenders, "illegal device/state class pairs: " + ", ".join(offenders)
+
+
+def test_per_subentry_sensor_names_do_not_repeat_the_device_name():
+    """Setpoint, SoC and PV-array sensors leave the device name to the device."""
+    coord = _make_opt_coord()
+    entry = _make_entry()
+    setpoint = BatterySubentrySetpointSensor(
+        coord, _make_device(), entry, "bat1", "Marstek"
+    )
+    soc = BatterySubentrySoCSensor(coord, _make_device(), entry, "bat1", "Marstek")
+    fc_coord = _make_forecast_coord()
+    pv = PVArrayForecastSensor(fc_coord, _make_device(), entry, "pv1", "Roof")
+    pv_cal = PVArrayCalibrationSensor(fc_coord, _make_device(), entry, "pv1", "Roof")
+
+    assert setpoint.name == "Battery Setpoint"
+    assert soc.name == "State of Charge"
+    assert pv.name == "PV Forecast"
+    assert pv_cal.name == "PV Forecast Correction"
+    assert pv_cal.translation_key == "pv_array_calibration"

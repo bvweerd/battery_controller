@@ -14,7 +14,7 @@ from .const import (
 from .efficiency_curve import (
     EfficiencyCurve,
     aggregate_curves_concentrated,
-    parse_efficiency_curve,
+    parse_efficiency_curve_lenient,
     representative_efficiency,
 )
 
@@ -68,10 +68,14 @@ class BatteryConfig:
 
     def __post_init__(self) -> None:
         """Calculate derived values."""
-        self.charge_efficiency_curve_parsed = parse_efficiency_curve(
+        # Lenient: these strings come from storage, and a curve saved under the
+        # older, looser grammar must still load (with a warning) instead of
+        # failing the whole integration. New input is validated strictly in
+        # the config flow.
+        self.charge_efficiency_curve_parsed = parse_efficiency_curve_lenient(
             self.charge_efficiency_curve, self.max_charge_power_kw
         )
-        self.discharge_efficiency_curve_parsed = parse_efficiency_curve(
+        self.discharge_efficiency_curve_parsed = parse_efficiency_curve_lenient(
             self.discharge_efficiency_curve, self.max_discharge_power_kw
         )
         # Representative scalar efficiency (mean over 5..95 % of nominal power) —
