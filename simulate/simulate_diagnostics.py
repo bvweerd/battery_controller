@@ -1178,9 +1178,13 @@ def _rebuild_schedule(
             _discharge_eff = _interpolate_efficiency(
                 discharge_curve, abs(commanded_power_kw)
             )
+            # Floor at min_soc, but never above where the SoC already is: a
+            # discharge left in place while the SoC is below min_soc (after a
+            # filter removed the refill before it) must become idle, not a
+            # jump UP to min_soc.
             current_soc_kwh = max(
                 current_soc_kwh - abs(commanded_power_kw) * step_h / _discharge_eff,
-                min_soc_kwh,
+                min(min_soc_kwh, current_soc_kwh),
             )
             delta_soc = current_soc_kwh - prev_soc_kwh
             actual_power_kw = delta_soc * _discharge_eff / step_h if step_h > 0 else 0.0
@@ -1258,7 +1262,13 @@ def _calculate_schedule_total_cost(
         )
 
     final_soc_kwh = soc_schedule_kwh[-1] if soc_schedule_kwh else 0.0
-    final_stored_kwh = max(0.0, final_soc_kwh - battery_config.min_soc_kwh)
+    # Linear in both directions: a schedule that starts below min_soc and ends
+    # there too is valued the same way as the initial SoC (see savings), so an
+    # idle schedule still reports zero savings and a refill is credited at the
+    # terminal price rather than counted as a pure loss.
+    # Same Wh-rounded min_soc as the DP grid, so a schedule that drains exactly
+    # to the DP's min_soc is not valued as a tiny deficit.
+    final_stored_kwh = final_soc_kwh - round(battery_config.min_soc_kwh * 1000) / 1000
     total_cost -= final_stored_kwh * terminal_price
     return total_cost
 
@@ -1487,6 +1497,7 @@ def _filter_micro_cycles(
     pv_dc_efficiency: float = 0.97,
     min_cycle_kwh: float = 0.2,
     max_charge_power_kw: float = 0.0,
+    soc_schedule_kwh: list[float] | None = None,
 ) -> tuple[list[float], list[str], list[float]]:
     """Filter out micro-cycles whose total energy is below min_cycle_kwh.
 
@@ -1515,6 +1526,10 @@ def _filter_micro_cycles(
         initial_soc_kwh: Initial SoC in kWh
         step_durations_hours: Per-step duration in hours
         min_cycle_kwh: Minimum energy per charge/discharge block in kWh
+        soc_schedule_kwh: SoC trajectory of the input schedule. When given, a
+            charge block that starts below min_soc is never suppressed: it is
+            the refill back to the reserve, not avoidable wear, and dropping
+            it would leave the battery below min_soc run after run.
 
     Returns:
         Filtered (power_schedule, mode_schedule, soc_schedule)
@@ -1566,7 +1581,13 @@ def _filter_micro_cycles(
                 total_energy_kwh += power_kw * step_h / eff if eff > 0 else 0.0
             j += 1
 
-        if total_energy_kwh < min_cycle_kwh:
+        is_refill = (
+            current_dir == "charging"
+            and soc_schedule_kwh is not None
+            and i < len(soc_schedule_kwh)
+            and soc_schedule_kwh[i] < min_soc_kwh - 1e-9
+        )
+        if total_energy_kwh < min_cycle_kwh and not is_refill:
             for k in range(i, j):
                 filtered_power[k] = 0.0
                 filtered_mode[k] = "idle"
@@ -1624,6 +1645,7 @@ def post_process(
     degradation_cost,
     min_price_spread,
     terminal_price,
+    soc_resolution_wh,
     pv_dc_forecast=None,
     charge_eff_curve_override=None,
     discharge_eff_curve_override=None,
@@ -1671,6 +1693,26 @@ def post_process(
 
     raw_total = _price(power_schedule_kw, soc_schedule_kwh)
 
+    # Ending below min_soc carries the DP's deficit penalty in the cost guard,
+    # so the filter cannot undo a refill the DP planned on purpose (mirrors
+    # _deficit_surcharge in optimizer.py, #215).
+    min_soc_wh = round(battery.min_soc_kwh * 1000)
+    deficit_penalty = _deficit_penalty_per_kwh(
+        price_forecast[:n_steps],
+        feed_in,
+        charge_curve,
+        degradation_cost,
+        max(0.0, min_price_spread) / 2.0,
+    )
+
+    def _deficit_surcharge(soc_kwh):
+        deficit_kwh = min_soc_wh / 1000.0 - (soc_kwh[-1] if soc_kwh else 0.0)
+        if deficit_kwh * 1000.0 <= soc_resolution_wh / 2.0:
+            return 0.0
+        return deficit_kwh * (deficit_penalty - terminal_price)
+
+    raw_objective = raw_total + _deficit_surcharge(soc_schedule_kwh)
+
     osc_power, osc_modes, osc_soc = _filter_oscillations(
         power_schedule_kw=power_schedule_kw,
         mode_schedule=mode_schedule,
@@ -1695,7 +1737,7 @@ def post_process(
         max_charge_power_kw=battery.max_charge_power_kw,
         max_discharge_power_kw=battery.max_discharge_power_kw,
     )
-    if _price(osc_power, osc_soc) <= raw_total:
+    if _price(osc_power, osc_soc) + _deficit_surcharge(osc_soc) <= raw_objective:
         power_schedule_kw, mode_schedule, soc_schedule_kwh = (
             osc_power,
             osc_modes,
@@ -1716,6 +1758,7 @@ def post_process(
         charge_curve=charge_curve,
         discharge_curve=discharge_curve,
         max_charge_power_kw=battery.max_charge_power_kw,
+        soc_schedule_kwh=soc_schedule_kwh,
     )
     total = _price(power_schedule_kw, soc_schedule_kwh)
     return power_schedule_kw, mode_schedule, soc_schedule_kwh, raw_total, total
@@ -2335,6 +2378,7 @@ def main():
         degradation_cost,
         min_price_spread,
         terminal_price,
+        soc_resolution_wh,
         pv_dc_forecast=pv_dc_forecast,
         charge_eff_curve_override=charge_eff_curve_override,
         discharge_eff_curve_override=discharge_eff_curve_override,
