@@ -40,6 +40,10 @@ Always do the following after modifying any source file:
 4. **Update `simulate_diagnostics.py`** — if inputs, outputs, or data structures changed
 5. **Update `docs/analyzer/index.html`** — if the simulator UI or displayed parameters changed
 
+## Pull requests
+- **Always run a code review before opening a PR** (`/code-review` on the diff), fix the valid findings, and only then create the PR.
+- PRs target `dev`; `dev` is merged into `main` via a separate PR.
+
 ## Keeping DP implementations in sync
 There are three DP implementations that **must always be kept identical** in algorithm, constants, and cost semantics:
 - `custom_components/battery_controller/optimizer.py` — the integration (source of truth)

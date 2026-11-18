@@ -115,6 +115,16 @@ soc_states[i]    = min_soc_wh + i × soc_resolution_wh
 - Because the power step is derived from the resolution (§3.2), a coarser grid also widens the action step, compounding the speedup on large batteries.
 - The resolution is shrunk so the grid divides the usable range exactly, making the top state exactly `max_soc_wh`. With a fixed resolution a range that is not a whole multiple of it left the last few Wh unreachable, and the fill-to-max boundary action then charged to a SoC that the state it was credited to did not represent. Shrinking the step rather than adding a state keeps the `MAX_SOC_STATES` budget intact.
 - SoC boundaries are rounded to the nearest Wh to prevent floating-point comparison errors (e.g. `212.0 < 212.00000000000003`).
+- **Below-min start.** When the current SoC lies below `min_soc` (BMS reserve, a raised `min_soc` setting, self-discharge), the grid is extended downward with the same resolution so that `min_soc` stays a grid point and the current SoC is covered:
+
+  ```
+  min_soc_idx  = ceil((min_soc_wh - current_soc_wh) / soc_resolution_wh)   # 0 when at/above min
+  soc_states[i] = min_soc_wh + (i - min_soc_idx) × soc_resolution_wh
+  ```
+
+  The deficit shares the state budget: `soc_res_target` also takes `(min_soc_wh - current_soc_wh) / MAX_SOC_STATES` into account, and `min_soc_idx` is capped at `MAX_SOC_STATES`, so a nearly empty large battery with a high `min_soc` (or a SoC sensor reporting 0) coarsens the grid instead of multiplying the DP runtime.
+
+  These states are reachable only from a below-min start: discharging is still forbidden whenever it would end below `min_soc`, and the drain-to-min boundary action targets `soc_states[min_soc_idx]`. Without these states the current SoC snapped onto the `min_soc` state, every charge step too small to reach the next state was rejected as sub-resolution, and the whole schedule came out idle exactly when the battery needed charging (issue #215).
 
 ### 3.2 Power Action Grid
 
@@ -332,6 +342,16 @@ V[T][s] = -(stored_kwh × terminal_price)
 
 where `stored_kwh = (soc_wh - min_soc_wh) / 1000`.
 
+For states below `min_soc` (`stored_kwh < 0`, see §3.1) the deficit is charged at a penalty instead:
+
+```
+V[T][s] = -stored_kwh × deficit_penalty          # stored_kwh < 0
+deficit_penalty = 2 × (max(0, max buy price, max feed-in price) + degradation + arbitrage_hurdle)
+                    / min(charge efficiency curve) + 0.10
+```
+
+The penalty exceeds the most expensive way to store one kWh anywhere in the horizon, so the DP always refills to `min_soc` when it physically can — at the cheapest steps — and the penalty never ends up in a feasible schedule. The shadow price is computed from states at or above `min_soc` only (see §9), so the penalty never reaches the shadow-price sensor or the hybrid-mode thresholds, even when a full refill does not fit in the horizon.
+
 The negative sign is because `V` represents cost — more stored energy means lower cost (more future value).
 
 **Choosing `terminal_price`:**
@@ -510,6 +530,8 @@ Very short charge or discharge segments (e.g. a single 15-minute slot) move so l
 
 Block energy is measured on the **battery** side — `P × charge_eff × dt` when charging, `P / discharge_eff × dt` when discharging — which is the quantity that actually wears the cells and the same one degradation is priced on. Measuring the AC setpoint instead misjudged blocks near the threshold by the efficiency factor, in opposite directions for the two directions.
 
+A charge block that **starts below `min_soc`** is never suppressed: it is the refill back to the reserve, not avoidable wear, and dropping it would leave the battery below `min_soc` run after run.
+
 Unlike the oscillation filter this is deliberately **not** gated on cost: the wear it avoids is real but unpriced, so a cost guard would disable it entirely. It is not free either — over simulated quarter-hourly days it suppresses a handful of steps per day and costs on the order of 2 % of achievable savings. `MIN_CYCLE_KWH` is the knob: raise it to trade more savings for less wear, lower it for the reverse.
 
 Step 0 is sized on the reference (full) interval rather than its own, shortened duration. It covers only the remainder of the current price period and can be as little as a minute, so measuring it on that duration judged an action by when the optimizer happened to run rather than by its economics — the same correction the oscillation filter applies to its lookahead window.
@@ -526,6 +548,7 @@ The **shadow price** λ is the marginal value of one additional kWh stored in th
 
 - `V` is cost (lower is better), so adding energy reduces cost → the gradient is negative → λ is positive.
 - For boundary SoC states, a one-sided difference is used.
+- Only states at or above `min_soc` enter the difference. At a below-min SoC λ is the marginal value of energy just above `min_soc`; below it V would carry the deficit penalty whenever a full refill does not fit in the horizon (§5).
 
 **Interpretation**:
 Let `chg_r = chg_eff_repr` and `dis_r = dis_eff_repr` (representative scalars, §4.1):
@@ -684,6 +707,7 @@ The **baseline cost** represents the electricity cost without any battery. In th
 - `total_cost`: Recalculated from the filtered schedule via `_calculate_schedule_total_cost`
 - The difference shows the impact of post-processing filters (typically < 0.01 EUR when no actions are filtered, due to floating-point differences in SoC reconstruction)
 - `savings = baseline_cost - initial_terminal_value - total_cost`
+- Both terminal values are linear in `soc - min_soc`, also below `min_soc`, so an idle schedule reports zero savings and a refill from below `min_soc` is credited at `terminal_price`. Real money therefore values a deficit only at `terminal_price`; the oscillation-filter cost guard adds the difference to `deficit_penalty` before comparing (deficits within half a SoC state count as reached), so it cannot remove the refill the DP planned. Both use the Wh-rounded `min_soc` of the DP grid. `_rebuild_schedule` floors a discharge at `min(min_soc, current SoC)`, so a discharge left in place below `min_soc` becomes idle instead of lifting the SoC.
 
 ---
 
